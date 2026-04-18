@@ -1,0 +1,37 @@
+[Unit]
+Description=gosmokeping — modern smokeping replacement
+Documentation=https://github.com/tumult/gosmokeping
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gosmokeping
+Group=gosmokeping
+ExecStart=/usr/local/bin/gosmokeping -config /etc/gosmokeping/config.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# ICMP needs raw sockets. Granted here so the binary itself doesn't need setcap.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+# Hardening — standard systemd knobs.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/gosmokeping
+
+[Install]
+WantedBy=multi-user.target

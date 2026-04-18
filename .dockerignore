@@ -1,0 +1,8 @@
+.git
+.github
+*.md
+ui/node_modules
+ui/dist
+internal/ui/dist
+gosmokeping
+config.json

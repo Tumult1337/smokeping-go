@@ -1,0 +1,202 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: #0f1115;
+  color: #e6e6e6;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid #1f2430;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.sidebar h1 {
+  font-size: 18px;
+  margin: 0 0 16px;
+}
+
+.group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #8a93a6;
+  margin: 16px 0 6px;
+  letter-spacing: 0.06em;
+  background: transparent;
+  border: none;
+  padding: 4px 0;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+.group-title:hover { color: #cfd3dd; }
+.group-caret {
+  display: inline-block;
+  width: 10px;
+  font-size: 10px;
+  color: #4a5160;
+}
+.group-title:hover .group-caret { color: #8a93a6; }
+.group-count {
+  margin-left: auto;
+  font-size: 10px;
+  color: #4a5160;
+  background: #1a1f2b;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.target-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: transparent;
+  color: #cfd3dd;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+}
+.target-item:hover { background: #1a1f2b; }
+.target-item.active { background: #2a3142; color: #fff; }
+
+.main {
+  padding: 24px;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  align-items: center;
+}
+
+.toolbar button {
+  background: #1a1f2b;
+  color: #cfd3dd;
+  border: 1px solid #2a3142;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.toolbar button.active { background: #2a3142; color: #fff; }
+.toolbar button:hover { background: #252b3a; }
+
+.toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: #2a3142;
+  margin: 0 4px;
+}
+
+.hops-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.hops-table th,
+.hops-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid #1f2430;
+}
+.hops-table th {
+  color: #8a93a6;
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+.hops-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.hops-table tr:hover td { background: #1a1f2b; }
+.hops-table .hop-ip { color: #cfd3dd; font-family: monospace; }
+.hops-table .hop-none { color: #4a5160; font-style: italic; }
+.hops-loss-bar {
+  display: inline-block;
+  height: 10px;
+  background: #ef4444;
+  vertical-align: middle;
+  border-radius: 2px;
+}
+
+.hops-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0 10px 0;
+  color: #8a93a6;
+  font-size: 13px;
+}
+.hops-reset {
+  background: #1a1f2b;
+  color: #cfd3dd;
+  border: 1px solid #2a3142;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hops-reset:hover { background: #222837; }
+
+.mtr-heatmap {
+  background: #0f141c;
+  border-radius: 4px;
+}
+
+.empty {
+  color: #8a93a6;
+  font-size: 14px;
+  padding: 32px;
+  text-align: center;
+}
+
+.chart-wrap {
+  background: #141822;
+  border: 1px solid #1f2430;
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.chart-title {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+.error {
+  color: #ff6b6b;
+  padding: 8px 12px;
+  background: #2a1519;
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+
+.stats {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #8a93a6;
+}
+.stats span strong {
+  color: #e6e6e6;
+  margin-left: 4px;
+}
+
+/* Match uPlot dark theme to the page. */
+.u-legend { color: #cfd3dd !important; }
+.u-axis { color: #8a93a6; }

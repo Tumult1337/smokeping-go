@@ -1,0 +1,11 @@
+/gosmokeping
+/config.json
+ui/node_modules/
+ui/dist/
+internal/ui/dist/*
+!internal/ui/dist/.gitkeep
+*.log
+.env
+.DS_Store
+.playwright-mcp/
+.claude/
