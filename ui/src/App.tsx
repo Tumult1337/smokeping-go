@@ -137,10 +137,17 @@ export default function App() {
   }, []);
 
   const groups = useMemo(() => {
-    const byGroup = new Map<string, Target[]>();
+    // Preserve first-seen group_title so the sidebar label honours the config
+    // even if only the first target in a group sets it (they all should, but
+    // we don't want an empty string from a later target to clobber it).
+    const byGroup = new Map<string, { title: string; targets: Target[] }>();
     for (const t of targets) {
-      if (!byGroup.has(t.group)) byGroup.set(t.group, []);
-      byGroup.get(t.group)!.push(t);
+      let entry = byGroup.get(t.group);
+      if (!entry) {
+        entry = { title: t.group_title || t.group, targets: [] };
+        byGroup.set(t.group, entry);
+      }
+      entry.targets.push(t);
     }
     return Array.from(byGroup.entries());
   }, [targets]);
@@ -174,7 +181,7 @@ export default function App() {
       <aside className="sidebar">
         <h1>gosmokeping</h1>
         {groups.length === 0 && <div className="empty">No targets</div>}
-        {groups.map(([group, ts]) => {
+        {groups.map(([group, entry]) => {
           const collapsed = collapsedGroups.has(group);
           return (
             <div key={group}>
@@ -185,17 +192,17 @@ export default function App() {
                 onClick={() => toggleGroup(group)}
               >
                 <span className="group-caret">{collapsed ? "▸" : "▾"}</span>
-                {group}
-                <span className="group-count">{ts.length}</span>
+                {entry.title}
+                <span className="group-count">{entry.targets.length}</span>
               </button>
               {!collapsed &&
-                ts.map((t) => (
+                entry.targets.map((t) => (
                   <button
                     key={t.id}
                     className={`target-item ${t.id === selectedId ? "active" : ""}`}
                     onClick={() => pickTarget(t.id)}
                   >
-                    {t.name}
+                    {t.title || t.name}
                   </button>
                 ))}
             </div>
@@ -228,7 +235,10 @@ export default function App() {
               >
                 ☰
               </button>
-              <strong>{selected.id}</strong>
+              <strong>{selected.title || selected.name}</strong>
+              {selected.title && (
+                <span className="toolbar-id">{selected.id}</span>
+              )}
               <span style={{ color: "#8a93a6" }}>· {selected.probe}</span>
               <div style={{ flex: 1 }} />
               {RANGES.filter(

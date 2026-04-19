@@ -1,12 +1,15 @@
 export interface Target {
   id: string;
   group: string;
+  group_title?: string;
   name: string;
+  title?: string;
   probe: string;
   probe_type?: string;
   host?: string;
   url?: string;
   alerts?: string[];
+  sources?: string[];
 }
 
 export interface HopPoint {
