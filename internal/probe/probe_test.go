@@ -70,15 +70,20 @@ func TestHTTPProbe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	res, err := p.Probe(ctx, Target{URL: ts.URL}, 3)
+	// Pass a count above maxHTTPRequests to verify the cap kicks in: HTTP is
+	// deliberately limited to 1-2 requests per cycle regardless of cfg.Pings.
+	res, err := p.Probe(ctx, Target{URL: ts.URL}, 5)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if res.LossCount != 0 {
 		t.Errorf("LossCount = %d, want 0", res.LossCount)
 	}
-	if len(res.RTTs) != 3 {
-		t.Errorf("got %d rtts, want 3", len(res.RTTs))
+	if len(res.RTTs) != maxHTTPRequests {
+		t.Errorf("got %d rtts, want %d (capped)", len(res.RTTs), maxHTTPRequests)
+	}
+	if res.Sent != maxHTTPRequests {
+		t.Errorf("Sent = %d, want %d", res.Sent, maxHTTPRequests)
 	}
 }
 

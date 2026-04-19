@@ -39,7 +39,7 @@ and a per-hop loss heatmap over the same window.
   `discord` embed (includes MTR path in the embed when the probe is
   icmp/mtr).
 - **Grafana:** drop-in dashboard with smoke bands and loss overlays.
-- **Hot reload:** `SIGHUP` or `POST /api/v1/config/reload`.
+- **Hot reload:** `SIGHUP`.
 
 ## Build
 
@@ -83,7 +83,7 @@ docker build -t gosmokeping .
 
 See [`config.example.json`](config.example.json). Environment variables of
 the form `${NAME}` are expanded at load time, so tokens live in env vars.
-`SIGHUP` or `POST /api/v1/config/reload` re-reads the file.
+`SIGHUP` re-reads the file.
 
 Alert actions:
 
@@ -109,8 +109,6 @@ you can see where a cycle broke without opening the UI.
 | GET    | `/api/v1/targets/{group}/{name}/status`             | Last 50 cycles |
 | GET    | `/api/v1/targets/{group}/{name}/hops`               | Latest MTR path |
 | GET    | `/api/v1/targets/{group}/{name}/hops/timeline?from&to` | Per-hop history |
-| GET    | `/api/v1/config`                                    | Running config (token redacted) |
-| POST   | `/api/v1/config/reload`                             | Re-read config file |
 
 `from` / `to` accept RFC3339, unix seconds, or durations like `-24h`.
 `resolution` is `auto` (default), `raw`, `1h`, or `1d`.

@@ -1,7 +1,7 @@
 {
   "listen": ":8080",
-  "interval": "5m",
-  "pings": 20,
+  "interval": "30s",
+  "pings": 10,
 
   "influxdb": {
     "url": "http://localhost:8086",
@@ -35,8 +35,9 @@
       "targets": [
         { "name": "cloudflare",   "host": "1.1.1.1",             "probe": "icmp" },
         { "name": "google-dns",   "host": "8.8.8.8",             "probe": "icmp" },
-        { "name": "example-http", "url":  "https://example.com", "probe": "http" },
-        { "name": "cloudflare-path", "host": "1.1.1.1",          "probe": "mtr"  }
+        { "name": "example-http", "url":  "https://example.com", "probe": "http", "alerts": ["high-loss", "high-latency"] },
+        { "name": "example-tcp",  "host": "example.com:443",     "probe": "tcp",  "alerts": ["high-loss"] },
+        { "name": "cloudflare-path", "host": "1.1.1.1",          "probe": "mtr",  "alerts": ["high-loss"] }
       ]
     }
   ],

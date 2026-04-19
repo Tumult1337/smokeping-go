@@ -68,8 +68,6 @@ func (s *Server) Router() http.Handler {
 		r.Get("/targets/{group}/{name}/status", s.getStatus)
 		r.Get("/targets/{group}/{name}/hops", s.getHops)
 		r.Get("/targets/{group}/{name}/hops/timeline", s.getHopsTimeline)
-		r.Get("/config", s.getConfig)
-		r.Post("/config/reload", s.postReload)
 	})
 
 	if s.uiFS != nil {
@@ -224,7 +222,7 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 	if atStr := r.URL.Query().Get("at"); atStr != "" {
 		at, perr := parseTimeParam(atStr, time.Time{}, time.Now())
 		if perr != nil {
-			writeErr(w, http.StatusBadRequest, "invalid at: "+perr.Error())
+			writeErr(w, http.StatusBadRequest, "invalid at: expected RFC3339, unix seconds, or duration like -1h")
 			return
 		}
 		hops, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute)
@@ -295,22 +293,6 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"target": ref.ID(), "recent": points})
 }
 
-func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := s.store.Current()
-	// Redact secrets before returning.
-	sanitized := *cfg
-	sanitized.InfluxDB.Token = ""
-	writeJSON(w, http.StatusOK, sanitized)
-}
-
-func (s *Server) postReload(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Reload(); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
-}
-
 func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if s.uiFS == nil {
 		http.NotFound(w, r)
@@ -344,12 +326,12 @@ func parseRange(w http.ResponseWriter, r *http.Request, defaultSpan time.Duratio
 	now := time.Now()
 	from, err := parseTimeParam(q.Get("from"), now.Add(-defaultSpan), now)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid from: "+err.Error())
+		writeErr(w, http.StatusBadRequest, "invalid from: expected RFC3339, unix seconds, or duration like -1h")
 		return time.Time{}, time.Time{}, false
 	}
 	to, err := parseTimeParam(q.Get("to"), now, now)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid to: "+err.Error())
+		writeErr(w, http.StatusBadRequest, "invalid to: expected RFC3339, unix seconds, or duration like -1h")
 		return time.Time{}, time.Time{}, false
 	}
 	if !to.After(from) {

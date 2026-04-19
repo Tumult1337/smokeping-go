@@ -105,6 +105,11 @@ func fieldGetter(f string) (func(scheduler.Cycle) float64, bool) {
 	ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 	switch f {
 	case "loss_pct":
+		// loss_pct is target-only loss across all probe types: ICMP/TCP/HTTP/DNS
+		// each populate Sent/LossCount from attempts to the target itself, and
+		// MTR mirrors the final hop (target) when reachable or reports full loss
+		// when not. Intermediate-hop drops never feed this metric — those are
+		// visible in the per-hop stats but ignored by the alert evaluator.
 		return func(c scheduler.Cycle) float64 {
 			if c.Sent == 0 {
 				return 0

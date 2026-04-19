@@ -10,13 +10,14 @@ body {
 .app {
   display: grid;
   grid-template-columns: 260px 1fr;
-  min-height: 100vh;
+  height: 100vh;
 }
 
 .sidebar {
   border-right: 1px solid #1f2430;
   padding: 16px;
   overflow-y: auto;
+  height: 100vh;
 }
 
 .sidebar h1 {
@@ -75,6 +76,8 @@ body {
 
 .main {
   padding: 24px;
+  overflow-y: auto;
+  height: 100vh;
 }
 
 .toolbar {

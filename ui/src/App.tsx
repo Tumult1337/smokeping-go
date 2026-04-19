@@ -29,7 +29,7 @@ export default function App() {
   const resolution: Resolution = "auto";
   const [cycles, setCycles] = useState<CyclesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshTick, setRefreshTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [chartStyle, setChartStyle] = useState<ChartStyle>(() => {

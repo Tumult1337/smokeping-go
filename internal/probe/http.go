@@ -39,9 +39,20 @@ func NewHTTP(name string, timeout time.Duration) *HTTP {
 
 func (p *HTTP) Name() string { return p.name }
 
+// maxHTTPRequests caps requests per cycle. HTTP is far more expensive than a
+// ping (TLS handshake, server log entries, possible rate limits / WAF flags),
+// so we deliberately do at most a couple per interval regardless of cfg.Pings.
+const maxHTTPRequests = 2
+
 func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	if t.URL == "" {
 		return nil, errors.New("http: url required")
+	}
+	if count > maxHTTPRequests {
+		count = maxHTTPRequests
+	}
+	if count < 1 {
+		count = 1
 	}
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
 

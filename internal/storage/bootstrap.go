@@ -190,7 +190,7 @@ union(tables: [
   agg(field: "pings_sent", fn: sum),
 ])
   |> to(bucket: "%s")
-`, srcBucket, formatEvery(window), dstBucket)
+`, fluxEscape(srcBucket), formatEvery(window), fluxEscape(dstBucket))
 }
 
 func formatEvery(d time.Duration) string {

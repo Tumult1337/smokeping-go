@@ -174,38 +174,44 @@ func sendTTL(conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int
 
 		switch body := reply.Body.(type) {
 		case *icmp.Echo:
-			if body.Seq != seq {
+			// Raw ICMP sockets receive every Echo reply on the host, not just
+			// ones for our requests, so concurrent traces with overlapping seq
+			// numbers (seq range is 1..maxTTL*rounds ≈ 93) will see each
+			// other's replies. Filter by the randomized id to disambiguate.
+			if body.ID != id || body.Seq != seq {
 				continue
 			}
 			return peerIP, elapsed, true, nil
 		case *icmp.TimeExceeded:
-			if embeddedSeq(body.Data, isV6) == seq {
+			if eid, eseq := embeddedIDSeq(body.Data, isV6); eid == id && eseq == seq {
 				return peerIP, elapsed, false, nil
 			}
 		case *icmp.DstUnreach:
-			if embeddedSeq(body.Data, isV6) == seq {
+			if eid, eseq := embeddedIDSeq(body.Data, isV6); eid == id && eseq == seq {
 				return peerIP, elapsed, false, nil
 			}
 		}
 	}
 }
 
-// embeddedSeq extracts the sequence number of the original echo request out of
-// the IP+ICMP header quoted in an ICMP error message. Returns -1 if the data
-// is too short to contain one.
-func embeddedSeq(data []byte, isV6 bool) int {
+// embeddedIDSeq extracts the ICMP id and sequence of the original echo request
+// out of the IP+ICMP header quoted in an ICMP error message. Returns (-1, -1)
+// if the data is too short to contain them.
+func embeddedIDSeq(data []byte, isV6 bool) (int, int) {
 	ihl := 40
 	if !isV6 {
 		if len(data) < 1 {
-			return -1
+			return -1, -1
 		}
 		ihl = max(int(data[0]&0x0f)*4, 20)
 	}
 	if len(data) < ihl+8 {
-		return -1
+		return -1, -1
 	}
 	hdr := data[ihl:]
-	return int(hdr[6])<<8 | int(hdr[7])
+	id := int(hdr[4])<<8 | int(hdr[5])
+	seq := int(hdr[6])<<8 | int(hdr[7])
+	return id, seq
 }
 
 func listenRaw(isV6 bool) (*icmp.PacketConn, error) {

@@ -98,22 +98,6 @@ func TestListTargets(t *testing.T) {
 	}
 }
 
-func TestGetConfigRedactsToken(t *testing.T) {
-	h := newTestServer(t, nil)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status=%d", rr.Code)
-	}
-	var body map[string]any
-	_ = json.Unmarshal(rr.Body.Bytes(), &body)
-	inf, _ := body["influxdb"].(map[string]any)
-	if inf["token"] != "" {
-		t.Errorf("token not redacted: %v", inf["token"])
-	}
-}
-
 func TestGetCyclesMissingTarget(t *testing.T) {
 	h := newTestServer(t, &stubReader{})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets/doesnotexist/cycles", nil)

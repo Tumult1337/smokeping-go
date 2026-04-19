@@ -6,12 +6,24 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 
 	"github.com/tumult/gosmokeping/internal/config"
 )
+
+// fluxEscape escapes a value for safe interpolation inside a Flux double-quoted
+// string literal. Without this, a `"` or `\` in any operator-supplied string
+// (bucket, org, group, target name) terminates the literal and lets the rest
+// of the value execute as Flux. Apply to every string interpolated via %s into
+// a `"..."` Flux literal.
+func fluxEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
+}
 
 // Resolution picks which bucket to query. PickResolution chooses one based on
 // the time span so the UI can render cheaply at wide zoom levels.
@@ -165,7 +177,7 @@ from(bucket: "%s")
   |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
-`, bucket, from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementCycle, ref.Group, ref.Target.Name)
+`, fluxEscape(bucket), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementCycle, fluxEscape(ref.Group), fluxEscape(ref.Target.Name))
 
 	qAPI := r.client.QueryAPI(r.cfg.Org)
 	res2, err := qAPI.Query(ctx, flux)
@@ -224,7 +236,7 @@ from(bucket: "%s")
   |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
-`, r.cfg.BucketRaw, from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementRTT, ref.Group, ref.Target.Name)
+`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementRTT, fluxEscape(ref.Group), fluxEscape(ref.Target.Name))
 
 	qAPI := r.client.QueryAPI(r.cfg.Org)
 	res, err := qAPI.Query(ctx, flux)
@@ -298,7 +310,7 @@ from(bucket: "%s")
   |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
   |> pivot(rowKey: ["_time", "hop_index"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time", "hop_index"])
-`, r.cfg.BucketRaw, from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementHop, ref.Group, ref.Target.Name)
+`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementHop, fluxEscape(ref.Group), fluxEscape(ref.Target.Name))
 
 	qAPI := r.client.QueryAPI(r.cfg.Org)
 	res, err := qAPI.Query(ctx, flux)
@@ -347,56 +359,32 @@ func absDur(d time.Duration) time.Duration {
 	return d
 }
 
-// QueryLatestHops returns one HopPoint per hop index, taken from the single
-// most recent MTR cycle for the target. Always reads the raw bucket — hop
-// data isn't rolled up.
+// QueryLatestHops returns hops from the single most recent MTR cycle for the
+// target. All hops in one cycle share an identical _time (set by the writer),
+// so we pick the max timestamp across the recent window and return only rows
+// matching it. Grouping by hop_index and taking the latest per index — the
+// earlier approach — leaves stale rows for higher indexes when the path
+// shrinks, rendering phantom hops past the current target.
 func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef) ([]HopPoint, error) {
-	// Pivot so each row carries all fields for a given (time, hop_index),
-	// then keep only the latest row per hop_index. We can't use first()/last()
-	// after pivot — they select on the `_value` column, which the pivot has
-	// flattened away. sort+limit on the grouped stream is equivalent.
-	flux := fmt.Sprintf(`
-from(bucket: "%s")
-  |> range(start: -24h)
-  |> filter(fn: (r) => r._measurement == "%s")
-  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
-  |> pivot(rowKey: ["_time", "hop_index"], columnKey: ["_field"], valueColumn: "_value")
-  |> group(columns: ["hop_index"])
-  |> sort(columns: ["_time"], desc: true)
-  |> limit(n: 1)
-  |> group()
-  |> sort(columns: ["hop_index"])
-`, r.cfg.BucketRaw, MeasurementHop, ref.Group, ref.Target.Name)
-
-	qAPI := r.client.QueryAPI(r.cfg.Org)
-	res, err := qAPI.Query(ctx, flux)
+	all, err := r.queryHopsRange(ctx, ref, time.Now().Add(-24*time.Hour), time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("query hops: %w", err)
+		return nil, err
 	}
-	defer res.Close()
-
-	var out []HopPoint
-	for res.Next() {
-		rec := res.Record()
-		vals := rec.Values()
-		idx, _ := strconv.ParseInt(stringOf(vals["hop_index"]), 10, 64)
-		out = append(out, HopPoint{
-			Time:      rec.Time(),
-			Index:     idx,
-			IP:        stringOf(vals["hop_ip"]),
-			Min:       floatOf(vals["rtt_min"]),
-			Max:       floatOf(vals["rtt_max"]),
-			Mean:      floatOf(vals["rtt_mean"]),
-			Median:    floatOf(vals["rtt_median"]),
-			LossPct:   floatOf(vals["loss_pct"]),
-			LossCount: intOf(vals["loss_count"]),
-			Sent:      intOf(vals["pings_sent"]),
-		})
+	if len(all) == 0 {
+		return nil, nil
 	}
-	if err := res.Err(); err != nil {
-		return nil, fmt.Errorf("read hops: %w", err)
+	latest := all[0].Time
+	for _, h := range all[1:] {
+		if h.Time.After(latest) {
+			latest = h.Time
+		}
 	}
-	slices.SortFunc(out, func(a, b HopPoint) int { return cmp.Compare(a.Index, b.Index) })
+	out := make([]HopPoint, 0, 32)
+	for _, h := range all {
+		if h.Time.Equal(latest) {
+			out = append(out, h)
+		}
+	}
 	return out, nil
 }
 

@@ -47,9 +47,9 @@ Key points a reader can't derive from a single file:
 
 - **Config hot-reload:** `config.Store` uses `atomic.Pointer[Config]`.
   Consumers (API, alert evaluator) call `store.Current()` on every request
-  rather than caching — this is intentional so SIGHUP and `POST /api/v1/config/reload`
-  take effect immediately without pointer-update races. When adding a
-  consumer, do **not** cache the `*Config`.
+  rather than caching — this is intentional so `SIGHUP` takes effect
+  immediately without pointer-update races. When adding a consumer, do
+  **not** cache the `*Config`.
 
 - **Storage tiering:** three InfluxDB buckets (`smokeping_raw`, `smokeping_1h`,
   `smokeping_1d`) populated by Flux tasks that `storage.Bootstrap` installs on
