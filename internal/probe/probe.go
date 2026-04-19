@@ -82,7 +82,7 @@ func build(name string, pc config.Probe) (Probe, error) {
 	case "tcp":
 		return NewTCP(name, pc.Timeout), nil
 	case "http":
-		return NewHTTP(name, pc.Timeout), nil
+		return NewHTTP(name, pc.Timeout, pc.Insecure), nil
 	case "dns":
 		return NewDNS(name, pc.Timeout), nil
 	case "mtr":

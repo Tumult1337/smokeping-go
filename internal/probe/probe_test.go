@@ -50,8 +50,8 @@ func TestTCPProbeUnreachable(t *testing.T) {
 
 	// 127.0.0.1:1 is reliably refused/unreachable.
 	res, err := p.Probe(ctx, Target{Host: "127.0.0.1:1"}, 2)
-	if err != nil && err != context.DeadlineExceeded {
-		t.Fatalf("probe: %v", err)
+	if err == nil {
+		t.Fatalf("probe: expected error when all dials fail")
 	}
 	if res.LossCount == 0 {
 		t.Errorf("expected some loss, got none")
@@ -65,7 +65,7 @@ func TestHTTPProbe(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	p := NewHTTP("http", 2*time.Second)
+	p := NewHTTP("http", 2*time.Second, false)
 	p.spacing = time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -93,14 +93,14 @@ func TestHTTPProbe5xxIsLoss(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	p := NewHTTP("http", time.Second)
+	p := NewHTTP("http", time.Second, false)
 	p.spacing = time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	res, err := p.Probe(ctx, Target{URL: ts.URL}, 2)
-	if err != nil {
-		t.Fatalf("probe: %v", err)
+	if err == nil {
+		t.Fatalf("probe: expected error when all requests fail")
 	}
 	if res.LossCount != 2 {
 		t.Errorf("LossCount = %d, want 2", res.LossCount)

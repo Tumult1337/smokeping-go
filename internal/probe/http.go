@@ -2,8 +2,11 @@ package probe
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptrace"
 	"time"
@@ -19,16 +22,26 @@ type HTTP struct {
 	client  *http.Client
 }
 
-func NewHTTP(name string, timeout time.Duration) *HTTP {
+// NewHTTP builds an HTTP probe. If insecure is true, TLS verification is
+// skipped — intended for targets with self-signed or expired certs where
+// reachability is the point, not cert hygiene.
+func NewHTTP(name string, timeout time.Duration, insecure bool) *HTTP {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
+	}
+	// Clone DefaultTransport so we keep its sane connection-pool defaults and
+	// only override TLS config when asked.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if insecure {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return &HTTP{
 		name:    name,
 		timeout: timeout,
 		spacing: 500 * time.Millisecond,
 		client: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: tr,
 			// Don't follow redirects — we want to measure the target URL itself.
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
@@ -55,16 +68,20 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		count = 1
 	}
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
+	var lastErr error
 
 	for n := range count {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		result.Sent++
-		if rtt, ok := p.one(ctx, t.URL); ok {
-			result.RTTs = append(result.RTTs, rtt)
-		} else {
+		rtt, err := p.one(ctx, t.URL)
+		if err != nil {
 			result.LossCount++
+			lastErr = err
+			slog.Debug("http probe failed", "probe", p.name, "target", t.Name, "url", t.URL, "err", err)
+		} else {
+			result.RTTs = append(result.RTTs, rtt)
 		}
 		if n < count-1 {
 			select {
@@ -74,10 +91,13 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 			}
 		}
 	}
+	if result.LossCount == result.Sent && lastErr != nil {
+		return result, fmt.Errorf("http: all %d requests failed: %w", result.Sent, lastErr)
+	}
 	return result, nil
 }
 
-func (p *HTTP) one(ctx context.Context, url string) (time.Duration, bool) {
+func (p *HTTP) one(ctx context.Context, url string) (time.Duration, error) {
 	var firstByte time.Time
 	trace := &httptrace.ClientTrace{
 		GotFirstResponseByte: func() { firstByte = time.Now() },
@@ -87,24 +107,24 @@ func (p *HTTP) one(ctx context.Context, url string) (time.Duration, bool) {
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, false
+		return 0, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("User-Agent", "gosmokeping/1.0")
 
 	start := time.Now()
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return 0, false
+		return 0, err
 	}
 	defer resp.Body.Close()
 	// Drain a bounded amount so the transport can pool the connection.
 	_, _ = io.CopyN(io.Discard, resp.Body, 4096)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return 0, false
+		return 0, fmt.Errorf("status %d", resp.StatusCode)
 	}
 	if firstByte.IsZero() {
-		return time.Since(start), true
+		return time.Since(start), nil
 	}
-	return firstByte.Sub(start), true
+	return firstByte.Sub(start), nil
 }

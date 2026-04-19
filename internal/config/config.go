@@ -32,6 +32,10 @@ type InfluxDB struct {
 type Probe struct {
 	Type    string        `json:"type"`
 	Timeout time.Duration `json:"timeout"`
+	// Insecure skips TLS verification for HTTP probes. Use for targets with
+	// self-signed or expired certs where reachability matters more than cert
+	// validity. Ignored by non-HTTP probe types.
+	Insecure bool `json:"insecure,omitempty"`
 }
 
 type Group struct {
@@ -73,8 +77,9 @@ type rawConfig struct {
 }
 
 type rawProbe struct {
-	Type    string `json:"type"`
-	Timeout string `json:"timeout"`
+	Type     string `json:"type"`
+	Timeout  string `json:"timeout"`
+	Insecure bool   `json:"insecure"`
 }
 
 var envVar = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
@@ -119,7 +124,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	for name, rp := range raw.Probes {
-		p := Probe{Type: rp.Type}
+		p := Probe{Type: rp.Type, Insecure: rp.Insecure}
 		if rp.Timeout != "" {
 			d, err := time.ParseDuration(rp.Timeout)
 			if err != nil {

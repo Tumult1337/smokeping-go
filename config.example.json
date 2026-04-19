@@ -15,6 +15,7 @@
   "probes": {
     "icmp": { "type": "icmp", "timeout": "5s" },
     "http": { "type": "http", "timeout": "10s" },
+    "http-insecure": { "type": "http", "timeout": "10s", "insecure": true },
     "tcp":  { "type": "tcp",  "timeout": "5s" },
     "dns":  { "type": "dns",  "timeout": "5s" },
     "mtr":  { "type": "mtr",  "timeout": "2s" }

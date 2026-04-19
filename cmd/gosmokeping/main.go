@@ -25,6 +25,9 @@ func main() {
 	flag.Parse()
 
 	log := newLogger(*logLevel)
+	// Route package-level slog calls (e.g. in internal/probe) through the
+	// configured handler so -log-level debug surfaces per-request probe errors.
+	slog.SetDefault(log)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {

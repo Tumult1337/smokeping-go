@@ -3,6 +3,8 @@ package probe
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"time"
 )
@@ -46,6 +48,7 @@ func (p *DNS) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	}
 
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
+	var lastErr error
 	for n := range count {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -57,6 +60,8 @@ func (p *DNS) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 		cancel()
 		if err != nil {
 			result.LossCount++
+			lastErr = err
+			slog.Debug("dns probe failed", "probe", p.name, "target", t.Name, "host", t.Host, "err", err)
 		} else {
 			result.RTTs = append(result.RTTs, time.Since(start))
 		}
@@ -67,6 +72,9 @@ func (p *DNS) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 			case <-time.After(p.spacing):
 			}
 		}
+	}
+	if result.LossCount == result.Sent && lastErr != nil {
+		return result, fmt.Errorf("dns: all %d lookups for %s failed: %w", result.Sent, t.Host, lastErr)
 	}
 	return result, nil
 }

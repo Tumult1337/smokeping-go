@@ -3,6 +3,8 @@ package probe
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"time"
 )
@@ -35,6 +37,7 @@ func (p *TCP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
 	dialer := &net.Dialer{Timeout: p.timeout}
+	var lastErr error
 
 	for n := range count {
 		if err := ctx.Err(); err != nil {
@@ -45,6 +48,8 @@ func (p *TCP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 		conn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
 			result.LossCount++
+			lastErr = err
+			slog.Debug("tcp probe failed", "probe", p.name, "target", t.Name, "addr", addr, "err", err)
 		} else {
 			result.RTTs = append(result.RTTs, time.Since(start))
 			_ = conn.Close()
@@ -56,6 +61,9 @@ func (p *TCP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 			case <-time.After(p.spacing):
 			}
 		}
+	}
+	if result.LossCount == result.Sent && lastErr != nil {
+		return result, fmt.Errorf("tcp: all %d dials to %s failed: %w", result.Sent, addr, lastErr)
 	}
 	return result, nil
 }
