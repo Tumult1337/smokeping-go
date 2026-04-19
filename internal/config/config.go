@@ -111,6 +111,32 @@ type rawProbe struct {
 var envVar = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 
 func Load(path string) (*Config, error) {
+	cfg, err := loadUnvalidated(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadMinimal is the slave-mode loader. Same parsing rules as Load but the
+// strict target/influx/alerts checks are skipped — a slave's on-disk config
+// only carries its own listen port and cluster{} block; the real target list
+// arrives from the master over the wire.
+func LoadMinimal(path string) (*Config, error) {
+	cfg, err := loadUnvalidated(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateMinimal(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func loadUnvalidated(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -167,9 +193,6 @@ func Load(path string) (*Config, error) {
 		cfg.Probes[name] = p
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
 	return cfg, nil
 }
 
@@ -181,6 +204,25 @@ func expandEnv(data []byte) []byte {
 		}
 		return match
 	})
+}
+
+// ValidateMinimal is a relaxed Validate used for a slave's local config. A
+// slave only needs listen/log-level plumbing and a populated cluster{} block;
+// influx, targets, and alerts are served by the master over the wire.
+func (c *Config) ValidateMinimal() error {
+	if c.Cluster == nil {
+		return fmt.Errorf("cluster block is required for slave mode")
+	}
+	if c.Cluster.MasterURL == "" {
+		return fmt.Errorf("cluster.master_url is required for slave mode")
+	}
+	if c.Cluster.Token == "" {
+		return fmt.Errorf("cluster.token is required for slave mode")
+	}
+	if c.Cluster.Name == "" {
+		return fmt.Errorf("cluster.name is required for slave mode")
+	}
+	return nil
 }
 
 func (c *Config) Validate() error {

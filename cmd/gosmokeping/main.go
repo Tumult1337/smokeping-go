@@ -14,6 +14,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/alert"
 	"github.com/tumult/gosmokeping/internal/api"
 	"github.com/tumult/gosmokeping/internal/cluster/master"
+	"github.com/tumult/gosmokeping/internal/cluster/slave"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -30,6 +31,7 @@ func main() {
 	var (
 		configPath = flag.String("config", "config.json", "path to config file")
 		logLevel   = flag.String("log-level", "info", "log level: debug|info|warn|error")
+		slaveMode  = flag.Bool("slave", false, "run as a cluster slave (register + push to master, no local storage)")
 	)
 	flag.Parse()
 
@@ -38,15 +40,20 @@ func main() {
 	// configured handler so -log-level debug surfaces per-request probe errors.
 	slog.SetDefault(log)
 
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if *slaveMode {
+		runSlave(ctx, log, *configPath)
+		return
+	}
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Error("load config", "path", *configPath, "err", err)
 		os.Exit(1)
 	}
 	store := config.NewStore(*configPath, cfg)
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	store.WatchSIGHUP(ctx, log)
 
@@ -120,6 +127,24 @@ func main() {
 	sch.Run(ctx)
 
 	log.Info("gosmokeping shutting down")
+}
+
+// runSlave is the --slave entrypoint: load a minimal config, spin up the
+// slave runner, and block until ctx is cancelled. Slaves never touch storage
+// or expose the UI — the master does all of that — so we skip the entire
+// node-side plumbing.
+func runSlave(ctx context.Context, log *slog.Logger, configPath string) {
+	cfg, err := config.LoadMinimal(configPath)
+	if err != nil {
+		log.Error("load slave config", "path", configPath, "err", err)
+		os.Exit(1)
+	}
+	runner := slave.NewRunner(log, cfg, "dev")
+	if err := runner.Run(ctx); err != nil {
+		log.Error("slave exited with error", "err", err)
+		os.Exit(1)
+	}
+	log.Info("slave shutting down")
 }
 
 func newLogger(level string) *slog.Logger {

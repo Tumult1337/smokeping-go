@@ -1,0 +1,9 @@
+{
+  "listen": ":8080",
+  "cluster": {
+    "master_url": "https://master.example.internal",
+    "token": "${CLUSTER_TOKEN}",
+    "name": "frankfurt-1",
+    "push_every": "5s"
+  }
+}
