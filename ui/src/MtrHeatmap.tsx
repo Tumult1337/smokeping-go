@@ -13,6 +13,11 @@ interface Props {
   // Highlighted cycle column (unix seconds) — rendered as a vertical marker.
   selectedSec?: number;
   height?: number;
+  source?: string;
+  // Drop hops whose loss is 0% across the whole window. At wide ranges a
+  // long path reduces to 1-2 problem hops, so hiding the clean rows keeps
+  // the heatmap readable.
+  hideZeroLoss?: boolean;
 }
 
 // Per-hop packet-loss heatmap over a time window. One row per discovered hop
@@ -27,6 +32,8 @@ export function MtrHeatmap({
   onCyclePick,
   selectedSec,
   height = 180,
+  source,
+  hideZeroLoss,
 }: Props) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -45,7 +52,7 @@ export function MtrHeatmap({
     }
     const fromISO = new Date(fromSec * 1000).toISOString();
     const toISO = new Date(toSec * 1000).toISOString();
-    getHopsTimeline(targetId, fromISO, toISO)
+    getHopsTimeline(targetId, fromISO, toISO, source)
       .then((r) => {
         if (!cancelled) setHops(r.hops ?? []);
       })
@@ -55,18 +62,28 @@ export function MtrHeatmap({
     return () => {
       cancelled = true;
     };
-  }, [targetId, refreshTick, fromSec, toSec]);
+  }, [targetId, refreshTick, fromSec, toSec, source]);
 
   // Group hops by index (row), and collect distinct cycle timestamps (columns).
-  const { rows, cycles, maxIndex } = useMemo(() => {
-    if (!hops) return { rows: new Map<number, Map<number, HopPoint>>(), cycles: [] as number[], maxIndex: 0 };
+  // When hideZeroLoss is on, `visibleHops` skips rows that never lost a packet
+  // in the window; rank in this array becomes the y-position so gaps collapse.
+  const { rows, cycles, visibleHops } = useMemo(() => {
+    if (!hops) {
+      return {
+        rows: new Map<number, Map<number, HopPoint>>(),
+        cycles: [] as number[],
+        visibleHops: [] as number[],
+      };
+    }
     const byHop = new Map<number, Map<number, HopPoint>>();
     const cycleSet = new Set<number>();
+    const lossyHops = new Set<number>();
     let max = 0;
     for (const h of hops) {
       const t = Math.floor(new Date(h.Time).getTime() / 1000);
       cycleSet.add(t);
       if (h.Index > max) max = h.Index;
+      if (h.LossPct > 0) lossyHops.add(h.Index);
       let row = byHop.get(h.Index);
       if (!row) {
         row = new Map();
@@ -74,12 +91,15 @@ export function MtrHeatmap({
       }
       row.set(t, h);
     }
+    const all: number[] = [];
+    for (let i = 1; i <= max; i++) if (byHop.has(i)) all.push(i);
+    const visible = hideZeroLoss ? all.filter((i) => lossyHops.has(i)) : all;
     return {
       rows: byHop,
       cycles: Array.from(cycleSet).sort((a, b) => a - b),
-      maxIndex: max,
+      visibleHops: visible,
     };
-  }, [hops]);
+  }, [hops, hideZeroLoss]);
 
   // Paint the heatmap whenever data/size/selection changes. We repaint on
   // every render rather than diffing — the data is small (hops × cycles).
@@ -101,13 +121,13 @@ export function MtrHeatmap({
     ctx.fillStyle = "#0f141c";
     ctx.fillRect(0, 0, cssW, cssH);
 
-    if (maxIndex === 0 || cycles.length === 0) return;
+    if (visibleHops.length === 0 || cycles.length === 0) return;
 
     // Left gutter holds the hop index labels.
     const gutter = 28;
     const plotX = gutter;
     const plotW = cssW - gutter - 4;
-    const rowH = Math.max(6, (cssH - 4) / maxIndex);
+    const rowH = Math.max(6, (cssH - 4) / visibleHops.length);
 
     // Each cycle column is scaled to the shared window so the x-axis lines up
     // with the main chart above. Widths shrink to 1px minimum for dense data.
@@ -125,9 +145,10 @@ export function MtrHeatmap({
       colW = Math.max(1, colWForSec(median));
     }
 
-    for (let hop = 1; hop <= maxIndex; hop++) {
+    for (let rank = 0; rank < visibleHops.length; rank++) {
+      const hop = visibleHops[rank];
       const row = rows.get(hop);
-      const y = 2 + (hop - 1) * rowH;
+      const y = 2 + rank * rowH;
       // Row backdrop so missing hops look empty rather than identical to 0% loss.
       ctx.fillStyle = "#131823";
       ctx.fillRect(plotX, y, plotW, rowH - 1);
@@ -147,10 +168,10 @@ export function MtrHeatmap({
     ctx.font = "10px system-ui, sans-serif";
     ctx.textBaseline = "middle";
     const labelStep = rowH < 12 ? Math.ceil(12 / rowH) : 1;
-    for (let hop = 1; hop <= maxIndex; hop++) {
-      if ((hop - 1) % labelStep !== 0 && hop !== maxIndex) continue;
-      const y = 2 + (hop - 1) * rowH + rowH / 2;
-      ctx.fillText(String(hop), 4, y);
+    for (let rank = 0; rank < visibleHops.length; rank++) {
+      if (rank % labelStep !== 0 && rank !== visibleHops.length - 1) continue;
+      const y = 2 + rank * rowH + rowH / 2;
+      ctx.fillText(String(visibleHops[rank]), 4, y);
     }
 
     // Selected-cycle marker — a thin vertical line that matches the HopsTable.
@@ -159,7 +180,7 @@ export function MtrHeatmap({
       ctx.fillStyle = "rgba(94, 234, 212, 0.55)";
       ctx.fillRect(Math.round(x), 2, 2, cssH - 4);
     }
-  }, [rows, cycles, maxIndex, height, fromSec, toSec, selectedSec]);
+  }, [rows, cycles, visibleHops, height, fromSec, toSec, selectedSec]);
 
   // Translate a pointer x position to the nearest cycle's unix seconds.
   function pickAtX(clientX: number): number | null {

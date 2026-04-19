@@ -9,6 +9,7 @@ interface Props {
   height?: number;
   fromSec?: number;
   toSec?: number;
+  source?: string;
 }
 
 // Color by status class. Network error (status==0) gets its own color so you
@@ -37,6 +38,7 @@ export function HttpChart({
   height = 260,
   fromSec,
   toSec,
+  source,
 }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -46,7 +48,7 @@ export function HttpChart({
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    getHttpSamples(targetId, range)
+    getHttpSamples(targetId, range, undefined, source)
       .then((r) => {
         if (!cancelled) setPoints(r.points ?? []);
       })
@@ -59,7 +61,7 @@ export function HttpChart({
     return () => {
       cancelled = true;
     };
-  }, [targetId, range, refreshTick]);
+  }, [targetId, range, refreshTick, source]);
 
   // Create uPlot once. setData drives refreshes so the DOM node stays in
   // place — destroy/recreate on every tick collapses the wrapper and the

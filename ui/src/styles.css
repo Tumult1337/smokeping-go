@@ -135,6 +135,34 @@ body {
   margin-left: -2px;
 }
 
+.source-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 12px;
+  font-size: 12px;
+}
+.source-label {
+  color: #8a93a6;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 10px;
+  margin-right: 2px;
+}
+.chip {
+  background: #141822;
+  color: #cfd3dd;
+  border: 1px solid #2a3142;
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+}
+.chip:hover { background: #1a1f2b; }
+.chip.active { background: #2a3142; color: #fff; border-color: #3a4357; }
+
 .hops-table-wrap {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;

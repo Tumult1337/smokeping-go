@@ -9,12 +9,16 @@ interface Props {
   // the pin back to "latest".
   atSec?: number;
   onResetAt?: () => void;
+  source?: string;
+  // Hide hops whose loss is 0% across the window. Used at wide ranges
+  // (≥ 6h) to collapse the clean-hop noise in long paths.
+  hideZeroLoss?: boolean;
 }
 
 // Renders an MTR path for a target: one row per hop showing TTL, discovered
 // router IP, sample count, loss%, and a min/avg/max latency bar. Defaults to
 // the latest cycle; when atSec is provided, shows the nearest historical one.
-export function HopsTable({ targetId, refreshTick, atSec, onResetAt }: Props) {
+export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hideZeroLoss }: Props) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [cycleTime, setCycleTime] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -22,7 +26,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt }: Props) {
   useEffect(() => {
     let cancelled = false;
     setErr(null);
-    getHops(targetId, atSec)
+    getHops(targetId, atSec, source)
       .then((r) => {
         if (cancelled) return;
         const rows = r.hops ?? [];
@@ -35,7 +39,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [targetId, refreshTick, atSec]);
+  }, [targetId, refreshTick, atSec, source]);
 
   if (err) return <div className="error">{err}</div>;
   if (hops === null) return <div className="empty">Loading hops…</div>;
@@ -52,7 +56,16 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt }: Props) {
     );
   }
 
-  const maxRtt = Math.max(1, ...hops.map((h) => h.Max));
+  const visible = hideZeroLoss ? hops.filter((h) => h.LossPct > 0) : hops;
+  if (visible.length === 0) {
+    return (
+      <>
+        <HopsHeader atSec={atSec} cycleTime={cycleTime} onResetAt={onResetAt} />
+        <div className="empty">All hops clean in this range</div>
+      </>
+    );
+  }
+  const maxRtt = Math.max(1, ...visible.map((h) => h.Max));
 
   return (
     <>
@@ -72,7 +85,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt }: Props) {
         </tr>
       </thead>
       <tbody>
-        {hops.map((h) => (
+        {visible.map((h) => (
           <tr key={h.Index}>
             <td>{h.Index}</td>
             <td>

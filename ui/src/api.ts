@@ -82,15 +82,25 @@ export function listTargets(): Promise<Target[]> {
   return jsonGet<Target[]>("/api/v1/targets");
 }
 
+export interface SourcesResponse {
+  sources: string[];
+}
+
+export function listSources(): Promise<SourcesResponse> {
+  return jsonGet<SourcesResponse>("/api/v1/sources");
+}
+
 export function getCycles(
   id: string,
   from: string,
   to?: string,
   resolution?: Resolution,
+  source?: string,
 ): Promise<CyclesResponse> {
   const params = new URLSearchParams({ from });
   if (to) params.set("to", to);
   if (resolution && resolution !== "auto") params.set("resolution", resolution);
+  if (source) params.set("source", source);
   return jsonGet<CyclesResponse>(`/api/v1/targets/${id}/cycles?${params}`);
 }
 
@@ -113,15 +123,26 @@ export function getHttpSamples(
   id: string,
   from: string,
   to?: string,
+  source?: string,
 ): Promise<HttpResponse> {
   const params = new URLSearchParams({ from });
   if (to) params.set("to", to);
+  if (source) params.set("source", source);
   return jsonGet<HttpResponse>(`/api/v1/targets/${id}/http?${params}`);
 }
 
-export function getHops(id: string, atSec?: number): Promise<HopsResponse> {
-  const q = atSec != null ? `?at=${Math.floor(atSec)}` : "";
-  return jsonGet<HopsResponse>(`/api/v1/targets/${id}/hops${q}`);
+export function getHops(
+  id: string,
+  atSec?: number,
+  source?: string,
+): Promise<HopsResponse> {
+  const params = new URLSearchParams();
+  if (atSec != null) params.set("at", String(Math.floor(atSec)));
+  if (source) params.set("source", source);
+  const qs = params.toString();
+  return jsonGet<HopsResponse>(
+    `/api/v1/targets/${id}/hops${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export interface HopsTimelineResponse {
@@ -135,9 +156,11 @@ export function getHopsTimeline(
   id: string,
   from: string,
   to?: string,
+  source?: string,
 ): Promise<HopsTimelineResponse> {
   const params = new URLSearchParams({ from });
   if (to) params.set("to", to);
+  if (source) params.set("source", source);
   return jsonGet<HopsTimelineResponse>(
     `/api/v1/targets/${id}/hops/timeline?${params}`,
   );

@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { listTargets, getCycles, type Target, type CyclesResponse, type Resolution } from "./api";
+import {
+  listTargets,
+  listSources,
+  getCycles,
+  type Target,
+  type CyclesResponse,
+  type Resolution,
+} from "./api";
 import { SmokeChart } from "./SmokeChart";
 import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
@@ -10,6 +17,10 @@ type Range = "-1h" | "-6h" | "-24h" | "-7d" | "-30d" | "-180d" | "-365d";
 type ChartStyle = "band" | "bars";
 const CHART_STYLE_KEY = "gosmokeping.chartStyle";
 const COLLAPSED_GROUPS_KEY = "gosmokeping.collapsedGroups";
+
+// Ranges wide enough that long MTR paths become visual clutter; we drop
+// clean hops so the table + heatmap stay readable.
+const WIDE_RANGES: Range[] = ["-6h", "-24h", "-7d", "-30d", "-180d", "-365d"];
 
 const RANGES: { label: string; value: Range }[] = [
   { label: "1h", value: "-1h" },
@@ -28,6 +39,9 @@ const AUTO_REFRESH_MS = 30_000;
 
 export default function App() {
   const [targets, setTargets] = useState<Target[]>([]);
+  const [sources, setSources] = useState<string[]>([]);
+  // null = "all sources" — no source param forwarded.
+  const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [range, setRange] = useState<Range>("-24h");
   const resolution: Resolution = "auto";
@@ -89,24 +103,31 @@ export default function App() {
         if (t.length && !selectedId) setSelectedId(t[0].id);
       })
       .catch((e) => setError(String(e)));
+    listSources()
+      .then((r) => setSources(r.sources ?? []))
+      .catch(() => {
+        // Sources endpoint is optional UX — ignore failures so the rest of
+        // the UI still renders in standalone / pre-upgrade backends.
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!selectedId) return;
-    const key = `${selectedId}|${range}|${resolution}`;
+    const key = `${selectedId}|${range}|${resolution}|${selectedSource ?? ""}`;
     const isKeyChange = fetchKeyRef.current !== key;
     fetchKeyRef.current = key;
     setError(null);
-    // Only clear the chart on a target/range change — a plain refresh keeps
-    // the current view until the new data arrives, so it doesn't flash empty.
+    // Only clear the chart on a target/range/source change — a plain refresh
+    // keeps the current view until the new data arrives, so it doesn't flash
+    // empty.
     if (isKeyChange) {
       setCycles(null);
       setPickedSec(null);
     }
     setRefreshing(true);
     let cancelled = false;
-    getCycles(selectedId, range, undefined, resolution)
+    getCycles(selectedId, range, undefined, resolution, selectedSource ?? undefined)
       .then((c) => {
         if (!cancelled) setCycles(c);
       })
@@ -122,7 +143,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, range, resolution, refreshTick]);
+  }, [selectedId, range, resolution, refreshTick, selectedSource]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -167,6 +188,10 @@ export default function App() {
   // to undefined (uPlot auto-fit) before the first response arrives.
   const fromSec = cycles?.from ? Math.floor(new Date(cycles.from).getTime() / 1000) : undefined;
   const toSec = cycles?.to ? Math.floor(new Date(cycles.to).getTime() / 1000) : undefined;
+
+  // Wide time ranges collapse long MTR paths to a handful of lossy hops.
+  const hideZeroLossHops = WIDE_RANGES.includes(range);
+  const sourceParam = selectedSource ?? undefined;
 
   const pickTarget = (id: string) => {
     setSelectedId(id);
@@ -298,6 +323,28 @@ export default function App() {
                 auto
               </label>
             </div>
+            {sources.length > 1 && (
+              <div className="source-chips">
+                <span className="source-label">source:</span>
+                <button
+                  type="button"
+                  className={`chip ${selectedSource == null ? "active" : ""}`}
+                  onClick={() => setSelectedSource(null)}
+                >
+                  all
+                </button>
+                {sources.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`chip ${selectedSource === s ? "active" : ""}`}
+                    onClick={() => setSelectedSource(s)}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
             {error && <div className="error">{error}</div>}
             {selected.probe_type === "http" ? (
               <div className="chart-wrap">
@@ -308,6 +355,7 @@ export default function App() {
                   refreshTick={refreshTick}
                   fromSec={fromSec}
                   toSec={toSec}
+                  source={sourceParam}
                 />
               </div>
             ) : (
@@ -362,6 +410,8 @@ export default function App() {
                     refreshTick={refreshTick}
                     atSec={pickedSec ?? undefined}
                     onResetAt={() => setPickedSec(null)}
+                    source={sourceParam}
+                    hideZeroLoss={hideZeroLossHops && pickedSec == null}
                   />
                 </div>
                 {fromSec != null && toSec != null && (
@@ -374,6 +424,8 @@ export default function App() {
                       toSec={toSec}
                       onCyclePick={setPickedSec}
                       selectedSec={pickedSec ?? undefined}
+                      source={sourceParam}
+                      hideZeroLoss={hideZeroLossHops}
                     />
                   </div>
                 )}
