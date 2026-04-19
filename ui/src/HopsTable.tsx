@@ -90,7 +90,18 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
             <td>{h.Index}</td>
             <td>
               {h.IP ? (
-                <span className="hop-ip">{h.IP}</span>
+                <>
+                  <span className="hop-ip">{h.IP}</span>
+                  <a
+                    className="hop-whois"
+                    href={`https://bgp.tools/search?q=${encodeURIComponent(h.IP)}`}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    title={`Look up ${h.IP} on bgp.tools`}
+                  >
+                    ↗
+                  </a>
+                </>
               ) : (
                 <span className="hop-none">???</span>
               )}

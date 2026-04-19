@@ -191,6 +191,15 @@ body {
 .hops-table tr:hover td { background: #1a1f2b; }
 .hops-table .hop-ip { color: #cfd3dd; font-family: monospace; }
 .hops-table .hop-none { color: #4a5160; font-style: italic; }
+.hops-table .hop-whois {
+  margin-left: 6px;
+  color: #6b7282;
+  text-decoration: none;
+  font-size: 0.85em;
+  opacity: 0.55;
+  transition: color 0.1s, opacity 0.1s;
+}
+.hops-table .hop-whois:hover { color: #5eead4; opacity: 1; }
 .hops-loss-bar {
   display: inline-block;
   height: 10px;
