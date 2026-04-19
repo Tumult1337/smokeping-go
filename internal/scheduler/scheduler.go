@@ -17,10 +17,15 @@ type Cycle struct {
 	Time      time.Time
 	Target    config.TargetRef
 	ProbeName string
-	RTTs      []time.Duration
-	Sent      int
-	LossCount int
-	Summary   stats.Summary
+	// Source identifies which gosmokeping instance produced this cycle.
+	// Empty on legacy cycles, "master" for locally-probed on a master, and
+	// the slave name for cycles pushed in from a slave. Stored as an Influx
+	// tag — present only when non-empty so pre-source data still renders.
+	Source      string
+	RTTs        []time.Duration
+	Sent        int
+	LossCount   int
+	Summary     stats.Summary
 	// Hops is populated for MTR cycles only; nil for every other probe type.
 	Hops []probe.Hop
 	// HTTPSamples is populated for HTTP cycles only.
@@ -38,17 +43,34 @@ type Scheduler struct {
 	registry *probe.Registry
 	sink     Sink
 	cfg      *config.Config
-	now      func() time.Time
+	// source stamps every emitted Cycle.Source. Empty pre-cluster. Phase 2
+	// wires this from cfg.Cluster.Source on master and from the slave name
+	// on a slave.
+	source string
+	now    func() time.Time
 }
 
 func New(log *slog.Logger, registry *probe.Registry, sink Sink, cfg *config.Config) *Scheduler {
+	var source string
+	if cfg.Cluster != nil {
+		source = cfg.Cluster.Source
+	}
 	return &Scheduler{
 		log:      log,
 		registry: registry,
 		sink:     sink,
 		cfg:      cfg,
+		source:   source,
 		now:      time.Now,
 	}
+}
+
+// NewWithSource is used by the slave runner to stamp every emitted Cycle with
+// its own name, overriding whatever cfg.Cluster.Source would produce.
+func NewWithSource(log *slog.Logger, registry *probe.Registry, sink Sink, cfg *config.Config, source string) *Scheduler {
+	s := New(log, registry, sink, cfg)
+	s.source = source
+	return s
 }
 
 // Run fires a probe cycle for every target every cfg.Interval. Each target has
@@ -119,6 +141,7 @@ func (s *Scheduler) runCycle(ctx context.Context, ref config.TargetRef, pr probe
 		Time:        s.now(),
 		Target:      ref,
 		ProbeName:   ref.Target.Probe,
+		Source:      s.source,
 		RTTs:        res.RTTs,
 		Sent:        res.Sent,
 		LossCount:   res.LossCount,

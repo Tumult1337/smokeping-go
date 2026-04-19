@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/joho/godotenv"
+
 	"github.com/tumult/gosmokeping/internal/alert"
 	"github.com/tumult/gosmokeping/internal/api"
 	"github.com/tumult/gosmokeping/internal/config"
@@ -18,6 +20,11 @@ import (
 )
 
 func main() {
+	// Load .env before flag.Parse so expanded ${NAME} references in config.json
+	// resolve against the merged environment. Silent no-op when absent; real
+	// shell env always wins over .env, per godotenv default.
+	_ = godotenv.Load()
+
 	var (
 		configPath = flag.String("config", "config.json", "path to config file")
 		logLevel   = flag.String("log-level", "info", "log level: debug|info|warn|error")

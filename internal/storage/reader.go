@@ -25,6 +25,17 @@ func fluxEscape(s string) string {
 	return s
 }
 
+// sourceFilter builds an optional `|> filter(...)` clause on the `source` tag.
+// Returns an empty string when source is "" so the caller still returns every
+// row, including pre-cluster data that has no source tag at all.
+func sourceFilter(source string) string {
+	if source == "" {
+		return ""
+	}
+	return fmt.Sprintf(`
+  |> filter(fn: (r) => r.source == "%s")`, fluxEscape(source))
+}
+
 // Resolution picks which bucket to query. PickResolution chooses one based on
 // the time span so the UI can render cheaply at wide zoom levels.
 type Resolution string
@@ -150,13 +161,17 @@ func (r *Reader) bucketFor(res Resolution) (string, error) {
 // QueryCycles returns probe_cycle rows for one target across [from, to].
 // If the picked rollup tier is empty (e.g. the 1h task hasn't run yet), it
 // falls back to successively finer tiers so fresh installs still show data.
-func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res Resolution) ([]CyclePoint, error) {
+//
+// source is optional: when empty, no source filter is applied — pre-cluster
+// data (no `source` tag) still renders. When set, rows are filtered to that
+// exact source value.
+func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res Resolution, source string) ([]CyclePoint, error) {
 	for _, try := range fallbackChain(res) {
 		bucket, err := r.bucketFor(try)
 		if err != nil {
 			return nil, err
 		}
-		points, err := r.queryCyclesFrom(ctx, bucket, ref, from, to)
+		points, err := r.queryCyclesFrom(ctx, bucket, ref, from, to, source)
 		if err != nil {
 			return nil, err
 		}
@@ -180,15 +195,15 @@ func fallbackChain(res Resolution) []Resolution {
 	}
 }
 
-func (r *Reader) queryCyclesFrom(ctx context.Context, bucket string, ref config.TargetRef, from, to time.Time) ([]CyclePoint, error) {
+func (r *Reader) queryCyclesFrom(ctx context.Context, bucket string, ref config.TargetRef, from, to time.Time, source string) ([]CyclePoint, error) {
 	flux := fmt.Sprintf(`
 from(bucket: "%s")
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "%s")
-  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
+  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")%s
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
-`, fluxEscape(bucket), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementCycle, fluxEscape(ref.Group), fluxEscape(ref.Target.Name))
+`, fluxEscape(bucket), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementCycle, fluxEscape(ref.Group), fluxEscape(ref.Target.Name), sourceFilter(source))
 
 	qAPI := r.client.QueryAPI(r.cfg.Org)
 	res2, err := qAPI.Query(ctx, flux)
@@ -238,16 +253,16 @@ from(bucket: "%s")
 }
 
 // QueryRTTs returns individual ping samples. Always reads the raw bucket —
-// rollups don't retain per-ping data.
-func (r *Reader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]RTTPoint, error) {
+// rollups don't retain per-ping data. See QueryCycles for `source` semantics.
+func (r *Reader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]RTTPoint, error) {
 	flux := fmt.Sprintf(`
 from(bucket: "%s")
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "%s")
-  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
+  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")%s
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
-`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementRTT, fluxEscape(ref.Group), fluxEscape(ref.Target.Name))
+`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementRTT, fluxEscape(ref.Group), fluxEscape(ref.Target.Name), sourceFilter(source))
 
 	qAPI := r.client.QueryAPI(r.cfg.Org)
 	res, err := qAPI.Query(ctx, flux)
@@ -275,16 +290,16 @@ from(bucket: "%s")
 // QueryHTTPSamples returns per-request HTTP samples for the target across the
 // given window. Always reads the raw bucket — HTTP samples aren't rolled up
 // because 1-2/cycle is already cheap and the status code wouldn't aggregate
-// usefully anyway.
-func (r *Reader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]HTTPPoint, error) {
+// usefully anyway. See QueryCycles for `source` semantics.
+func (r *Reader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]HTTPPoint, error) {
 	flux := fmt.Sprintf(`
 from(bucket: "%s")
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "%s")
-  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
+  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")%s
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
-`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementHTTP, fluxEscape(ref.Group), fluxEscape(ref.Target.Name))
+`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementHTTP, fluxEscape(ref.Group), fluxEscape(ref.Target.Name), sourceFilter(source))
 
 	qAPI := r.client.QueryAPI(r.cfg.Org)
 	res, err := qAPI.Query(ctx, flux)
@@ -315,10 +330,11 @@ from(bucket: "%s")
 // closest to `at`, within ±window. Picks by minimum absolute time distance
 // across all hop rows in the window, then returns every hop sharing that
 // cycle's timestamp. Empty result means no cycles hit the window.
-func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration) ([]HopPoint, error) {
+// See QueryCycles for `source` semantics.
+func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, source string) ([]HopPoint, error) {
 	from := at.Add(-window)
 	to := at.Add(window)
-	all, err := r.queryHopsRange(ctx, ref, from, to)
+	all, err := r.queryHopsRange(ctx, ref, from, to, source)
 	if err != nil {
 		return nil, err
 	}
@@ -347,20 +363,20 @@ func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.
 
 // QueryHopsTimeline returns every hop row across [from, to], sorted by time
 // then hop_index. Used by the UI heatmap to render per-hop loss over the
-// requested window.
-func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]HopPoint, error) {
-	return r.queryHopsRange(ctx, ref, from, to)
+// requested window. See QueryCycles for `source` semantics.
+func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]HopPoint, error) {
+	return r.queryHopsRange(ctx, ref, from, to, source)
 }
 
-func (r *Reader) queryHopsRange(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]HopPoint, error) {
+func (r *Reader) queryHopsRange(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]HopPoint, error) {
 	flux := fmt.Sprintf(`
 from(bucket: "%s")
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "%s")
-  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
+  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")%s
   |> pivot(rowKey: ["_time", "hop_index"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time", "hop_index"])
-`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementHop, fluxEscape(ref.Group), fluxEscape(ref.Target.Name))
+`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementHop, fluxEscape(ref.Group), fluxEscape(ref.Target.Name), sourceFilter(source))
 
 	qAPI := r.client.QueryAPI(r.cfg.Org)
 	res, err := qAPI.Query(ctx, flux)
@@ -415,8 +431,8 @@ func absDur(d time.Duration) time.Duration {
 // matching it. Grouping by hop_index and taking the latest per index — the
 // earlier approach — leaves stale rows for higher indexes when the path
 // shrinks, rendering phantom hops past the current target.
-func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef) ([]HopPoint, error) {
-	all, err := r.queryHopsRange(ctx, ref, time.Now().Add(-24*time.Hour), time.Now())
+func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, source string) ([]HopPoint, error) {
+	all, err := r.queryHopsRange(ctx, ref, time.Now().Add(-24*time.Hour), time.Now(), source)
 	if err != nil {
 		return nil, err
 	}

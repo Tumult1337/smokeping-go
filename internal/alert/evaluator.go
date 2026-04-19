@@ -37,9 +37,13 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, e Event)
 }
 
+// alertKey includes source so two vantage points probing the same target keep
+// independent sustained-hit counters. Otherwise a healthy master plus a laggy
+// slave would thrash each other's state on every cycle.
 type alertKey struct {
 	target string
 	alert  string
+	source string
 }
 
 type alertState struct {
@@ -117,7 +121,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			continue
 		}
 
-		key := alertKey{target: cy.Target.ID(), alert: name}
+		key := alertKey{target: cy.Target.ID(), alert: name, source: cy.Source}
 		st, ok := e.states[key]
 		if !ok {
 			st = &alertState{state: StateOK}
@@ -144,7 +148,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 
 		if prev != st.state {
 			e.log.Info("alert state change",
-				"target", cy.Target.ID(), "alert", name,
+				"target", cy.Target.ID(), "alert", name, "source", cy.Source,
 				"prev", prev, "next", st.state, "hits", st.consecHits)
 			e.dispatcher.Dispatch(ctx, Event{
 				Time:      cy.Time,

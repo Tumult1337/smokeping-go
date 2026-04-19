@@ -78,20 +78,20 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxDB) error
 	// Task names are versioned so a schema change (e.g. new percentile fields)
 	// triggers creation of a fresh task. Prior versions are deleted here so we
 	// don't duplicate rollup writes.
-	if err := deleteObsoleteTasks(ctx, log, client, orgID, "gosmokeping-1h", "gosmokeping-1h-v2"); err != nil {
+	if err := deleteObsoleteTasks(ctx, log, client, orgID, "gosmokeping-1h", "gosmokeping-1h-v2", "gosmokeping-1h-v3"); err != nil {
 		return err
 	}
-	if err := deleteObsoleteTasks(ctx, log, client, orgID, "gosmokeping-1d", "gosmokeping-1d-v2"); err != nil {
+	if err := deleteObsoleteTasks(ctx, log, client, orgID, "gosmokeping-1d", "gosmokeping-1d-v2", "gosmokeping-1d-v3"); err != nil {
 		return err
 	}
 
 	if cfg.Bucket1h != "" {
-		if err := ensureTask(ctx, log, client, orgID, "gosmokeping-1h-v3", fluxRollup(cfg.BucketRaw, cfg.Bucket1h, time.Hour), "1h"); err != nil {
+		if err := ensureTask(ctx, log, client, orgID, "gosmokeping-1h-v4", fluxRollup(cfg.BucketRaw, cfg.Bucket1h, time.Hour), "1h"); err != nil {
 			return err
 		}
 	}
 	if cfg.Bucket1d != "" {
-		if err := ensureTask(ctx, log, client, orgID, "gosmokeping-1d-v3", fluxRollup(cfg.Bucket1h, cfg.Bucket1d, 24*time.Hour), "1d"); err != nil {
+		if err := ensureTask(ctx, log, client, orgID, "gosmokeping-1d-v4", fluxRollup(cfg.Bucket1h, cfg.Bucket1d, 24*time.Hour), "1d"); err != nil {
 			return err
 		}
 	}

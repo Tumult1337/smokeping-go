@@ -20,13 +20,15 @@ import (
 
 // StorageReader is the subset of storage.Reader the API needs. A named interface
 // (vs. taking *storage.Reader) lets tests stub without spinning up Influx.
+// Trailing `source` parameter is optional: "" means no source filter
+// (backward-compat with pre-cluster data).
 type StorageReader interface {
-	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution) ([]storage.CyclePoint, error)
-	QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]storage.RTTPoint, error)
-	QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]storage.HTTPPoint, error)
-	QueryLatestHops(ctx context.Context, ref config.TargetRef) ([]storage.HopPoint, error)
-	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration) ([]storage.HopPoint, error)
-	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]storage.HopPoint, error)
+	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution, source string) ([]storage.CyclePoint, error)
+	QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.RTTPoint, error)
+	QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HTTPPoint, error)
+	QueryLatestHops(ctx context.Context, ref config.TargetRef, source string) ([]storage.HopPoint, error)
+	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, source string) ([]storage.HopPoint, error)
+	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error)
 }
 
 type Server struct {
@@ -62,6 +64,7 @@ func (s *Server) Router() http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", s.health)
+		r.Get("/sources", s.listSources)
 		r.Get("/targets", s.listTargets)
 		// Target IDs are group/name so routes must match two segments.
 		r.Get("/targets/{group}/{name}/cycles", s.getCycles)
@@ -119,33 +122,101 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 type targetDTO struct {
-	ID        string   `json:"id"`
-	Group     string   `json:"group"`
-	Name      string   `json:"name"`
-	Probe     string   `json:"probe"`
-	ProbeType string   `json:"probe_type,omitempty"`
-	Host      string   `json:"host,omitempty"`
-	URL       string   `json:"url,omitempty"`
-	Alerts    []string `json:"alerts,omitempty"`
+	ID         string   `json:"id"`
+	Group      string   `json:"group"`
+	GroupTitle string   `json:"group_title,omitempty"`
+	Name       string   `json:"name"`
+	Title      string   `json:"title,omitempty"`
+	Probe      string   `json:"probe"`
+	ProbeType  string   `json:"probe_type,omitempty"`
+	Host       string   `json:"host,omitempty"`
+	URL        string   `json:"url,omitempty"`
+	Alerts     []string `json:"alerts,omitempty"`
+	// Sources is the set of probe origins that will stamp cycles for this
+	// target. "master" when Target.Slaves is empty; otherwise the slave names
+	// listed there. Reflects intended topology from config, not which sources
+	// have historical data in storage.
+	Sources []string `json:"sources,omitempty"`
+}
+
+// listSources returns the set of distinct probe origins the UI can filter on.
+// Derived from config (master source + any slave names listed under
+// Target.Slaves). TODO(phase 11): swap for a live registry so the list only
+// includes slaves that have actually registered, not every slave ever
+// referenced in config.
+func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
+	cfg := s.store.Current()
+	seen := make(map[string]struct{})
+	var list []string
+	add := func(src string) {
+		if src == "" {
+			return
+		}
+		if _, ok := seen[src]; ok {
+			return
+		}
+		seen[src] = struct{}{}
+		list = append(list, src)
+	}
+
+	// Master source: "master" (or cfg.Cluster.Source override) when at least one
+	// target is probed locally — i.e. has no explicit slave assignment.
+	masterSource := "master"
+	if cfg.Cluster != nil && cfg.Cluster.Source != "" {
+		masterSource = cfg.Cluster.Source
+	}
+	for _, t := range cfg.AllTargets() {
+		if len(t.Target.Slaves) == 0 {
+			add(masterSource)
+			break
+		}
+	}
+	for _, t := range cfg.AllTargets() {
+		for _, name := range t.Target.Slaves {
+			add(name)
+		}
+	}
+	if list == nil {
+		list = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sources": list})
 }
 
 func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Current()
+	// Build a group→title map so we can echo g.Title on every target without
+	// scanning the group list for each one.
+	groupTitles := make(map[string]string, len(cfg.Targets))
+	for _, g := range cfg.Targets {
+		groupTitles[g.Group] = g.Title
+	}
+	masterSource := "master"
+	if cfg.Cluster != nil && cfg.Cluster.Source != "" {
+		masterSource = cfg.Cluster.Source
+	}
+
 	out := make([]targetDTO, 0)
 	for _, t := range cfg.AllTargets() {
 		pt := ""
 		if p, ok := cfg.Probes[t.Target.Probe]; ok {
 			pt = p.Type
 		}
+		sources := t.Target.Slaves
+		if len(sources) == 0 {
+			sources = []string{masterSource}
+		}
 		out = append(out, targetDTO{
-			ID:        t.ID(),
-			Group:     t.Group,
-			Name:      t.Target.Name,
-			Probe:     t.Target.Probe,
-			ProbeType: pt,
-			Host:      t.Target.Host,
-			URL:       t.Target.URL,
-			Alerts:    t.Target.Alerts,
+			ID:         t.ID(),
+			Group:      t.Group,
+			GroupTitle: groupTitles[t.Group],
+			Name:       t.Target.Name,
+			Title:      t.Target.Title,
+			Probe:      t.Target.Probe,
+			ProbeType:  pt,
+			Host:       t.Target.Host,
+			URL:        t.Target.URL,
+			Alerts:     t.Target.Alerts,
+			Sources:    sources,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -161,12 +232,13 @@ func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := pickResolution(r.URL.Query().Get("resolution"), from, to)
+	source := r.URL.Query().Get("source")
 
 	if s.reader == nil {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
 		return
 	}
-	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, res)
+	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, res, source)
 	if err != nil {
 		s.log.Warn("query cycles", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -193,7 +265,7 @@ func (s *Server) getRTTs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
 		return
 	}
-	points, err := s.reader.QueryRTTs(r.Context(), ref, from, to)
+	points, err := s.reader.QueryRTTs(r.Context(), ref, from, to, r.URL.Query().Get("source"))
 	if err != nil {
 		s.log.Warn("query rtts", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -225,7 +297,7 @@ func (s *Server) getHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "http window limited to 7d")
 		return
 	}
-	points, err := s.reader.QueryHTTPSamples(r.Context(), ref, from, to)
+	points, err := s.reader.QueryHTTPSamples(r.Context(), ref, from, to, r.URL.Query().Get("source"))
 	if err != nil {
 		s.log.Warn("query http", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -254,15 +326,16 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 	// hops view from any moment of the main chart. Absent = latest.
 	var hops []storage.HopPoint
 	var err error
+	source := r.URL.Query().Get("source")
 	if atStr := r.URL.Query().Get("at"); atStr != "" {
 		at, perr := parseTimeParam(atStr, time.Time{}, time.Now())
 		if perr != nil {
 			writeErr(w, http.StatusBadRequest, "invalid at: expected RFC3339, unix seconds, or duration like -1h")
 			return
 		}
-		hops, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute)
+		hops, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute, source)
 	} else {
-		hops, err = s.reader.QueryLatestHops(r.Context(), ref)
+		hops, err = s.reader.QueryLatestHops(r.Context(), ref, source)
 	}
 	if err != nil {
 		s.log.Warn("query hops", "err", err)
@@ -291,7 +364,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "hops/timeline window limited to 7d")
 		return
 	}
-	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to)
+	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, r.URL.Query().Get("source"))
 	if err != nil {
 		s.log.Warn("query hops timeline", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -317,7 +390,7 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	// Show the last 50 cycles from the raw bucket.
 	to := time.Now()
 	from := to.Add(-24 * time.Hour)
-	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.ResolutionRaw)
+	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.ResolutionRaw, r.URL.Query().Get("source"))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "query failed")
 		return

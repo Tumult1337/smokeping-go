@@ -138,6 +138,80 @@ func TestEvaluatorLifecycle(t *testing.T) {
 	}
 }
 
+// TestEvaluatorPerSourceState verifies that two sources probing the same
+// target keep independent sustained-hit counters, so a firing slave doesn't
+// reset a pending master (or vice-versa).
+func TestEvaluatorPerSourceState(t *testing.T) {
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    10,
+		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw"},
+		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+		Alerts: map[string]config.Alert{
+			"high-latency": {Condition: "rtt_median > 50ms", Sustained: 2, Actions: []string{"log"}},
+		},
+		Actions: map[string]config.Action{"log": {Type: "log"}},
+		Targets: []config.Group{{
+			Group: "g",
+			Targets: []config.Target{
+				{Name: "a", Host: "1.1.1.1", Probe: "icmp", Alerts: []string{"high-latency"}},
+			},
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("invalid config: %v", err)
+	}
+	store := config.NewStore("/dev/null", cfg)
+	disp := &fakeDispatcher{}
+	e, err := NewEvaluator(slog.New(slog.NewTextHandler(io.Discard, nil)), store, disp)
+	if err != nil {
+		t.Fatalf("new evaluator: %v", err)
+	}
+
+	ref := cfg.AllTargets()[0]
+	high := func(src string) scheduler.Cycle {
+		return scheduler.Cycle{
+			Target:    ref,
+			ProbeName: "icmp",
+			Source:    src,
+			Sent:      10,
+			Summary:   stats.Summary{Median: 100 * time.Millisecond},
+		}
+	}
+	ok := func(src string) scheduler.Cycle {
+		c := high(src)
+		c.Summary.Median = 10 * time.Millisecond
+		return c
+	}
+
+	ctx := context.Background()
+	// Master trips first, then resolves. Slave climbs through PENDING.
+	e.OnCycle(ctx, high("master"))  // master: OK → PENDING
+	e.OnCycle(ctx, high("slave-a")) // slave: OK → PENDING (independent)
+	e.OnCycle(ctx, ok("master"))    // master: PENDING → OK
+	e.OnCycle(ctx, high("slave-a")) // slave: PENDING → FIRING (sustained=2)
+
+	events := disp.snapshot()
+	if len(events) != 4 {
+		t.Fatalf("got %d events, want 4: %+v", len(events), events)
+	}
+	want := []struct {
+		source string
+		next   State
+	}{
+		{"master", StatePending},
+		{"slave-a", StatePending},
+		{"master", StateOK},
+		{"slave-a", StateFiring},
+	}
+	for i, w := range want {
+		if events[i].Cycle.Source != w.source || events[i].Next != w.next {
+			t.Errorf("event[%d]: got source=%q next=%s, want source=%q next=%s",
+				i, events[i].Cycle.Source, events[i].Next, w.source, w.next)
+		}
+	}
+}
+
 func TestDispatcherDiscord(t *testing.T) {
 	var mu sync.Mutex
 	var gotBodies []map[string]any

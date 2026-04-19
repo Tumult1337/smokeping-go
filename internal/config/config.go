@@ -13,11 +13,16 @@ type Config struct {
 	Interval time.Duration `json:"interval"`
 	Pings    int           `json:"pings"`
 
-	InfluxDB InfluxDB         `json:"influxdb"`
-	Probes   map[string]Probe `json:"probes"`
-	Targets  []Group          `json:"targets"`
-	Alerts   map[string]Alert `json:"alerts"`
+	InfluxDB InfluxDB          `json:"influxdb"`
+	Probes   map[string]Probe  `json:"probes"`
+	Targets  []Group           `json:"targets"`
+	Alerts   map[string]Alert  `json:"alerts"`
 	Actions  map[string]Action `json:"actions"`
+	// Cluster is optional. Absent = standalone (pre-cluster behavior).
+	// Present on a master to enable /api/v1/cluster/* endpoints and stamp
+	// locally-probed cycles with Source (default "master"). Present on a
+	// slave with MasterURL+Token+Name set.
+	Cluster *Cluster `json:"cluster,omitempty"`
 }
 
 type InfluxDB struct {
@@ -45,11 +50,31 @@ type Group struct {
 }
 
 type Target struct {
-	Name   string   `json:"name"`
+	Name string `json:"name"`
+	// Title is an optional display label; falls back to Name in the UI.
+	Title  string   `json:"title,omitempty"`
 	Host   string   `json:"host,omitempty"`
 	URL    string   `json:"url,omitempty"`
 	Probe  string   `json:"probe"`
 	Alerts []string `json:"alerts,omitempty"`
+	// Slaves optionally restricts probing of this target to a specific set of
+	// slave names. Empty = master probes the target locally.
+	Slaves []string `json:"slaves,omitempty"`
+}
+
+// Cluster configures master/slave coordination. Fields used by each role:
+//
+//	master: Token (required), Source (default "master")
+//	slave:  MasterURL, Token, Name (all required), PushEvery (default 5s)
+//
+// Slave identity is set via the --slave CLI flag, not a field here, so the
+// same config shape serves both roles without a redundant role= key.
+type Cluster struct {
+	MasterURL string `json:"master_url,omitempty"`
+	Token     string `json:"token,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Source    string `json:"source,omitempty"`
+	PushEvery string `json:"push_every,omitempty"`
 }
 
 type Alert struct {
@@ -66,14 +91,15 @@ type Action struct {
 }
 
 type rawConfig struct {
-	Listen   string                     `json:"listen"`
-	Interval string                     `json:"interval"`
-	Pings    int                        `json:"pings"`
-	InfluxDB InfluxDB                   `json:"influxdb"`
-	Probes   map[string]rawProbe        `json:"probes"`
-	Targets  []Group                    `json:"targets"`
-	Alerts   map[string]Alert           `json:"alerts"`
-	Actions  map[string]Action          `json:"actions"`
+	Listen   string              `json:"listen"`
+	Interval string              `json:"interval"`
+	Pings    int                 `json:"pings"`
+	InfluxDB InfluxDB            `json:"influxdb"`
+	Probes   map[string]rawProbe `json:"probes"`
+	Targets  []Group             `json:"targets"`
+	Alerts   map[string]Alert    `json:"alerts"`
+	Actions  map[string]Action   `json:"actions"`
+	Cluster  *Cluster            `json:"cluster,omitempty"`
 }
 
 type rawProbe struct {
@@ -103,7 +129,11 @@ func Load(path string) (*Config, error) {
 		Targets:  raw.Targets,
 		Alerts:   raw.Alerts,
 		Actions:  raw.Actions,
+		Cluster:  raw.Cluster,
 		Probes:   make(map[string]Probe, len(raw.Probes)),
+	}
+	if cfg.Cluster != nil && cfg.Cluster.Source == "" {
+		cfg.Cluster.Source = "master"
 	}
 
 	if raw.Interval == "" {

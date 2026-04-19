@@ -68,6 +68,11 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 		"group":  c.Target.Group,
 		"probe":  c.ProbeName,
 	}
+	// Omit the source tag when empty so pre-cluster data keeps writing to the
+	// same series it always did — an explicit "" tag would create a new one.
+	if c.Source != "" {
+		tags["source"] = c.Source
+	}
 
 	lossPct := 0.0
 	if c.Sent > 0 {
@@ -144,6 +149,9 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 			"group":     c.Target.Group,
 			"probe":     c.ProbeName,
 			"hop_index": strconv.Itoa(hop.Index),
+		}
+		if c.Source != "" {
+			hopTags["source"] = c.Source
 		}
 		summary := stats.Compute(hop.RTTs)
 		lossPct := 0.0
