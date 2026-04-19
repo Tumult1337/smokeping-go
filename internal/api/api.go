@@ -32,11 +32,12 @@ type StorageReader interface {
 }
 
 type Server struct {
-	log     *slog.Logger
-	store   *config.Store
-	reader  StorageReader
-	uiFS    fs.FS
-	startAt time.Time
+	log            *slog.Logger
+	store          *config.Store
+	reader         StorageReader
+	uiFS           fs.FS
+	clusterHandler http.Handler
+	startAt        time.Time
 }
 
 type Options struct {
@@ -46,15 +47,19 @@ type Options struct {
 	// UIFS is the filesystem holding the built SPA (index.html + assets/).
 	// May be nil — routes will 404 for UI paths in that case.
 	UIFS fs.FS
+	// ClusterHandler is the master-side sub-router for /api/v1/cluster/*. Nil
+	// in standalone or slave mode; set when the master exposes cluster endpoints.
+	ClusterHandler http.Handler
 }
 
 func New(opts Options) *Server {
 	return &Server{
-		log:     opts.Log,
-		store:   opts.Store,
-		reader:  opts.Reader,
-		uiFS:    opts.UIFS,
-		startAt: time.Now(),
+		log:            opts.Log,
+		store:          opts.Store,
+		reader:         opts.Reader,
+		uiFS:           opts.UIFS,
+		clusterHandler: opts.ClusterHandler,
+		startAt:        time.Now(),
 	}
 }
 
@@ -73,6 +78,9 @@ func (s *Server) Router() http.Handler {
 		r.Get("/targets/{group}/{name}/status", s.getStatus)
 		r.Get("/targets/{group}/{name}/hops", s.getHops)
 		r.Get("/targets/{group}/{name}/hops/timeline", s.getHopsTimeline)
+		if s.clusterHandler != nil {
+			r.Mount("/cluster", s.clusterHandler)
+		}
 	})
 
 	if s.uiFS != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/tumult/gosmokeping/internal/alert"
 	"github.com/tumult/gosmokeping/internal/api"
+	"github.com/tumult/gosmokeping/internal/cluster/master"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -61,6 +63,7 @@ func main() {
 		"targets", len(cfg.AllTargets()))
 
 	sinks := []scheduler.Sink{&scheduler.LogSink{Log: log}}
+	var clusterRegistry *master.Registry
 	var reader api.StorageReader
 	if cfg.InfluxDB.URL != "" && cfg.InfluxDB.Token != "" {
 		if err := storage.Bootstrap(ctx, log, cfg.InfluxDB); err != nil {
@@ -88,11 +91,23 @@ func main() {
 		sinks = append(sinks, evaluator)
 	}
 
+	// Build the fanout once — slave-inbound cycles flow through the exact same
+	// sinks as locally-probed ones (Writer, alert evaluator, log sink).
+	fanout := scheduler.Fanout(sinks...)
+
+	var clusterHandler http.Handler
+	if cfg.Cluster != nil && cfg.Cluster.Token != "" {
+		clusterRegistry = master.NewRegistry()
+		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token).Handler()
+		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
+	}
+
 	server := api.New(api.Options{
-		Log:    log,
-		Store:  store,
-		Reader: reader,
-		UIFS:   ui.FS(),
+		Log:            log,
+		Store:          store,
+		Reader:         reader,
+		UIFS:           ui.FS(),
+		ClusterHandler: clusterHandler,
 	})
 	go func() {
 		if err := api.Serve(ctx, log, cfg.Listen, server.Router()); err != nil {
@@ -101,7 +116,7 @@ func main() {
 		}
 	}()
 
-	sch := scheduler.New(log, registry, scheduler.Fanout(sinks...), cfg)
+	sch := scheduler.New(log, registry, fanout, cfg)
 	sch.Run(ctx)
 
 	log.Info("gosmokeping shutting down")
