@@ -124,7 +124,7 @@ body {
   font-size: 11px;
   letter-spacing: 0.06em;
 }
-.hops-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.hops-table td.num { text-align: left; font-variant-numeric: tabular-nums; }
 .hops-table tr:hover td { background: #1a1f2b; }
 .hops-table .hop-ip { color: #cfd3dd; font-family: monospace; }
 .hops-table .hop-none { color: #4a5160; font-style: italic; }
