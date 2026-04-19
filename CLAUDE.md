@@ -22,6 +22,9 @@ make test-integration   # needs INFLUX_URL/INFLUX_TOKEN/INFLUX_ORG
 make lint               # go vet
 make tidy               # go mod tidy
 go test ./internal/api -run TestHealth  # single test
+
+./gosmokeping -config config.json               # run master/standalone
+./gosmokeping --slave -config config.slave.json # run as cluster slave
 ```
 
 ICMP needs raw sockets; `make setcap` grants `CAP_NET_RAW` to the local binary.
@@ -105,10 +108,14 @@ Key points a reader can't derive from a single file:
   `/api/v1/cluster/{register,config,cycles}` behind a shared bearer
   token; `master.Server` plugs into the existing API listener via
   `api.Options.ClusterHandler` so one listener serves both UI and
-  ingest. Target assignment is config-only: `Target.Slaves: []` keeps a
-  target master-only; `["s1", "s2"]` ships it to those slaves and the
-  master does **not** also probe it. `BuildClusterConfig` also strips
-  `Alerts` so a stale slave can never mis-dispatch.
+  ingest. **Per-target assignment via `target.slaves`:** when the list
+  is empty (the default) the master and every registered slave probe
+  that target; when it's non-empty, only named slaves probe it and the
+  master skips it locally (`master.LocalTargets` filters the scheduler
+  view; the stored cfg stays authoritative for UI + ingest).
+  `BuildClusterConfig` filters per-slave via `X-Slave-Name` and strips
+  both `Alerts` (evaluated master-side) and `Slaves` (peer assignments
+  are none of a given slave's business) from the wire.
 
 - **Cycle source stamping:** every cycle carries a `Source` string (the
   slave's `Cluster.Name`, or `cfg.Cluster.Source`/`"master"` for local
@@ -130,6 +137,9 @@ Key points a reader can't derive from a single file:
 
 `config.example.json` is the canonical reference. Env expansion happens on the
 raw bytes before JSON parse (`${NAME}` form), so tokens can live in env vars.
+`main.go` loads `.env` from `filepath.Dir(--config)` first, then from cwd —
+this is load-bearing under systemd where cwd is `/`. Real shell env always
+wins over `.env` (godotenv default); a missing `.env` is a silent no-op.
 
 ## Integration tests
 

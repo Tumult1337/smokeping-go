@@ -5,23 +5,28 @@ import (
 	"flag"
 	"log/slog"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	// Load .env before flag.Parse so expanded ${NAME} references in config.json
-	// resolve against the merged environment. Silent no-op when absent; real
-	// shell env always wins over .env, per godotenv default.
-	_ = godotenv.Load()
-
 	var (
 		configPath = flag.String("config", "config.json", "path to config file")
 		logLevel   = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		slaveMode  = flag.Bool("slave", false, "run as a cluster slave (register + push to master, no local storage)")
 	)
 	flag.Parse()
+
+	// Load .env from the directory holding config.json first (the predictable
+	// deployment layout under systemd, where cwd is /), then fall back to
+	// whatever godotenv finds on the cwd. Silent no-op when absent; real shell
+	// env always wins over .env, per godotenv default.
+	if dir := filepath.Dir(*configPath); dir != "" && dir != "." {
+		_ = godotenv.Load(filepath.Join(dir, ".env"))
+	}
+	_ = godotenv.Load()
 
 	log := newLogger(*logLevel)
 	// Route package-level slog calls (e.g. in internal/probe) through the

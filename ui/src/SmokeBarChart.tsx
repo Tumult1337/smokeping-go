@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import uPlot, { type Options, type AlignedData } from "uplot";
+import { useEffect, useMemo, useRef } from "react";
+import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 
 interface Props {
@@ -17,11 +17,35 @@ interface Props {
 
 type Band = { lo: number; hi: number; alpha: number };
 
+// One source's worth of drawable state. The "all" view pushes one of these
+// per source into barsRef so the draw hook can paint each stack with its own
+// palette without cross-contaminating widths — each source's bar width is
+// derived from its own sample cadence, not the global union.
+type SourceStack = {
+  ts: number[];
+  bands: Band[][];
+  medians: number[];
+  losses: number[];
+  fill: (alpha: number) => string;
+  medianColor: string;
+};
+
+// Palette shared with SmokeChart. First entry is the historical teal so a
+// plain single-source chart looks unchanged.
+const PALETTE: { stroke: string; fill: (a: number) => string }[] = [
+  { stroke: "#5eead4", fill: (a) => `rgba(94,234,212,${a})` },
+  { stroke: "#f0b429", fill: (a) => `rgba(240,180,41,${a})` },
+  { stroke: "#e879f9", fill: (a) => `rgba(232,121,249,${a})` },
+  { stroke: "#38bdf8", fill: (a) => `rgba(56,189,248,${a})` },
+  { stroke: "#fb7185", fill: (a) => `rgba(251,113,133,${a})` },
+];
+
 // Classic SmokePing / cocopacket-style rendering: for each cycle we paint a
 // column the full width of its slot (bars touch, no gaps) and stack symmetric
 // percentile pairs every 5% as translucent bands — they accumulate into a
 // smooth smoke gradient that darkens around the median. The median tick on
-// top is colour-coded by per-cycle loss percentage.
+// top is colour-coded by per-cycle loss percentage. In multi-source "all"
+// view, each source gets its own palette entry and is drawn independently.
 export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -31,18 +55,46 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   onCyclePickRef.current = onCyclePick;
 
   // All data that the draw hook and scale-range callback read from live in
-  // refs — the uPlot instance is created once, so closures captured at
-  // construction time would go stale after each setData.
-  const bandsRef = useRef<Band[][]>([]);
-  const mediansRef = useRef<number[]>([]);
-  const lossesRef = useRef<number[]>([]);
+  // refs — the uPlot instance is created once per source set, so closures
+  // captured at construction time would go stale after each setData.
+  const stacksRef = useRef<SourceStack[]>([]);
   const yRangeRef = useRef<[number, number]>([0, 1]);
+
+  const built = useMemo(() => buildSources(points), [points]);
+  const sourcesKey = built.sources.join("|");
 
   useEffect(() => {
     if (!divRef.current) return;
 
     const msFmt = (v: number | null) => (v == null ? "—" : v.toFixed(2));
     const pctFmt = (v: number | null) => (v == null ? "—" : `${v.toFixed(1)}%`);
+
+    // Build one legend row per source. Order per source is
+    // min/p5/p25/median/p75/p95/max/loss — must match the data column order
+    // in buildSources().
+    const series: Series[] = [{}];
+    // Only prefix labels when disambiguating between sources — a single-source
+    // chart should read "min / p5 / …" unchanged.
+    const prefixed = built.sources.length > 1;
+    built.sources.forEach((name) => {
+      const prefix = prefixed && name ? `${name}/` : "";
+      const mk = (label: string, fmt: (v: number | null) => string): Series => ({
+        label: `${prefix}${label}`,
+        stroke: "transparent",
+        points: { show: false },
+        value: (_u, v) => fmt(v),
+      });
+      series.push(
+        mk("min", msFmt),
+        mk("p5", msFmt),
+        mk("p25", msFmt),
+        mk(prefixed ? name || "median" : "median", msFmt),
+        mk("p75", msFmt),
+        mk("p95", msFmt),
+        mk("max", msFmt),
+        mk("loss", pctFmt),
+      );
+    });
 
     const opts: Options = {
       width: divRef.current.clientWidth,
@@ -60,20 +112,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
           labelSize: 30,
         },
       ],
-      series: [
-        {},
-        // points: { show: false } suppresses the white sample markers uPlot
-        // otherwise draws on hover / at every data point. We paint our own
-        // bars in hooks.draw; the built-in points are redundant noise.
-        { label: "min",    stroke: "transparent", points: { show: false }, value: (_u, v) => msFmt(v) },
-        { label: "p5",     stroke: "transparent", points: { show: false }, value: (_u, v) => msFmt(v) },
-        { label: "p25",    stroke: "transparent", points: { show: false }, value: (_u, v) => msFmt(v) },
-        { label: "median", stroke: "transparent", points: { show: false }, value: (_u, v) => msFmt(v) },
-        { label: "p75",    stroke: "transparent", points: { show: false }, value: (_u, v) => msFmt(v) },
-        { label: "p95",    stroke: "transparent", points: { show: false }, value: (_u, v) => msFmt(v) },
-        { label: "max",    stroke: "transparent", points: { show: false }, value: (_u, v) => msFmt(v) },
-        { label: "loss",   stroke: "transparent", points: { show: false }, value: (_u, v) => pctFmt(v) },
-      ],
+      series,
       legend: { show: true, live: true },
       cursor: {
         points: { show: false },
@@ -83,58 +122,12 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       hooks: {
         draw: [
           (u) => {
-            const ts = u.data[0] as number[];
-            const bandsArr = bandsRef.current;
-            const medians = mediansRef.current;
-            const losses = lossesRef.current;
-            const n = ts.length;
-            if (n === 0 || bandsArr.length !== n) return;
-
+            const stacks = stacksRef.current;
+            if (stacks.length === 0) return;
             const ctx = u.ctx;
             ctx.save();
-
-            // Each bar spans from the midpoint to its previous neighbour to the
-            // midpoint to its next neighbour, so columns always touch without
-            // overlap regardless of how uneven the sample cadence is. Endpoint
-            // bars mirror their single neighbour's gap so they stay the same
-            // width as the adjacent bar rather than jutting off to the axis.
-            const cxs = ts.map((t) => u.valToPos(t, "x", true));
-
-            for (let i = 0; i < n; i++) {
-              const cx = cxs[i];
-              let leftEdge: number;
-              let rightEdge: number;
-              if (n === 1) {
-                leftEdge = cx - 3;
-                rightEdge = cx + 3;
-              } else if (i === 0) {
-                rightEdge = (cx + cxs[i + 1]) / 2;
-                leftEdge = cx - (rightEdge - cx);
-              } else if (i === n - 1) {
-                leftEdge = (cxs[i - 1] + cx) / 2;
-                rightEdge = cx + (cx - leftEdge);
-              } else {
-                leftEdge = (cxs[i - 1] + cx) / 2;
-                rightEdge = (cx + cxs[i + 1]) / 2;
-              }
-              // Floor left / ceil right so consecutive bars share their boundary
-              // pixel instead of leaving a sub-pixel gap from independent rounding.
-              // Translucent fills make the 1px overlap invisible.
-              const x = Math.floor(leftEdge);
-              const w = Math.max(1, Math.ceil(rightEdge) - x);
-
-              for (const band of bandsArr[i]) {
-                const yHi = u.valToPos(band.hi, "y", true);
-                const yLo = u.valToPos(band.lo, "y", true);
-                ctx.fillStyle = `rgba(94,234,212,${band.alpha})`;
-                ctx.fillRect(x, yHi, w, yLo - yHi);
-              }
-
-              // Median tick — 1px line across the cell so dense regions still
-              // show a clear centre, matching classic SmokePing.
-              const yMed = Math.round(u.valToPos(medians[i], "y", true));
-              ctx.fillStyle = lossColor(losses[i]);
-              ctx.fillRect(x, yMed, w, 1);
+            for (const stack of stacks) {
+              drawStack(u, ctx, stack);
             }
             ctx.restore();
           },
@@ -142,21 +135,32 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       },
     };
 
-    const empty: AlignedData = [[], [], [], [], [], [], [], [], []];
+    // Empty columns per series so setData can grow without reshuffling.
+    const empty: AlignedData = [[], ...series.slice(1).map(() => [] as number[])] as AlignedData;
     plotRef.current = new uPlot(opts, empty, divRef.current);
 
-    // Click-to-pick: resolve the hovered sample via cursor.idx and hand its
-    // unix timestamp to the parent. Attached on u.over so it catches clicks
-    // over the plot area but not axes / padding.
+    // Click-to-pick: walk every source's own ts array and pick the sample
+    // closest to the cursor's x value (in data space). The union-based
+    // cursor.idx doesn't help here because each source owns its own index.
     const over = plotRef.current.over;
     const onClick = () => {
       const u = plotRef.current;
       const cb = onCyclePickRef.current;
       if (!u || !cb) return;
-      const idx = u.cursor.idx;
-      if (idx == null) return;
-      const t = u.data[0][idx] as number | undefined;
-      if (t != null) cb(t);
+      const xVal = u.posToVal(u.cursor.left ?? -1, "x");
+      if (!isFinite(xVal)) return;
+      let best: number | null = null;
+      let bestDist = Infinity;
+      for (const stack of stacksRef.current) {
+        for (const t of stack.ts) {
+          const d = Math.abs(t - xVal);
+          if (d < bestDist) {
+            bestDist = d;
+            best = t;
+          }
+        }
+      }
+      if (best != null) cb(best);
     };
     over.addEventListener("click", onClick);
     const ro = new ResizeObserver(() => {
@@ -174,80 +178,28 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [height]);
+    // sourcesKey rebuilds the chart when the set of sources changes; data-only
+    // updates flow through the setData effect below.
+  }, [height, sourcesKey]);
 
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
 
-    if (points.length === 0) {
-      bandsRef.current = [];
-      mediansRef.current = [];
-      lossesRef.current = [];
+    if (built.stacks.length === 0) {
+      stacksRef.current = [];
       yRangeRef.current = [0, 1];
-      u.setData([[], [], [], [], [], [], [], [], []]);
+      u.setData(built.data);
       return;
     }
 
-    const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-    const mins = points.map((p) => p.Min);
-    const maxs = points.map((p) => p.Max);
-    const medians = points.map((p) => p.Median);
-    const losses = points.map((p) => p.LossPct);
-
-    // Build the stack of percentile pairs for the layered smoke. Any pair
-    // that comes back fully zero (older data, before 5%-step percentiles were
-    // stored) is dropped so legacy rollups still render something useful.
-    const bands: Band[][] = points.map((p) => {
-      const all: Band[] = [
-        { lo: p.Min, hi: p.Max, alpha: 0.07 },
-        { lo: p.P5,  hi: p.P95, alpha: 0.09 },
-        { lo: p.P10, hi: p.P90, alpha: 0.11 },
-        { lo: p.P15, hi: p.P85, alpha: 0.13 },
-        { lo: p.P20, hi: p.P80, alpha: 0.15 },
-        { lo: p.P25, hi: p.P75, alpha: 0.17 },
-        { lo: p.P30, hi: p.P70, alpha: 0.20 },
-        { lo: p.P35, hi: p.P65, alpha: 0.23 },
-        { lo: p.P40, hi: p.P60, alpha: 0.26 },
-        { lo: p.P45, hi: p.P55, alpha: 0.30 },
-      ];
-      return all.filter((b) => b.hi > b.lo);
-    });
-
-    let yLo = Infinity;
-    let yHi = -Infinity;
-    for (const v of mins) if (v < yLo) yLo = v;
-    for (const v of maxs) if (v > yHi) yHi = v;
-    if (!isFinite(yLo) || !isFinite(yHi)) {
-      yLo = 0;
-      yHi = 1;
-    }
-    const yPad = Math.max(1, (yHi - yLo) * 0.1);
-
-    bandsRef.current = bands;
-    mediansRef.current = medians;
-    lossesRef.current = losses;
-    yRangeRef.current = [Math.max(0, yLo - yPad), yHi + yPad];
-
-    // Data layout: x then percentiles in ascending order (min, p5, p25, median,
-    // p75, p95, max) followed by loss. Order here must match the `series` array
-    // above so the hover legend reads left-to-right as the smoke stacks.
-    const data: AlignedData = [
-      ts,
-      mins,
-      points.map((p) => p.P5),
-      points.map((p) => p.P25),
-      medians,
-      points.map((p) => p.P75),
-      points.map((p) => p.P95),
-      maxs,
-      losses,
-    ];
-    u.setData(data);
+    stacksRef.current = built.stacks;
+    yRangeRef.current = built.yRange;
+    u.setData(built.data);
     // setData already triggers a redraw, but hooks.draw closes over refs we
-    // just mutated — force another pass so the fresh bands/medians land.
+    // just mutated — force another pass so the fresh stacks land.
     u.redraw(false, true);
-  }, [points]);
+  }, [built]);
 
   useEffect(() => {
     const u = plotRef.current;
@@ -263,8 +215,176 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   );
 }
 
-function lossColor(pct: number): string {
-  if (pct <= 0) return "#5eead4";
+type Built = {
+  sources: string[];
+  data: AlignedData;
+  stacks: SourceStack[];
+  yRange: [number, number];
+};
+
+function buildSources(points: CyclePoint[]): Built {
+  if (points.length === 0) {
+    return {
+      sources: [],
+      data: [[]],
+      stacks: [],
+      yRange: [0, 1],
+    };
+  }
+
+  const bySource = new Map<string, CyclePoint[]>();
+  for (const p of points) {
+    const key = p.Source ?? "";
+    let arr = bySource.get(key);
+    if (!arr) {
+      arr = [];
+      bySource.set(key, arr);
+    }
+    arr.push(p);
+  }
+  const sources = [...bySource.keys()].sort();
+
+  // Union x-axis so the cursor can pick any source's sample. Each source's
+  // values stay on its own index domain inside the stack; uPlot only uses
+  // the union for cursor + legend alignment.
+  const tsSet = new Set<number>();
+  for (const [, arr] of bySource) {
+    for (const p of arr) tsSet.add(Math.floor(new Date(p.Time).getTime() / 1000));
+  }
+  const xs = [...tsSet].sort((a, b) => a - b);
+  const xIdx = new Map<number, number>();
+  xs.forEach((t, i) => xIdx.set(t, i));
+
+  const data: (number | null)[][] = [xs];
+  const stacks: SourceStack[] = [];
+  let yLo = Infinity;
+  let yHi = -Infinity;
+
+  sources.forEach((name, srcIdx) => {
+    const palette = PALETTE[srcIdx % PALETTE.length];
+    const pts = bySource.get(name)!.slice().sort(
+      (a, b) => new Date(a.Time).getTime() - new Date(b.Time).getTime(),
+    );
+
+    const ts = pts.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
+    const medians = pts.map((p) => p.Median);
+    const losses = pts.map((p) => p.LossPct);
+
+    // Per-cycle percentile stack — any fully-zero pair (legacy rollups before
+    // the 5% step) gets filtered so old data still renders something useful.
+    const bands: Band[][] = pts.map((p) => {
+      const all: Band[] = [
+        { lo: p.Min, hi: p.Max, alpha: 0.07 },
+        { lo: p.P5, hi: p.P95, alpha: 0.09 },
+        { lo: p.P10, hi: p.P90, alpha: 0.11 },
+        { lo: p.P15, hi: p.P85, alpha: 0.13 },
+        { lo: p.P20, hi: p.P80, alpha: 0.15 },
+        { lo: p.P25, hi: p.P75, alpha: 0.17 },
+        { lo: p.P30, hi: p.P70, alpha: 0.20 },
+        { lo: p.P35, hi: p.P65, alpha: 0.23 },
+        { lo: p.P40, hi: p.P60, alpha: 0.26 },
+        { lo: p.P45, hi: p.P55, alpha: 0.30 },
+      ];
+      return all.filter((b) => b.hi > b.lo);
+    });
+
+    for (const p of pts) {
+      if (p.Min < yLo) yLo = p.Min;
+      if (p.Max > yHi) yHi = p.Max;
+    }
+
+    // Build 8 aligned columns on the union x-axis: min/p5/p25/median/p75/p95/
+    // max/loss. Only legend readouts use this; the draw hook works directly
+    // off the SourceStack instead. Unused slots are null so hover over a
+    // neighbour's slot shows "—" for this source.
+    const cols: (number | null)[][] = Array.from({ length: 8 }, () => xs.map(() => null));
+    pts.forEach((p, i) => {
+      const idx = xIdx.get(ts[i]);
+      if (idx == null) return;
+      cols[0][idx] = p.Min;
+      cols[1][idx] = p.P5;
+      cols[2][idx] = p.P25;
+      cols[3][idx] = p.Median;
+      cols[4][idx] = p.P75;
+      cols[5][idx] = p.P95;
+      cols[6][idx] = p.Max;
+      cols[7][idx] = p.LossPct;
+    });
+    cols.forEach((c) => data.push(c));
+
+    stacks.push({
+      ts,
+      bands,
+      medians,
+      losses,
+      fill: palette.fill,
+      // The loss-colour helper honours the palette stroke for the zero-loss
+      // case; lossy cycles stay yellow/orange/red regardless of source so
+      // outages are visually loud.
+      medianColor: palette.stroke,
+    });
+  });
+
+  if (!isFinite(yLo) || !isFinite(yHi)) {
+    yLo = 0;
+    yHi = 1;
+  }
+  const yPad = Math.max(1, (yHi - yLo) * 0.1);
+
+  return {
+    sources,
+    data: data as AlignedData,
+    stacks,
+    yRange: [Math.max(0, yLo - yPad), yHi + yPad],
+  };
+}
+
+function drawStack(u: uPlot, ctx: CanvasRenderingContext2D, stack: SourceStack) {
+  const { ts, bands: bandsArr, medians, losses } = stack;
+  const n = ts.length;
+  if (n === 0) return;
+
+  // Each bar spans from the midpoint to its previous neighbour to the
+  // midpoint to its next neighbour, so columns always touch without overlap
+  // regardless of how uneven the sample cadence is. Endpoint bars mirror
+  // their single neighbour's gap.
+  const cxs = ts.map((t) => u.valToPos(t, "x", true));
+
+  for (let i = 0; i < n; i++) {
+    const cx = cxs[i];
+    let leftEdge: number;
+    let rightEdge: number;
+    if (n === 1) {
+      leftEdge = cx - 3;
+      rightEdge = cx + 3;
+    } else if (i === 0) {
+      rightEdge = (cx + cxs[i + 1]) / 2;
+      leftEdge = cx - (rightEdge - cx);
+    } else if (i === n - 1) {
+      leftEdge = (cxs[i - 1] + cx) / 2;
+      rightEdge = cx + (cx - leftEdge);
+    } else {
+      leftEdge = (cxs[i - 1] + cx) / 2;
+      rightEdge = (cx + cxs[i + 1]) / 2;
+    }
+    const x = Math.floor(leftEdge);
+    const w = Math.max(1, Math.ceil(rightEdge) - x);
+
+    for (const band of bandsArr[i]) {
+      const yHi = u.valToPos(band.hi, "y", true);
+      const yLo = u.valToPos(band.lo, "y", true);
+      ctx.fillStyle = stack.fill(band.alpha);
+      ctx.fillRect(x, yHi, w, yLo - yHi);
+    }
+
+    const yMed = Math.round(u.valToPos(medians[i], "y", true));
+    ctx.fillStyle = lossColor(losses[i], stack.medianColor);
+    ctx.fillRect(x, yMed, w, 1);
+  }
+}
+
+function lossColor(pct: number, okColor: string): string {
+  if (pct <= 0) return okColor;
   if (pct < 5) return "#eab308";
   if (pct < 20) return "#f97316";
   return "#ef4444";

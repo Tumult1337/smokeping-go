@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import uPlot, { type Options, type AlignedData } from "uplot";
+import { useEffect, useMemo, useRef } from "react";
+import uPlot, { type Options, type AlignedData, type Series, type Band } from "uplot";
 import type { CyclePoint } from "./api";
 
 interface Props {
@@ -10,18 +10,37 @@ interface Props {
   onCyclePick?: (timeSec: number) => void;
 }
 
+// Palette rotated per source so multi-source "all" view stays readable. First
+// entry is the historical single-source teal so plain 1-source charts look
+// unchanged.
+const PALETTE: { stroke: string; fill: (a: number) => string }[] = [
+  { stroke: "#5eead4", fill: (a) => `rgba(94,234,212,${a})` },
+  { stroke: "#f0b429", fill: (a) => `rgba(240,180,41,${a})` },
+  { stroke: "#e879f9", fill: (a) => `rgba(232,121,249,${a})` },
+  { stroke: "#38bdf8", fill: (a) => `rgba(56,189,248,${a})` },
+  { stroke: "#fb7185", fill: (a) => `rgba(251,113,133,${a})` },
+];
+
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
 // median line on top. uPlot's native "band" feature fills the area between
 // two series, which is exactly what we need — no custom drawing.
+//
+// Multi-source targets ("all" view) fan out into one band-stack per source
+// sharing a single x-axis. Each source gets its own colour from the palette
+// and its own set of 7 series; nulls at timestamps where that source didn't
+// probe are bridged with spanGaps so fills don't break across the interleave.
 export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const onCyclePickRef = useRef(onCyclePick);
   onCyclePickRef.current = onCyclePick;
 
-  // Create uPlot once. Data and scale updates flow through setData / setScale
-  // below so the DOM node never unmounts on refresh — otherwise the wrapper
-  // collapses mid-frame and the page scrolls.
+  const built = useMemo(() => buildAligned(points), [points]);
+  // Stable signature of the source set. Only when this changes do we have to
+  // tear down uPlot — series/bands topology depends on the source count, but
+  // in-place setData handles value updates.
+  const sourcesKey = built.sources.join("|");
+
   useEffect(() => {
     if (!divRef.current) return;
 
@@ -41,25 +60,12 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
           labelSize: 30,
         },
       ],
-      series: [
-        {},
-        { label: "min", stroke: "transparent", fill: "rgba(94,234,212,0.08)", points: { show: false } },
-        { label: "p5", stroke: "transparent", fill: "rgba(94,234,212,0.18)", points: { show: false } },
-        { label: "p25", stroke: "transparent", fill: "rgba(94,234,212,0.32)", points: { show: false } },
-        { label: "median", stroke: "#5eead4", width: 2, points: { show: false } },
-        { label: "p75", stroke: "transparent", fill: "rgba(94,234,212,0.32)", points: { show: false } },
-        { label: "p95", stroke: "transparent", fill: "rgba(94,234,212,0.18)", points: { show: false } },
-        { label: "max", stroke: "transparent", fill: "rgba(94,234,212,0.08)", points: { show: false } },
-      ],
-      bands: [
-        { series: [1, 7], fill: "rgba(94,234,212,0.10)" },
-        { series: [2, 6], fill: "rgba(94,234,212,0.18)" },
-        { series: [3, 5], fill: "rgba(94,234,212,0.28)" },
-      ],
+      series: built.series,
+      bands: built.bands,
       legend: { live: true },
     };
 
-    const empty: AlignedData = [[], [], [], [], [], [], [], []];
+    const empty: AlignedData = [[], ...built.series.slice(1).map(() => [] as number[])] as AlignedData;
     plotRef.current = new uPlot(opts, empty, divRef.current);
 
     const over = plotRef.current.over;
@@ -88,28 +94,15 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [height]);
+    // sourcesKey rebuilds the chart when the set of sources changes; data-only
+    // updates flow through the setData effect below so refreshes don't flash.
+  }, [height, sourcesKey]);
 
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
-    if (points.length === 0) {
-      u.setData([[], [], [], [], [], [], [], []]);
-      return;
-    }
-    const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-    const data: AlignedData = [
-      ts,
-      points.map((p) => p.Min),
-      points.map((p) => p.P5),
-      points.map((p) => p.P25),
-      points.map((p) => p.Median),
-      points.map((p) => p.P75),
-      points.map((p) => p.P95),
-      points.map((p) => p.Max),
-    ];
-    u.setData(data);
-  }, [points]);
+    u.setData(built.data);
+  }, [built]);
 
   useEffect(() => {
     const u = plotRef.current;
@@ -123,4 +116,116 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
       {points.length === 0 && <div className="chart-empty">No data in range</div>}
     </div>
   );
+}
+
+type Built = {
+  sources: string[];
+  data: AlignedData;
+  series: Series[];
+  bands: Band[];
+};
+
+const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
+const PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max"] as const;
+
+function buildAligned(points: CyclePoint[]): Built {
+  const xSeries: Series = {};
+  if (points.length === 0) {
+    // Keep a single-band topology so the legend doesn't flicker between
+    // zero-source and one-source states while loading.
+    const palette = PALETTE[0];
+    return {
+      sources: [""],
+      data: [[], [], [], [], [], [], [], []],
+      series: [xSeries, ...seriesFor("", palette)],
+      bands: bandsFor(1),
+    };
+  }
+
+  const bySource = new Map<string, CyclePoint[]>();
+  for (const p of points) {
+    const key = p.Source ?? "";
+    let arr = bySource.get(key);
+    if (!arr) {
+      arr = [];
+      bySource.set(key, arr);
+    }
+    arr.push(p);
+  }
+  const sources = [...bySource.keys()].sort();
+  // Only prefix legend labels when there's something to disambiguate — a plain
+  // single-source chart should read "min / p5 / median / …" like it always has.
+  const prefixed = sources.length > 1;
+
+  const tsSet = new Set<number>();
+  for (const [, arr] of bySource) {
+    for (const p of arr) tsSet.add(Math.floor(new Date(p.Time).getTime() / 1000));
+  }
+  const xs = [...tsSet].sort((a, b) => a - b);
+  const xIdx = new Map<number, number>();
+  xs.forEach((t, i) => xIdx.set(t, i));
+
+  const data: (number | null)[][] = [xs];
+  const series: Series[] = [xSeries];
+  const bands: Band[] = [];
+
+  sources.forEach((name, srcIdx) => {
+    const palette = PALETTE[srcIdx % PALETTE.length];
+    const cols: (number | null)[][] = PCT_KEYS.map(() => xs.map(() => null));
+    for (const p of bySource.get(name)!) {
+      const i = xIdx.get(Math.floor(new Date(p.Time).getTime() / 1000));
+      if (i == null) continue;
+      PCT_KEYS.forEach((k, c) => {
+        cols[c][i] = p[k];
+      });
+    }
+    cols.forEach((c) => data.push(c));
+    series.push(...seriesFor(prefixed ? name : "", palette));
+  });
+
+  bands.push(...bandsFor(sources.length));
+
+  return {
+    sources,
+    data: data as AlignedData,
+    series,
+    bands,
+  };
+}
+
+// seriesFor returns the 7 series that back one source's smoke stack. Order
+// must stay in sync with PCT_KEYS / bandsFor so band indices line up.
+function seriesFor(
+  name: string,
+  palette: { stroke: string; fill: (a: number) => string },
+): Series[] {
+  const prefix = name ? `${name}/` : "";
+  const mk = (label: string, opts: Partial<Series>): Series => ({
+    label: `${prefix}${label}`,
+    points: { show: false },
+    spanGaps: true,
+    ...opts,
+  });
+  return [
+    mk(PCT_LABELS[0], { stroke: "transparent", fill: palette.fill(0.08) }),
+    mk(PCT_LABELS[1], { stroke: "transparent", fill: palette.fill(0.18) }),
+    mk(PCT_LABELS[2], { stroke: "transparent", fill: palette.fill(0.28) }),
+    mk(name || PCT_LABELS[3], { stroke: palette.stroke, width: 2 }),
+    mk(PCT_LABELS[4], { stroke: "transparent", fill: palette.fill(0.28) }),
+    mk(PCT_LABELS[5], { stroke: "transparent", fill: palette.fill(0.18) }),
+    mk(PCT_LABELS[6], { stroke: "transparent", fill: palette.fill(0.08) }),
+  ];
+}
+
+function bandsFor(sourceCount: number): Band[] {
+  const out: Band[] = [];
+  for (let i = 0; i < sourceCount; i++) {
+    const palette = PALETTE[i % PALETTE.length];
+    const base = 1 + i * 7; // first series col after x
+    // min↔max (outer), p5↔p95, p25↔p75 (darkest).
+    out.push({ series: [base + 0, base + 6], fill: palette.fill(0.10) });
+    out.push({ series: [base + 1, base + 5], fill: palette.fill(0.18) });
+    out.push({ series: [base + 2, base + 4], fill: palette.fill(0.28) });
+  }
+  return out;
 }

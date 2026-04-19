@@ -62,9 +62,12 @@ func PickResolution(from, to time.Time) Resolution {
 	}
 }
 
-// CyclePoint is one row of probe_cycle aggregate data.
+// CyclePoint is one row of probe_cycle aggregate data. Source identifies which
+// probe origin (master / slave name) produced the row; empty for pre-cluster
+// rows that have no `source` tag.
 type CyclePoint struct {
 	Time      time.Time
+	Source    string
 	Min       float64
 	Max       float64
 	Mean      float64
@@ -218,6 +221,7 @@ from(bucket: "%s")
 		vals := rec.Values()
 		out = append(out, CyclePoint{
 			Time:      rec.Time(),
+			Source:    stringOf(vals["source"]),
 			Min:       floatOf(vals["rtt_min"]),
 			Max:       floatOf(vals["rtt_max"]),
 			Mean:      floatOf(vals["rtt_mean"]),

@@ -32,6 +32,7 @@ export interface HopsResponse {
 
 export interface CyclePoint {
   Time: string;
+  Source: string;
   Min: number;
   Max: number;
   Mean: number;

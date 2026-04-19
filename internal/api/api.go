@@ -31,12 +31,20 @@ type StorageReader interface {
 	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error)
 }
 
+// SlaveLister reports the names of slaves currently registered with the
+// master. Master mode plugs the cluster Registry in here; standalone and
+// slave mode leave it nil.
+type SlaveLister interface {
+	Names() []string
+}
+
 type Server struct {
 	log            *slog.Logger
 	store          *config.Store
 	reader         StorageReader
 	uiFS           fs.FS
 	clusterHandler http.Handler
+	slaves         SlaveLister
 	startAt        time.Time
 }
 
@@ -50,6 +58,9 @@ type Options struct {
 	// ClusterHandler is the master-side sub-router for /api/v1/cluster/*. Nil
 	// in standalone or slave mode; set when the master exposes cluster endpoints.
 	ClusterHandler http.Handler
+	// Slaves is the live slave registry used to compute /sources. Nil when
+	// not in master mode.
+	Slaves SlaveLister
 }
 
 func New(opts Options) *Server {
@@ -59,6 +70,7 @@ func New(opts Options) *Server {
 		reader:         opts.Reader,
 		uiFS:           opts.UIFS,
 		clusterHandler: opts.ClusterHandler,
+		slaves:         opts.Slaves,
 		startAt:        time.Now(),
 	}
 }
@@ -140,54 +152,33 @@ type targetDTO struct {
 	Host       string   `json:"host,omitempty"`
 	URL        string   `json:"url,omitempty"`
 	Alerts     []string `json:"alerts,omitempty"`
-	// Sources is the set of probe origins that will stamp cycles for this
-	// target. "master" when Target.Slaves is empty; otherwise the slave names
-	// listed there. Reflects intended topology from config, not which sources
-	// have historical data in storage.
+	// Sources lists the probe origins that actually ping this target right
+	// now: the master (when it probes locally) plus every registered slave
+	// that is either unassigned globally or named in the target's Slaves
+	// list. The UI uses this to render per-target source chips instead of a
+	// single global list.
 	Sources []string `json:"sources,omitempty"`
 }
 
-// listSources returns the set of distinct probe origins the UI can filter on.
-// Derived from config (master source + any slave names listed under
-// Target.Slaves). TODO(phase 11): swap for a live registry so the list only
-// includes slaves that have actually registered, not every slave ever
-// referenced in config.
+// listSources returns the set of distinct probe origins the UI can filter on:
+// the master's own source stamp plus every slave currently registered. Since
+// slaves probe every target, the same list applies to every row in the UI.
 func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Current()
-	seen := make(map[string]struct{})
-	var list []string
-	add := func(src string) {
-		if src == "" {
-			return
-		}
-		if _, ok := seen[src]; ok {
-			return
-		}
-		seen[src] = struct{}{}
-		list = append(list, src)
-	}
-
-	// Master source: "master" (or cfg.Cluster.Source override) when at least one
-	// target is probed locally — i.e. has no explicit slave assignment.
-	masterSource := "master"
-	if cfg.Cluster != nil && cfg.Cluster.Source != "" {
-		masterSource = cfg.Cluster.Source
-	}
-	for _, t := range cfg.AllTargets() {
-		if len(t.Target.Slaves) == 0 {
-			add(masterSource)
-			break
-		}
-	}
-	for _, t := range cfg.AllTargets() {
-		for _, name := range t.Target.Slaves {
-			add(name)
-		}
-	}
-	if list == nil {
-		list = []string{}
+	list := []string{masterSourceName(cfg)}
+	if s.slaves != nil {
+		list = append(list, s.slaves.Names()...)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sources": list})
+}
+
+// masterSourceName returns the string the master stamps on its own locally
+// probed cycles — `cluster.source` if set, else "master".
+func masterSourceName(cfg *config.Config) string {
+	if cfg.Cluster != nil && cfg.Cluster.Source != "" {
+		return cfg.Cluster.Source
+	}
+	return "master"
 }
 
 func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
@@ -198,9 +189,11 @@ func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
 	for _, g := range cfg.Targets {
 		groupTitles[g.Group] = g.Title
 	}
-	masterSource := "master"
-	if cfg.Cluster != nil && cfg.Cluster.Source != "" {
-		masterSource = cfg.Cluster.Source
+
+	masterSource := masterSourceName(cfg)
+	var registered []string
+	if s.slaves != nil {
+		registered = s.slaves.Names()
 	}
 
 	out := make([]targetDTO, 0)
@@ -208,10 +201,6 @@ func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
 		pt := ""
 		if p, ok := cfg.Probes[t.Target.Probe]; ok {
 			pt = p.Type
-		}
-		sources := t.Target.Slaves
-		if len(sources) == 0 {
-			sources = []string{masterSource}
 		}
 		out = append(out, targetDTO{
 			ID:         t.ID(),
@@ -224,10 +213,35 @@ func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
 			Host:       t.Target.Host,
 			URL:        t.Target.URL,
 			Alerts:     t.Target.Alerts,
-			Sources:    sources,
+			Sources:    effectiveSources(t.Target, masterSource, registered),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// effectiveSources returns the probe origins that currently ping this target.
+// Unassigned targets (empty t.Slaves) are probed by the master plus every
+// registered slave. Assigned targets are probed only by the named slaves;
+// the master skips them locally so it's excluded. Assigned slaves that
+// haven't registered are omitted — they're not actually probing yet.
+func effectiveSources(t config.Target, masterSource string, registered []string) []string {
+	if len(t.Slaves) == 0 {
+		out := make([]string, 0, len(registered)+1)
+		out = append(out, masterSource)
+		out = append(out, registered...)
+		return out
+	}
+	assigned := make(map[string]struct{}, len(t.Slaves))
+	for _, s := range t.Slaves {
+		assigned[s] = struct{}{}
+	}
+	out := make([]string, 0, len(t.Slaves))
+	for _, s := range registered {
+		if _, ok := assigned[s]; ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {

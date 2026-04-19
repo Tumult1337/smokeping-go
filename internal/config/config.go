@@ -57,8 +57,11 @@ type Target struct {
 	URL    string   `json:"url,omitempty"`
 	Probe  string   `json:"probe"`
 	Alerts []string `json:"alerts,omitempty"`
-	// Slaves optionally restricts probing of this target to a specific set of
-	// slave names. Empty = master probes the target locally.
+	// Slaves restricts probing to the listed slave names. When empty, the
+	// master and every registered slave probe this target (pre-assignment
+	// default). When non-empty, only listed slaves probe it — the master
+	// skips it locally, and slaves not in the list receive a filtered
+	// /cluster/config that omits it entirely.
 	Slaves []string `json:"slaves,omitempty"`
 }
 

@@ -4,60 +4,45 @@
   "pings": 10,
 
   "influxdb": {
-    "url": "http://localhost:8086",
+    "url": "${INFLUX_URL}",
     "token": "${INFLUX_TOKEN}",
-    "org": "default",
+    "org": "${INFLUX_ORG}",
     "bucket_raw": "smokeping_raw",
     "bucket_1h": "smokeping_1h",
     "bucket_1d": "smokeping_1d"
   },
 
   "probes": {
-    "icmp": { "type": "icmp", "timeout": "5s" },
-    "http": { "type": "http", "timeout": "10s" },
+    "icmp":          { "type": "icmp", "timeout": "5s" },
+    "http":          { "type": "http", "timeout": "10s" },
     "http-insecure": { "type": "http", "timeout": "10s", "insecure": true },
-    "tcp":  { "type": "tcp",  "timeout": "5s" },
-    "dns":  { "type": "dns",  "timeout": "5s" },
-    "mtr":  { "type": "mtr",  "timeout": "2s" }
+    "tcp":           { "type": "tcp",  "timeout": "5s" },
+    "dns":           { "type": "dns",  "timeout": "5s" },
+    "mtr":           { "type": "mtr",  "timeout": "2s" }
   },
 
   "targets": [
     {
-      "group": "core-infra",
-      "title": "Core Infrastructure",
-      "targets": [
-        { "name": "gateway", "host": "10.0.0.1", "probe": "icmp", "alerts": ["high-loss", "high-latency", "down"] },
-        { "name": "dns",     "host": "10.0.0.2", "probe": "icmp", "alerts": ["down"] }
-      ]
-    },
-    {
       "group": "external",
       "title": "External",
       "targets": [
-        { "name": "cloudflare",   "host": "1.1.1.1",             "probe": "icmp" },
-        { "name": "google-dns",   "host": "8.8.8.8",             "probe": "icmp" },
-        { "name": "example-http", "url":  "https://example.com", "probe": "http", "alerts": ["high-loss", "high-latency"] },
-        { "name": "example-tcp",  "host": "example.com:443",     "probe": "tcp",  "alerts": ["high-loss"] },
-        { "name": "cloudflare-path", "host": "1.1.1.1",          "probe": "mtr",  "alerts": ["high-loss"] }
+        { "name": "cloudflare",      "host": "1.1.1.1",             "probe": "icmp", "alerts": ["high-loss", "high-latency"] },
+        { "name": "google-dns",      "host": "8.8.8.8",             "probe": "icmp", "alerts": ["high-loss"] },
+        { "name": "example-http",    "url":  "https://example.com", "probe": "http", "alerts": ["high-latency"] },
+        { "name": "example-tcp",     "host": "example.com:443",     "probe": "tcp" },
+        { "name": "cloudflare-path", "host": "1.1.1.1",             "probe": "mtr" }
       ]
     }
   ],
 
   "alerts": {
-    "high-loss":    { "condition": "loss_pct > 5",      "sustained": 3, "actions": ["slack"] },
-    "high-latency": { "condition": "rtt_median > 50ms", "sustained": 5, "actions": ["slack"] },
-    "down":         { "condition": "loss_pct > 0",      "sustained": 2, "actions": ["discord"] }
+    "high-loss":    { "condition": "loss_pct > 5",      "sustained": 3, "actions": ["log"] },
+    "high-latency": { "condition": "rtt_median > 50ms", "sustained": 5, "actions": ["log"] }
   },
 
   "actions": {
-    "slack": {
-      "type": "webhook",
-      "url": "https://hooks.slack.com/services/xxx/yyy/zzz",
-      "template": "Alert: {{.Target.Name}} — {{.Alert.Condition}} — sustained {{.Alert.Sustained}} cycles"
-    },
-    "discord": {
-      "type": "discord",
-      "url": "${DISCORD_WEBHOOK_URL}"
-    }
+    "log":     { "type": "log" },
+    "slack":   { "type": "webhook", "url": "https://hooks.slack.com/services/xxx/yyy/zzz" },
+    "discord": { "type": "discord", "url": "${DISCORD_WEBHOOK_URL}" }
   }
 }

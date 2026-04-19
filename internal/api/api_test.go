@@ -110,13 +110,9 @@ func TestListTargets(t *testing.T) {
 	if len(body) != 1 || body[0]["id"] != "core/gw" {
 		t.Errorf("unexpected body: %s", rr.Body.String())
 	}
-	sources, _ := body[0]["sources"].([]any)
-	if len(sources) != 1 || sources[0] != "master" {
-		t.Errorf("sources = %v, want [master]", sources)
-	}
 }
 
-func TestListTargetsTitlesAndSlaves(t *testing.T) {
+func TestListTargetsTitles(t *testing.T) {
 	cfg := &config.Config{
 		Listen:   ":0",
 		Interval: time.Minute,
@@ -127,7 +123,7 @@ func TestListTargetsTitlesAndSlaves(t *testing.T) {
 			Group: "core",
 			Title: "Core Infra",
 			Targets: []config.Target{
-				{Name: "gw", Title: "Gateway", Host: "1.1.1.1", Probe: "icmp", Slaves: []string{"eu-west"}},
+				{Name: "gw", Title: "Gateway", Host: "1.1.1.1", Probe: "icmp"},
 			},
 		}},
 	}
@@ -153,10 +149,6 @@ func TestListTargetsTitlesAndSlaves(t *testing.T) {
 	if body[0]["title"] != "Gateway" {
 		t.Errorf("title = %v, want Gateway", body[0]["title"])
 	}
-	sources, _ := body[0]["sources"].([]any)
-	if len(sources) != 1 || sources[0] != "eu-west" {
-		t.Errorf("sources = %v, want [eu-west]", sources)
-	}
 }
 
 func TestListSourcesStandalone(t *testing.T) {
@@ -176,7 +168,11 @@ func TestListSourcesStandalone(t *testing.T) {
 	}
 }
 
-func TestListSourcesClusterSourceOverride(t *testing.T) {
+type stubSlaveLister struct{ names []string }
+
+func (s stubSlaveLister) Names() []string { return s.names }
+
+func TestListSourcesMasterWithRegisteredSlaves(t *testing.T) {
 	cfg := &config.Config{
 		Listen:   ":0",
 		Interval: time.Minute,
@@ -187,8 +183,6 @@ func TestListSourcesClusterSourceOverride(t *testing.T) {
 			Group: "core",
 			Targets: []config.Target{
 				{Name: "gw", Host: "1.1.1.1", Probe: "icmp"},
-				{Name: "eu-gw", Host: "2.2.2.2", Probe: "icmp", Slaves: []string{"eu-west", "eu-central"}},
-				{Name: "us-gw", Host: "3.3.3.3", Probe: "icmp", Slaves: []string{"eu-west"}}, // dup slave
 			},
 		}},
 		Cluster: &config.Cluster{Source: "primary"},
@@ -200,7 +194,7 @@ func TestListSourcesClusterSourceOverride(t *testing.T) {
 	s := New(Options{
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Store:  store,
-		Reader: nil,
+		Slaves: stubSlaveLister{names: []string{"eu-central", "eu-west"}},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sources", nil)
 	rr := httptest.NewRecorder()
@@ -209,9 +203,7 @@ func TestListSourcesClusterSourceOverride(t *testing.T) {
 		Sources []string `json:"sources"`
 	}
 	_ = json.Unmarshal(rr.Body.Bytes(), &body)
-	// Expect master source first (from first locally-probed target), then slave
-	// names in encounter order, de-duplicated.
-	want := []string{"primary", "eu-west", "eu-central"}
+	want := []string{"primary", "eu-central", "eu-west"}
 	if len(body.Sources) != len(want) {
 		t.Fatalf("sources = %v, want %v", body.Sources, want)
 	}
@@ -220,6 +212,86 @@ func TestListSourcesClusterSourceOverride(t *testing.T) {
 			t.Errorf("sources[%d] = %q, want %q (full: %v)", i, body.Sources[i], s, body.Sources)
 		}
 	}
+}
+
+func TestListTargetsStandaloneSources(t *testing.T) {
+	h := newTestServer(t, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	var body []struct {
+		ID      string   `json:"id"`
+		Sources []string `json:"sources"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	if len(body) != 1 {
+		t.Fatalf("len = %d, want 1: %s", len(body), rr.Body.String())
+	}
+	if len(body[0].Sources) != 1 || body[0].Sources[0] != "master" {
+		t.Errorf("standalone target sources = %v, want [master]", body[0].Sources)
+	}
+}
+
+func TestListTargetsPerTargetSources(t *testing.T) {
+	cfg := &config.Config{
+		Listen:   ":0",
+		Interval: time.Minute,
+		Pings:    5,
+		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw"},
+		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+		Targets: []config.Group{{
+			Group: "core",
+			Targets: []config.Target{
+				{Name: "gw-global", Host: "1.1.1.1", Probe: "icmp"},
+				{Name: "gw-eu", Host: "2.2.2.2", Probe: "icmp", Slaves: []string{"eu1"}},
+				{Name: "gw-ghost", Host: "3.3.3.3", Probe: "icmp", Slaves: []string{"unregistered"}},
+			},
+		}},
+		Cluster: &config.Cluster{Source: "primary"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("invalid test config: %v", err)
+	}
+	store := config.NewStore("/dev/null", cfg)
+	s := New(Options{
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:  store,
+		Slaves: stubSlaveLister{names: []string{"eu1", "us1"}},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets", nil)
+	rr := httptest.NewRecorder()
+	s.Router().ServeHTTP(rr, req)
+	var body []struct {
+		ID      string   `json:"id"`
+		Sources []string `json:"sources"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	got := make(map[string][]string, len(body))
+	for _, b := range body {
+		got[b.ID] = b.Sources
+	}
+	cases := map[string][]string{
+		"core/gw-global": {"primary", "eu1", "us1"},
+		"core/gw-eu":     {"eu1"},
+		"core/gw-ghost":  nil, // assigned slave isn't registered → no live sources
+	}
+	for id, want := range cases {
+		if !equalStrings(got[id], want) {
+			t.Errorf("%s sources = %v, want %v", id, got[id], want)
+		}
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestGetCyclesMissingTarget(t *testing.T) {

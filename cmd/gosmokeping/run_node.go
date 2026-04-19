@@ -78,9 +78,11 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 	fanout := scheduler.Fanout(sinks...)
 
 	var clusterHandler http.Handler
+	var slaveLister api.SlaveLister
 	if cfg.Cluster != nil && cfg.Cluster.Token != "" {
 		clusterRegistry = master.NewRegistry()
 		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token).Handler()
+		slaveLister = clusterRegistry
 		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
 	}
 
@@ -90,6 +92,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		Reader:         reader,
 		UIFS:           ui.FS(),
 		ClusterHandler: clusterHandler,
+		Slaves:         slaveLister,
 	})
 	go func() {
 		if err := api.Serve(ctx, log, cfg.Listen, server.Router()); err != nil {
@@ -98,7 +101,11 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		}
 	}()
 
-	sch := scheduler.New(log, registry, fanout, cfg)
+	// The master probes only unassigned targets locally; anything with an
+	// explicit Slaves list is the assigned slaves' job. The stored cfg is
+	// still the UI/ingest source of truth — only the scheduler sees the
+	// filtered view.
+	sch := scheduler.New(log, registry, fanout, master.LocalTargets(cfg))
 	sch.Run(ctx)
 
 	log.Info("gosmokeping shutting down")

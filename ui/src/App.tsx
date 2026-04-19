@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   listTargets,
-  listSources,
   getCycles,
   type Target,
   type CyclesResponse,
@@ -39,7 +38,6 @@ const AUTO_REFRESH_MS = 30_000;
 
 export default function App() {
   const [targets, setTargets] = useState<Target[]>([]);
-  const [sources, setSources] = useState<string[]>([]);
   // null = "all sources" — no source param forwarded.
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -103,12 +101,6 @@ export default function App() {
         if (t.length && !selectedId) setSelectedId(t[0].id);
       })
       .catch((e) => setError(String(e)));
-    listSources()
-      .then((r) => setSources(r.sources ?? []))
-      .catch(() => {
-        // Sources endpoint is optional UX — ignore failures so the rest of
-        // the UI still renders in standalone / pre-upgrade backends.
-      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -175,12 +167,21 @@ export default function App() {
 
   const selected = targets.find((t) => t.id === selectedId) ?? null;
   const selectedProbeType = selected?.probe_type;
+  const targetSources = selected?.sources ?? [];
 
   useEffect(() => {
     if (selectedProbeType === "http" && !HTTP_RANGES.includes(range)) {
       setRange("-24h");
     }
   }, [selectedProbeType, range]);
+
+  // If the picked source doesn't probe this target, fall back to "all".
+  // Otherwise the chart silently filters to a source that has no data here.
+  useEffect(() => {
+    if (selectedSource && !targetSources.includes(selectedSource)) {
+      setSelectedSource(null);
+    }
+  }, [selectedSource, targetSources]);
   const points = cycles?.points ?? [];
   const latest = points.length ? points[points.length - 1] : null;
   // Pin the chart x-axis to the server's echoed window so clicking 1y vs
@@ -323,26 +324,32 @@ export default function App() {
                 auto
               </label>
             </div>
-            {sources.length > 1 && (
+            {targetSources.length > 0 && (
               <div className="source-chips">
                 <span className="source-label">source:</span>
-                <button
-                  type="button"
-                  className={`chip ${selectedSource == null ? "active" : ""}`}
-                  onClick={() => setSelectedSource(null)}
-                >
-                  all
-                </button>
-                {sources.map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    className={`chip ${selectedSource === s ? "active" : ""}`}
-                    onClick={() => setSelectedSource(s)}
-                  >
-                    {s}
-                  </button>
-                ))}
+                {targetSources.length === 1 ? (
+                  <span className="chip active">{targetSources[0]}</span>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className={`chip ${selectedSource == null ? "active" : ""}`}
+                      onClick={() => setSelectedSource(null)}
+                    >
+                      all
+                    </button>
+                    {targetSources.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className={`chip ${selectedSource === s ? "active" : ""}`}
+                        onClick={() => setSelectedSource(s)}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </>
+                )}
               </div>
             )}
             {error && <div className="error">{error}</div>}

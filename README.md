@@ -36,13 +36,54 @@ and a per-hop loss heatmap over the same window.
   classic-bars chart modes, MTR table, per-hop loss heatmap.
 - **Alerting:** threshold conditions with sustained-cycles debounce.
   Actions: `log`, shell `exec`, generic `webhook`, and a first-class
-  `discord` embed (includes MTR path in the embed when the probe is
-  icmp/mtr).
+  `discord` embed (includes MTR path when the probe is icmp/mtr).
 - **Distributed probing:** run extra instances with `--slave` to probe
   from multiple vantage points; the master aggregates and persists.
 - **Hot reload:** `SIGHUP`.
 
-## Build
+## Quick start
+
+Prerequisites: Go 1.22+, Node 20+, a running InfluxDB v2 instance.
+
+### 1. Start InfluxDB and grab credentials
+
+The fastest path is Docker:
+
+```bash
+docker run -d --name influxdb -p 8086:8086 \
+  -e DOCKER_INFLUXDB_INIT_MODE=setup \
+  -e DOCKER_INFLUXDB_INIT_USERNAME=admin \
+  -e DOCKER_INFLUXDB_INIT_PASSWORD=changeme123 \
+  -e DOCKER_INFLUXDB_INIT_ORG=smokeping \
+  -e DOCKER_INFLUXDB_INIT_BUCKET=smokeping_raw \
+  -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=supersecret-replace-me \
+  influxdb:2
+```
+
+gosmokeping creates the `smokeping_1h` and `smokeping_1d` rollup buckets
+and their Flux tasks automatically on first start — you only need to
+provide a valid token and org.
+
+### 2. Configure
+
+```bash
+cp config.example.json config.json
+cp .env.example .env
+```
+
+Edit `.env` with your InfluxDB token/org (matching step 1):
+
+```bash
+INFLUX_URL=http://localhost:8086
+INFLUX_ORG=smokeping
+INFLUX_TOKEN=supersecret-replace-me
+```
+
+Edit `config.json` to list the hosts you actually want to probe. The
+example ships with `1.1.1.1` and `8.8.8.8` so the first run is useful
+out of the box.
+
+### 3. Build
 
 ```bash
 make ui     # vite build → internal/ui/dist/
@@ -55,43 +96,46 @@ Or build a container:
 docker build -t gosmokeping .
 ```
 
-## Run
+### 4. Grant raw-socket capability
 
-1. Copy and edit the example config:
+ICMP and MTR need raw sockets. Either run as root, or:
 
-   ```bash
-   cp config.example.json config.json
-   $EDITOR config.json
-   ```
+```bash
+make setcap   # sudo setcap cap_net_raw+ep ./gosmokeping
+```
 
-2. ICMP/MTR need raw sockets. Either run as root, enable
-   `net.ipv4.ping_group_range` for your gid (ICMP only — MTR still needs
-   raw), or:
+The Docker image and the bundled systemd unit handle this for you.
 
-   ```bash
-   make setcap
-   ```
+### 5. Run
 
-3. Start:
+```bash
+./gosmokeping -config config.json
+```
 
-   ```bash
-   ./gosmokeping -config config.json
-   ```
-
-4. Open <http://localhost:8080>.
+Open <http://localhost:8080>. Cycles start landing within one probe
+interval (30s by default).
 
 ## Config
 
-See [`config.example.json`](config.example.json). Environment variables of
-the form `${NAME}` are expanded at load time, so tokens live in env vars.
-`SIGHUP` re-reads the file.
+See [`config.example.json`](config.example.json). Environment variables
+of the form `${NAME}` are expanded at load time, so tokens live in env
+vars. `SIGHUP` re-reads the file.
 
-If a `.env` file sits next to the binary it is loaded at startup, so you
-can keep `INFLUX_TOKEN`, `DISCORD_WEBHOOK_URL`, `CLUSTER_TOKEN`, etc. out
-of the shell and the config. Real shell env wins over `.env` entries, and
-missing `.env` is a silent no-op.
+`.env` is auto-loaded from the directory holding `--config` first, then
+from the current working directory (this matters under systemd, where
+cwd is `/`). Real shell env always wins over `.env`; a missing `.env`
+is a silent no-op.
 
-Alert actions:
+### Alert actions
+
+Every alert references one or more actions by name. The action types:
+
+| Type      | Shape |
+|-----------|-------|
+| `log`     | Writes a structured log line. |
+| `webhook` | Generic JSON POST; `template` overrides the default body. |
+| `discord` | Rich embed with RTT, loss, sustained-cycle count, and MTR path. |
+| `exec`    | Runs a shell command with the alert payload in env vars. |
 
 ```json
 "actions": {
@@ -101,8 +145,8 @@ Alert actions:
 }
 ```
 
-For icmp/mtr targets the Discord embed appends an MTR-style path block so
-you can see where a cycle broke without opening the UI.
+For icmp/mtr targets the Discord embed appends an MTR-style path block
+so you can see where a cycle broke without opening the UI.
 
 ## HTTP API
 
@@ -117,39 +161,50 @@ you can see where a cycle broke without opening the UI.
 | GET    | `/api/v1/targets/{group}/{name}/hops/timeline?from&to` | Per-hop history |
 
 `from` / `to` accept RFC3339, unix seconds, or durations like `-24h`.
-`resolution` is `auto` (default), `raw`, `1h`, or `1d`.
+`resolution` is `auto` (default), `raw`, `1h`, or `1d`. All endpoints
+accept a `source=<name>` query parameter to filter by probe origin
+when running in master/slave mode.
 
 ## Deployment
 
-- **systemd:** see [`deploy/gosmokeping.service`](deploy/gosmokeping.service).
-- **Docker:** the image grants `CAP_NET_RAW` to the binary via `setcap`.
+- **systemd:** run `sudo ./deploy/install.sh` after `make build`. The
+  script creates a `gosmokeping` system user, installs the binary to
+  `/usr/local/bin`, the unit to `/etc/systemd/system`, and stages
+  `/etc/gosmokeping/` for your config + `.env`. The unit
+  ([`deploy/gosmokeping.service`](deploy/gosmokeping.service)) grants
+  `CAP_NET_RAW` via systemd so you don't need `setcap`. Re-run the
+  script to update the binary or unit — it's idempotent.
+- **Docker:** the image runs as an unprivileged user and grants
+  `CAP_NET_RAW` to the binary via `setcap`. Mount your config and `.env`:
+
+  ```bash
+  docker run -d --name gosmokeping -p 8080:8080 \
+    -v $(pwd)/config.json:/etc/gosmokeping/config.json:ro \
+    -v $(pwd)/.env:/etc/gosmokeping/.env:ro \
+    gosmokeping
+  ```
 - **Reverse proxy:** terminate TLS and authenticate at the proxy
   (Nginx/Caddy). The binary has no built-in auth.
 
 ## Master / slave
 
-gosmokeping can run as a master that aggregates from one or more remote
-slaves so each target gets probed from multiple vantage points.
+gosmokeping can run as a master that aggregates cycles from one or
+more remote slaves so every target is probed from multiple vantage
+points at once.
 
-On the **master**, add a cluster block (see `config.example.json`) and a
-`slaves: [...]` entry to the targets you want probed remotely:
+On the **master**, add a cluster block to `config.json`:
 
 ```json
 "cluster": {
   "token": "${CLUSTER_TOKEN}",
   "source": "master"
-},
-"targets": [{
-  "group": "core-infra",
-  "targets": [
-    { "name": "gateway", "host": "10.0.0.1", "probe": "icmp",
-      "slaves": ["frankfurt-1", "singapore-1"] }
-  ]
-}]
+}
 ```
 
-Targets with no `slaves` stay master-only. Targets with `slaves` are probed
-only by those slaves — the master will not also probe them locally.
+By default every configured target is shipped to every registered
+slave and the master probes locally too. To restrict a target to
+specific slaves, set `target.slaves: ["berlin-1", "tokyo-1"]` — only
+the named slaves (and not the master) will probe it.
 
 On each **slave**, copy [`config.slave.example.json`](config.slave.example.json)
 and set `master_url`, `token`, and a unique `name`. Then:
@@ -158,20 +213,21 @@ and set `master_url`, `token`, and a unique `name`. Then:
 ./gosmokeping --slave -config config.slave.json
 ```
 
-The slave registers with the master, pulls its target list over HTTPS,
+The slave registers with the master, pulls the target list over HTTPS,
 probes locally, and pushes cycle batches back every few seconds.
-Buffered cycles survive short master outages (600-cycle ring, drop-oldest).
-Slaves never touch InfluxDB or the UI — all storage and alerting stays
-master-side. The UI shows a source-chip row so you can filter by origin.
+Buffered cycles survive short master outages (600-cycle ring,
+drop-oldest). Slaves never touch InfluxDB or the UI — all storage and
+alerting stays master-side. The UI shows a source-chip row (master +
+every registered slave) so you can filter charts by origin.
 
 ## Development
 
 ```bash
-make dev        # go run with debug logging
-make ui-dev     # vite dev server on :5173 (proxies /api to :8080)
-make test       # unit tests
-make test-integration   # requires INFLUX_URL/INFLUX_TOKEN/INFLUX_ORG
-make lint       # go vet
+make dev               # go run with debug logging
+make ui-dev            # vite dev server on :5173 (proxies /api to :8080)
+make test              # unit tests
+make test-integration  # requires INFLUX_URL/INFLUX_TOKEN/INFLUX_ORG
+make lint              # go vet
 ```
 
 See [`CLAUDE.md`](CLAUDE.md) for the architecture notes an LLM (or a
@@ -182,16 +238,16 @@ trace behavior, rollup task versioning, and the UI time-axis contract.
 ## Layout
 
 ```
-cmd/gosmokeping/    # entrypoint
+cmd/gosmokeping/    # entrypoint (main, run_node, run_slave, logger)
 internal/
   alert/            # threshold evaluator + dispatchers (log/webhook/discord/exec)
   api/              # chi router + handlers
+  cluster/          # master+slave HTTP protocol and runners
   config/           # JSON loader + hot-reload store
-  probe/            # ICMP/TCP/HTTP/DNS/MTR implementations + shared trace
+  probe/            # ICMP/TCP/HTTP/DNS/MTR + shared TTL-walk trace
   scheduler/        # per-target probe scheduler + sink fanout
   stats/            # RTT aggregation (min/max/mean/median/p5–p95/stddev)
   storage/          # InfluxDB client (writer, reader, bootstrap)
-  cluster/          # master+slave HTTP protocol and runners
   ui/               # embed.FS wrapper for the built SPA
 ui/                 # React + Vite + uPlot SPA source
 deploy/             # systemd unit
