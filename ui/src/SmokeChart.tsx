@@ -19,37 +19,17 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
   const onCyclePickRef = useRef(onCyclePick);
   onCyclePickRef.current = onCyclePick;
 
+  // Create uPlot once. Data and scale updates flow through setData / setScale
+  // below so the DOM node never unmounts on refresh — otherwise the wrapper
+  // collapses mid-frame and the page scrolls.
   useEffect(() => {
     if (!divRef.current) return;
-    if (plotRef.current) {
-      plotRef.current.destroy();
-      plotRef.current = null;
-    }
-    if (points.length === 0) return;
-
-    const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-    const min = points.map((p) => p.Min);
-    const max = points.map((p) => p.Max);
-    const p5 = points.map((p) => p.P5);
-    const p95 = points.map((p) => p.P95);
-    const p25 = points.map((p) => p.P25);
-    const p75 = points.map((p) => p.P75);
-    const median = points.map((p) => p.Median);
-
-    // Series indices: 0=x, 1=min, 2=p5, 3=p25, 4=median (p50), 5=p75, 6=p95, 7=max.
-    // Ascending percentile order so the legend reads p5 → p25 → p50 → p75 → p95.
-    const data: AlignedData = [ts, min, p5, p25, median, p75, p95, max];
 
     const opts: Options = {
       width: divRef.current.clientWidth,
       height,
       scales: {
-        x: {
-          time: true,
-          ...(fromSec != null && toSec != null
-            ? { range: () => [fromSec, toSec] as [number, number] }
-            : {}),
-        },
+        x: { time: true },
         y: { auto: true },
       },
       axes: [
@@ -79,7 +59,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
       legend: { live: true },
     };
 
-    plotRef.current = new uPlot(opts, data, divRef.current);
+    const empty: AlignedData = [[], [], [], [], [], [], [], []];
+    plotRef.current = new uPlot(opts, empty, divRef.current);
+
     const over = plotRef.current.over;
     const onClick = () => {
       const u = plotRef.current;
@@ -106,10 +88,39 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [points, height, fromSec, toSec]);
+  }, [height]);
 
-  if (points.length === 0) {
-    return <div className="empty">No data in range</div>;
-  }
-  return <div ref={divRef} style={{ width: "100%" }} />;
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u) return;
+    if (points.length === 0) {
+      u.setData([[], [], [], [], [], [], [], []]);
+      return;
+    }
+    const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
+    const data: AlignedData = [
+      ts,
+      points.map((p) => p.Min),
+      points.map((p) => p.P5),
+      points.map((p) => p.P25),
+      points.map((p) => p.Median),
+      points.map((p) => p.P75),
+      points.map((p) => p.P95),
+      points.map((p) => p.Max),
+    ];
+    u.setData(data);
+  }, [points]);
+
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u || fromSec == null || toSec == null) return;
+    u.setScale("x", { min: fromSec, max: toSec });
+  }, [fromSec, toSec]);
+
+  return (
+    <div className="chart-host" style={{ minHeight: height }}>
+      <div ref={divRef} style={{ width: "100%" }} />
+      {points.length === 0 && <div className="chart-empty">No data in range</div>}
+    </div>
+  );
 }

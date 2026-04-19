@@ -208,6 +208,23 @@ body {
   border-radius: 6px;
   padding: 16px;
   margin-bottom: 16px;
+  min-height: 340px;
+}
+
+.chart-host {
+  position: relative;
+  width: 100%;
+}
+
+.chart-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8a93a6;
+  font-size: 14px;
+  pointer-events: none;
 }
 
 .chart-title {

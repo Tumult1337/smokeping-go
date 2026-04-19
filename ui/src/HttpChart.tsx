@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData } from "uplot";
 import { getHttpSamples, type HttpPoint } from "./api";
 
@@ -61,38 +61,17 @@ export function HttpChart({
     };
   }, [targetId, range, refreshTick]);
 
-  const hovered = useMemo(() => points, [points]);
-
+  // Create uPlot once. setData drives refreshes so the DOM node stays in
+  // place — destroy/recreate on every tick collapses the wrapper and the
+  // page scrolls underneath the user.
   useEffect(() => {
     if (!divRef.current) return;
-    if (plotRef.current) {
-      plotRef.current.destroy();
-      plotRef.current = null;
-    }
-    if (hovered.length === 0) return;
-
-    const ts = hovered.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-    // Failed requests (status == 0 AND rtt == 0) still render a visible marker
-    // so the outage is obvious — pin them to a small floor height so they
-    // don't collapse to zero.
-    let rttMax = 1;
-    for (const p of hovered) if (p.RTT > rttMax) rttMax = p.RTT;
-    const failHeight = Math.max(rttMax * 0.15, 1);
-    const rtts = hovered.map((p) => (p.Status === 0 ? failHeight : p.RTT));
-    const statuses = hovered.map((p) => p.Status);
-
-    const data: AlignedData = [ts, rtts, statuses];
 
     const opts: Options = {
       width: divRef.current.clientWidth,
       height,
       scales: {
-        x: {
-          time: true,
-          ...(fromSec != null && toSec != null
-            ? { range: () => [fromSec, toSec] as [number, number] }
-            : {}),
-        },
+        x: { time: true },
         y: { auto: true, range: (_u, _min, max) => [0, Math.max(max, 1)] },
       },
       axes: [
@@ -122,7 +101,7 @@ export function HttpChart({
             const xs = u.data[0] as number[];
             const ys = u.data[1] as number[];
             const sts = u.data[2] as number[];
-            // Bar width: constant pixels so dense ranges still show each bar.
+            if (xs.length === 0) return;
             const barW = 3;
             ctx.save();
             for (let i = 0; i < xs.length; i++) {
@@ -138,7 +117,8 @@ export function HttpChart({
       },
     };
 
-    plotRef.current = new uPlot(opts, data, divRef.current);
+    const empty: AlignedData = [[], [], []];
+    plotRef.current = new uPlot(opts, empty, divRef.current);
     const ro = new ResizeObserver(() => {
       if (plotRef.current && divRef.current) {
         plotRef.current.setSize({
@@ -153,28 +133,57 @@ export function HttpChart({
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [hovered, height, fromSec, toSec]);
+  }, [height]);
+
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u) return;
+    if (points.length === 0) {
+      u.setData([[], [], []]);
+      return;
+    }
+    const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
+    // Failed requests (status == 0 AND rtt == 0) still render a visible marker
+    // so the outage is obvious — pin them to a small floor height so they
+    // don't collapse to zero.
+    let rttMax = 1;
+    for (const p of points) if (p.RTT > rttMax) rttMax = p.RTT;
+    const failHeight = Math.max(rttMax * 0.15, 1);
+    const rtts = points.map((p) => (p.Status === 0 ? failHeight : p.RTT));
+    const statuses = points.map((p) => p.Status);
+    u.setData([ts, rtts, statuses]);
+  }, [points]);
+
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u || fromSec == null || toSec == null) return;
+    u.setScale("x", { min: fromSec, max: toSec });
+  }, [fromSec, toSec]);
 
   if (error) return <div className="error">{error}</div>;
-  if (points.length === 0) return <div className="empty">No HTTP samples in range</div>;
 
-  const last = points[points.length - 1];
+  const last = points.length > 0 ? points[points.length - 1] : null;
   return (
     <div>
-      <div ref={divRef} style={{ width: "100%" }} />
-      <div className="stats" style={{ marginTop: 12 }}>
-        <span>
-          latest status: <strong style={{ color: colorFor(last.Status) }}>{statusLabel(last.Status)}</strong>
-        </span>
-        <span>
-          latest rtt: <strong>{last.Status === 0 ? "—" : `${last.RTT.toFixed(1)}ms`}</strong>
-        </span>
-        {last.Err && (
-          <span title={last.Err}>
-            error: <strong style={{ color: "#ef4444" }}>{last.Err.slice(0, 64)}</strong>
-          </span>
-        )}
+      <div className="chart-host" style={{ minHeight: height }}>
+        <div ref={divRef} style={{ width: "100%" }} />
+        {points.length === 0 && <div className="chart-empty">No HTTP samples in range</div>}
       </div>
+      {last && (
+        <div className="stats" style={{ marginTop: 12 }}>
+          <span>
+            latest status: <strong style={{ color: colorFor(last.Status) }}>{statusLabel(last.Status)}</strong>
+          </span>
+          <span>
+            latest rtt: <strong>{last.Status === 0 ? "—" : `${last.RTT.toFixed(1)}ms`}</strong>
+          </span>
+          {last.Err && (
+            <span title={last.Err}>
+              error: <strong style={{ color: "#ef4444" }}>{last.Err.slice(0, 64)}</strong>
+            </span>
+          )}
+        </div>
+      )}
       <HttpLegend />
     </div>
   );

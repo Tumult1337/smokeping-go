@@ -15,6 +15,8 @@ interface Props {
   onCyclePick?: (timeSec: number) => void;
 }
 
+type Band = { lo: number; hi: number; alpha: number };
+
 // Classic SmokePing / cocopacket-style rendering: for each cycle we paint a
 // column the full width of its slot (bars touch, no gaps) and stack symmetric
 // percentile pairs every 5% as translucent bands — they accumulate into a
@@ -28,64 +30,16 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   const onCyclePickRef = useRef(onCyclePick);
   onCyclePickRef.current = onCyclePick;
 
+  // All data that the draw hook and scale-range callback read from live in
+  // refs — the uPlot instance is created once, so closures captured at
+  // construction time would go stale after each setData.
+  const bandsRef = useRef<Band[][]>([]);
+  const mediansRef = useRef<number[]>([]);
+  const lossesRef = useRef<number[]>([]);
+  const yRangeRef = useRef<[number, number]>([0, 1]);
+
   useEffect(() => {
     if (!divRef.current) return;
-    if (plotRef.current) {
-      plotRef.current.destroy();
-      plotRef.current = null;
-    }
-    if (points.length === 0) return;
-
-    const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-    const mins = points.map((p) => p.Min);
-    const maxs = points.map((p) => p.Max);
-    const medians = points.map((p) => p.Median);
-    const losses = points.map((p) => p.LossPct);
-
-    // Build the stack of percentile pairs for the layered smoke. Any pair
-    // that comes back fully zero (older data, before 5%-step percentiles were
-    // stored) is dropped so legacy rollups still render something useful.
-    const bands = points.map((p) => {
-      const all: { lo: number; hi: number; alpha: number }[] = [
-        { lo: p.Min, hi: p.Max, alpha: 0.07 },
-        { lo: p.P5,  hi: p.P95, alpha: 0.09 },
-        { lo: p.P10, hi: p.P90, alpha: 0.11 },
-        { lo: p.P15, hi: p.P85, alpha: 0.13 },
-        { lo: p.P20, hi: p.P80, alpha: 0.15 },
-        { lo: p.P25, hi: p.P75, alpha: 0.17 },
-        { lo: p.P30, hi: p.P70, alpha: 0.20 },
-        { lo: p.P35, hi: p.P65, alpha: 0.23 },
-        { lo: p.P40, hi: p.P60, alpha: 0.26 },
-        { lo: p.P45, hi: p.P55, alpha: 0.30 },
-      ];
-      return all.filter((b) => b.hi > b.lo);
-    });
-
-    // Data layout: x then percentiles in ascending order (min, p5, p25, median,
-    // p75, p95, max) followed by loss. Order here must match the `series` array
-    // below so the hover legend reads left-to-right as the smoke stacks.
-    const data: AlignedData = [
-      ts,
-      mins,
-      points.map((p) => p.P5),
-      points.map((p) => p.P25),
-      medians,
-      points.map((p) => p.P75),
-      points.map((p) => p.P95),
-      maxs,
-      points.map((p) => p.LossPct),
-    ];
-
-    let yLo = Infinity;
-    let yHi = -Infinity;
-    for (const v of mins) if (v < yLo) yLo = v;
-    for (const v of maxs) if (v > yHi) yHi = v;
-    if (!isFinite(yLo) || !isFinite(yHi)) {
-      yLo = 0;
-      yHi = 1;
-    }
-    const yPad = Math.max(1, (yHi - yLo) * 0.1);
-    const yRange: [number, number] = [Math.max(0, yLo - yPad), yHi + yPad];
 
     const msFmt = (v: number | null) => (v == null ? "—" : v.toFixed(2));
     const pctFmt = (v: number | null) => (v == null ? "—" : `${v.toFixed(1)}%`);
@@ -94,13 +48,8 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       width: divRef.current.clientWidth,
       height,
       scales: {
-        x: {
-          time: true,
-          ...(fromSec != null && toSec != null
-            ? { range: () => [fromSec, toSec] as [number, number] }
-            : {}),
-        },
-        y: { auto: false, range: () => yRange },
+        x: { time: true },
+        y: { auto: false, range: () => yRangeRef.current },
       },
       axes: [
         { stroke: "#8a93a6", grid: { stroke: "#1f2430" } },
@@ -134,10 +83,16 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       hooks: {
         draw: [
           (u) => {
+            const ts = u.data[0] as number[];
+            const bandsArr = bandsRef.current;
+            const medians = mediansRef.current;
+            const losses = lossesRef.current;
+            const n = ts.length;
+            if (n === 0 || bandsArr.length !== n) return;
+
             const ctx = u.ctx;
             ctx.save();
 
-            const n = ts.length;
             // Each bar spans from the midpoint to its previous neighbour to the
             // midpoint to its next neighbour, so columns always touch without
             // overlap regardless of how uneven the sample cadence is. Endpoint
@@ -168,7 +123,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
               const x = Math.floor(leftEdge);
               const w = Math.max(1, Math.ceil(rightEdge) - x);
 
-              for (const band of bands[i]) {
+              for (const band of bandsArr[i]) {
                 const yHi = u.valToPos(band.hi, "y", true);
                 const yLo = u.valToPos(band.lo, "y", true);
                 ctx.fillStyle = `rgba(94,234,212,${band.alpha})`;
@@ -187,7 +142,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       },
     };
 
-    plotRef.current = new uPlot(opts, data, divRef.current);
+    const empty: AlignedData = [[], [], [], [], [], [], [], [], []];
+    plotRef.current = new uPlot(opts, empty, divRef.current);
+
     // Click-to-pick: resolve the hovered sample via cursor.idx and hand its
     // unix timestamp to the parent. Attached on u.over so it catches clicks
     // over the plot area but not axes / padding.
@@ -217,12 +174,93 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [points, height, fromSec, toSec]);
+  }, [height]);
 
-  if (points.length === 0) {
-    return <div className="empty">No data in range</div>;
-  }
-  return <div ref={divRef} style={{ width: "100%" }} />;
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u) return;
+
+    if (points.length === 0) {
+      bandsRef.current = [];
+      mediansRef.current = [];
+      lossesRef.current = [];
+      yRangeRef.current = [0, 1];
+      u.setData([[], [], [], [], [], [], [], [], []]);
+      return;
+    }
+
+    const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
+    const mins = points.map((p) => p.Min);
+    const maxs = points.map((p) => p.Max);
+    const medians = points.map((p) => p.Median);
+    const losses = points.map((p) => p.LossPct);
+
+    // Build the stack of percentile pairs for the layered smoke. Any pair
+    // that comes back fully zero (older data, before 5%-step percentiles were
+    // stored) is dropped so legacy rollups still render something useful.
+    const bands: Band[][] = points.map((p) => {
+      const all: Band[] = [
+        { lo: p.Min, hi: p.Max, alpha: 0.07 },
+        { lo: p.P5,  hi: p.P95, alpha: 0.09 },
+        { lo: p.P10, hi: p.P90, alpha: 0.11 },
+        { lo: p.P15, hi: p.P85, alpha: 0.13 },
+        { lo: p.P20, hi: p.P80, alpha: 0.15 },
+        { lo: p.P25, hi: p.P75, alpha: 0.17 },
+        { lo: p.P30, hi: p.P70, alpha: 0.20 },
+        { lo: p.P35, hi: p.P65, alpha: 0.23 },
+        { lo: p.P40, hi: p.P60, alpha: 0.26 },
+        { lo: p.P45, hi: p.P55, alpha: 0.30 },
+      ];
+      return all.filter((b) => b.hi > b.lo);
+    });
+
+    let yLo = Infinity;
+    let yHi = -Infinity;
+    for (const v of mins) if (v < yLo) yLo = v;
+    for (const v of maxs) if (v > yHi) yHi = v;
+    if (!isFinite(yLo) || !isFinite(yHi)) {
+      yLo = 0;
+      yHi = 1;
+    }
+    const yPad = Math.max(1, (yHi - yLo) * 0.1);
+
+    bandsRef.current = bands;
+    mediansRef.current = medians;
+    lossesRef.current = losses;
+    yRangeRef.current = [Math.max(0, yLo - yPad), yHi + yPad];
+
+    // Data layout: x then percentiles in ascending order (min, p5, p25, median,
+    // p75, p95, max) followed by loss. Order here must match the `series` array
+    // above so the hover legend reads left-to-right as the smoke stacks.
+    const data: AlignedData = [
+      ts,
+      mins,
+      points.map((p) => p.P5),
+      points.map((p) => p.P25),
+      medians,
+      points.map((p) => p.P75),
+      points.map((p) => p.P95),
+      maxs,
+      losses,
+    ];
+    u.setData(data);
+    // setData already triggers a redraw, but hooks.draw closes over refs we
+    // just mutated — force another pass so the fresh bands/medians land.
+    u.redraw(false, true);
+  }, [points]);
+
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u || fromSec == null || toSec == null) return;
+    u.setScale("x", { min: fromSec, max: toSec });
+  }, [fromSec, toSec]);
+
+  return (
+    <div className="chart-host" style={{ minHeight: height }}>
+      <div ref={divRef} style={{ width: "100%" }} />
+      {points.length === 0 && <div className="chart-empty">No data in range</div>}
+    </div>
+  );
 }
 
 function lossColor(pct: number): string {
