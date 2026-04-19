@@ -3,7 +3,7 @@
 A modern, single-binary replacement for [SmokePing](https://oss.oetiker.ch/smokeping/).
 Keeps the classic "smoke band" latency visualization (min–max + p5–p95 + median)
 and adds a JSON API, a React + uPlot UI, InfluxDB v2 storage with tiered
-rollups, MTR path discovery, and Grafana integration.
+rollups, MTR path discovery, and optional master/slave distributed probing.
 
 > **Heads up — this project is AI-coded.**
 > Every line of Go, TypeScript, CSS, and Flux in this repo was written by
@@ -38,7 +38,8 @@ and a per-hop loss heatmap over the same window.
   Actions: `log`, shell `exec`, generic `webhook`, and a first-class
   `discord` embed (includes MTR path in the embed when the probe is
   icmp/mtr).
-- **Grafana:** drop-in dashboard with smoke bands and loss overlays.
+- **Distributed probing:** run extra instances with `--slave` to probe
+  from multiple vantage points; the master aggregates and persists.
 - **Hot reload:** `SIGHUP`.
 
 ## Build
@@ -85,6 +86,11 @@ See [`config.example.json`](config.example.json). Environment variables of
 the form `${NAME}` are expanded at load time, so tokens live in env vars.
 `SIGHUP` re-reads the file.
 
+If a `.env` file sits next to the binary it is loaded at startup, so you
+can keep `INFLUX_TOKEN`, `DISCORD_WEBHOOK_URL`, `CLUSTER_TOKEN`, etc. out
+of the shell and the config. Real shell env wins over `.env` entries, and
+missing `.env` is a silent no-op.
+
 Alert actions:
 
 ```json
@@ -120,10 +126,43 @@ you can see where a cycle broke without opening the UI.
 - **Reverse proxy:** terminate TLS and authenticate at the proxy
   (Nginx/Caddy). The binary has no built-in auth.
 
-## Grafana
+## Master / slave
 
-Import [`grafana/dashboard.json`](grafana/dashboard.json) and point it at
-your InfluxDB v2 Flux datasource. See [`grafana/README.md`](grafana/README.md).
+gosmokeping can run as a master that aggregates from one or more remote
+slaves so each target gets probed from multiple vantage points.
+
+On the **master**, add a cluster block (see `config.example.json`) and a
+`slaves: [...]` entry to the targets you want probed remotely:
+
+```json
+"cluster": {
+  "token": "${CLUSTER_TOKEN}",
+  "source": "master"
+},
+"targets": [{
+  "group": "core-infra",
+  "targets": [
+    { "name": "gateway", "host": "10.0.0.1", "probe": "icmp",
+      "slaves": ["frankfurt-1", "singapore-1"] }
+  ]
+}]
+```
+
+Targets with no `slaves` stay master-only. Targets with `slaves` are probed
+only by those slaves — the master will not also probe them locally.
+
+On each **slave**, copy [`config.slave.example.json`](config.slave.example.json)
+and set `master_url`, `token`, and a unique `name`. Then:
+
+```bash
+./gosmokeping --slave -config config.slave.json
+```
+
+The slave registers with the master, pulls its target list over HTTPS,
+probes locally, and pushes cycle batches back every few seconds.
+Buffered cycles survive short master outages (600-cycle ring, drop-oldest).
+Slaves never touch InfluxDB or the UI — all storage and alerting stays
+master-side. The UI shows a source-chip row so you can filter by origin.
 
 ## Development
 
@@ -152,9 +191,9 @@ internal/
   scheduler/        # per-target probe scheduler + sink fanout
   stats/            # RTT aggregation (min/max/mean/median/p5–p95/stddev)
   storage/          # InfluxDB client (writer, reader, bootstrap)
+  cluster/          # master+slave HTTP protocol and runners
   ui/               # embed.FS wrapper for the built SPA
 ui/                 # React + Vite + uPlot SPA source
-grafana/            # provisioned dashboard
 deploy/             # systemd unit
 docs/screenshots/   # README screenshots
 ```

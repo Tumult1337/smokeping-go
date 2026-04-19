@@ -43,7 +43,9 @@ Key points a reader can't derive from a single file:
   probes. Everything downstream (storage writes, alert evaluation) plugs in as
   a `scheduler.Sink` via `scheduler.Fanout`. To add a new consumer of probe
   results, implement `Sink.OnCycle` and append it to the `sinks` slice in
-  `cmd/gosmokeping/main.go`.
+  `cmd/gosmokeping/run_node.go`. Slave-inbound cycles from the cluster ingest
+  handler are written to the **same** fanout, so any new sink automatically
+  sees both local and remote cycles.
 
 - **Config hot-reload:** `config.Store` uses `atomic.Pointer[Config]`.
   Consumers (API, alert evaluator) call `store.Current()` on every request
@@ -95,6 +97,34 @@ Key points a reader can't derive from a single file:
   timestamps so a wide window with sparse data still renders at the full
   requested span. Don't recompute the window client-side from the range
   string — use the server's echo.
+
+- **Cluster mode (master/slave):** `--slave` flips the binary into a
+  runner that registers with a master, pulls the target list over HTTP,
+  probes locally, and pushes cycle batches back. Slaves never touch
+  InfluxDB or the UI. The master's cluster endpoints live under
+  `/api/v1/cluster/{register,config,cycles}` behind a shared bearer
+  token; `master.Server` plugs into the existing API listener via
+  `api.Options.ClusterHandler` so one listener serves both UI and
+  ingest. Target assignment is config-only: `Target.Slaves: []` keeps a
+  target master-only; `["s1", "s2"]` ships it to those slaves and the
+  master does **not** also probe it. `BuildClusterConfig` also strips
+  `Alerts` so a stale slave can never mis-dispatch.
+
+- **Cycle source stamping:** every cycle carries a `Source` string (the
+  slave's `Cluster.Name`, or `cfg.Cluster.Source`/`"master"` for local
+  probes). The Writer tags the `source` label on storage writes; the
+  alert evaluator keys its state map by `(targetID, source)` so two
+  slaves probing the same host transition independently. UI filtering
+  uses the `source=` query param on cycles/rtts/hops endpoints.
+
+- **Slave push buffer + auth:** `slave.PushSink` is a fixed 600-cycle
+  ring with drop-oldest on overflow; a failed push `Requeue`s on 5xx /
+  network errors and drops on 404 (master lost state; next /register
+  re-establishes us). A 401 on any endpoint cancels the runner's
+  context with cause = `ErrAuth` so the process exits non-zero and the
+  operator must rotate the token. Target-set fingerprint changes (group
+  + name + probe + host + url + interval + pings) trigger a scheduler
+  rebuild without tearing down the push loop.
 
 ## Config
 
