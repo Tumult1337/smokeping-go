@@ -17,6 +17,7 @@ import (
 type stubReader struct {
 	cycles []storage.CyclePoint
 	rtts   []storage.RTTPoint
+	http   []storage.HTTPPoint
 	hops   []storage.HopPoint
 	err    error
 }
@@ -27,6 +28,10 @@ func (s *stubReader) QueryCycles(ctx context.Context, ref config.TargetRef, from
 
 func (s *stubReader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]storage.RTTPoint, error) {
 	return s.rtts, s.err
+}
+
+func (s *stubReader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]storage.HTTPPoint, error) {
+	return s.http, s.err
 }
 
 func (s *stubReader) QueryLatestHops(ctx context.Context, ref config.TargetRef) ([]storage.HopPoint, error) {

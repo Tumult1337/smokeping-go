@@ -16,6 +16,19 @@ type Result struct {
 	Sent      int
 	LossCount int
 	Hops      []Hop
+	// HTTPSamples is populated by the HTTP probe only: one entry per request,
+	// carrying status code + error alongside RTT so the UI can render a status
+	// timeline. Empty for every other probe type.
+	HTTPSamples []HTTPSample
+}
+
+// HTTPSample is a single HTTP request outcome. Status == 0 means the request
+// never got a response (DNS, refused, TLS, timeout) and Err holds the reason.
+type HTTPSample struct {
+	Time   time.Time
+	RTT    time.Duration
+	Status int
+	Err    string
 }
 
 // Hop is one entry of an MTR trace: which router responded at a given TTL and

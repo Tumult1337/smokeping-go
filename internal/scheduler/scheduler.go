@@ -23,6 +23,8 @@ type Cycle struct {
 	Summary   stats.Summary
 	// Hops is populated for MTR cycles only; nil for every other probe type.
 	Hops []probe.Hop
+	// HTTPSamples is populated for HTTP cycles only.
+	HTTPSamples []probe.HTTPSample
 }
 
 // Sink receives completed cycles. Implementations write to storage, evaluate
@@ -114,14 +116,15 @@ func (s *Scheduler) runCycle(ctx context.Context, ref config.TargetRef, pr probe
 	}
 
 	c := Cycle{
-		Time:      s.now(),
-		Target:    ref,
-		ProbeName: ref.Target.Probe,
-		RTTs:      res.RTTs,
-		Sent:      res.Sent,
-		LossCount: res.LossCount,
-		Summary:   stats.Compute(res.RTTs),
-		Hops:      res.Hops,
+		Time:        s.now(),
+		Target:      ref,
+		ProbeName:   ref.Target.Probe,
+		RTTs:        res.RTTs,
+		Sent:        res.Sent,
+		LossCount:   res.LossCount,
+		Summary:     stats.Compute(res.RTTs),
+		Hops:        res.Hops,
+		HTTPSamples: res.HTTPSamples,
 	}
 	s.sink.OnCycle(ctx, c)
 }

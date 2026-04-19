@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listTargets, getCycles, type Target, type CyclesResponse, type Resolution } from "./api";
 import { SmokeChart } from "./SmokeChart";
 import { SmokeBarChart } from "./SmokeBarChart";
+import { HttpChart } from "./HttpChart";
 import { HopsTable } from "./HopsTable";
 import { MtrHeatmap } from "./MtrHeatmap";
 
@@ -243,45 +244,58 @@ export default function App() {
               </label>
             </div>
             {error && <div className="error">{error}</div>}
-            <div className="chart-wrap">
-              <div className="chart-title">
-                Latency — {cycles?.resolution ?? "…"} resolution
+            {selected.probe_type === "http" ? (
+              <div className="chart-wrap">
+                <div className="chart-title">HTTP status + response time</div>
+                <HttpChart
+                  targetId={selected.id}
+                  range={range}
+                  refreshTick={refreshTick}
+                  fromSec={fromSec}
+                  toSec={toSec}
+                />
               </div>
-              {chartStyle === "band" ? (
-                <SmokeChart
-                  points={points}
-                  fromSec={fromSec}
-                  toSec={toSec}
-                  onCyclePick={setPickedSec}
-                />
-              ) : (
-                <SmokeBarChart
-                  points={points}
-                  fromSec={fromSec}
-                  toSec={toSec}
-                  onCyclePick={setPickedSec}
-                />
-              )}
-              {latest && (
-                <div className="stats" style={{ marginTop: 12 }}>
-                  <span>
-                    median: <strong>{latest.Median.toFixed(1)}ms</strong>
-                  </span>
-                  <span>
-                    p95: <strong>{latest.P95.toFixed(1)}ms</strong>
-                  </span>
-                  <span>
-                    min/max:{" "}
-                    <strong>
-                      {latest.Min.toFixed(1)} / {latest.Max.toFixed(1)}ms
-                    </strong>
-                  </span>
-                  <span>
-                    loss: <strong>{latest.LossPct.toFixed(1)}%</strong>
-                  </span>
+            ) : (
+              <div className="chart-wrap">
+                <div className="chart-title">
+                  Latency — {cycles?.resolution ?? "…"} resolution
                 </div>
-              )}
-            </div>
+                {chartStyle === "band" ? (
+                  <SmokeChart
+                    points={points}
+                    fromSec={fromSec}
+                    toSec={toSec}
+                    onCyclePick={setPickedSec}
+                  />
+                ) : (
+                  <SmokeBarChart
+                    points={points}
+                    fromSec={fromSec}
+                    toSec={toSec}
+                    onCyclePick={setPickedSec}
+                  />
+                )}
+                {latest && (
+                  <div className="stats" style={{ marginTop: 12 }}>
+                    <span>
+                      median: <strong>{latest.Median.toFixed(1)}ms</strong>
+                    </span>
+                    <span>
+                      p95: <strong>{latest.P95.toFixed(1)}ms</strong>
+                    </span>
+                    <span>
+                      min/max:{" "}
+                      <strong>
+                        {latest.Min.toFixed(1)} / {latest.Max.toFixed(1)}ms
+                      </strong>
+                    </span>
+                    <span>
+                      loss: <strong>{latest.LossPct.toFixed(1)}%</strong>
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
             {(selected.probe_type === "mtr" || selected.probe_type === "icmp") && (
               <>
                 <div className="chart-wrap">

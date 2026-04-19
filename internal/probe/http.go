@@ -67,7 +67,10 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	if count < 1 {
 		count = 1
 	}
-	result := &Result{RTTs: make([]time.Duration, 0, count)}
+	result := &Result{
+		RTTs:        make([]time.Duration, 0, count),
+		HTTPSamples: make([]HTTPSample, 0, count),
+	}
 	var lastErr error
 
 	for n := range count {
@@ -75,14 +78,18 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 			return result, err
 		}
 		result.Sent++
-		rtt, err := p.one(ctx, t.URL)
+		sampleTime := time.Now()
+		rtt, status, err := p.one(ctx, t.URL)
+		sample := HTTPSample{Time: sampleTime, RTT: rtt, Status: status}
 		if err != nil {
 			result.LossCount++
 			lastErr = err
-			slog.Debug("http probe failed", "probe", p.name, "target", t.Name, "url", t.URL, "err", err)
+			sample.Err = err.Error()
+			slog.Debug("http probe failed", "probe", p.name, "target", t.Name, "url", t.URL, "status", status, "err", err)
 		} else {
 			result.RTTs = append(result.RTTs, rtt)
 		}
+		result.HTTPSamples = append(result.HTTPSamples, sample)
 		if n < count-1 {
 			select {
 			case <-ctx.Done():
@@ -97,7 +104,11 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	return result, nil
 }
 
-func (p *HTTP) one(ctx context.Context, url string) (time.Duration, error) {
+// one issues a single request. Returns RTT, status code (0 if no response was
+// received), and any error. A non-2xx/3xx response returns a non-nil error but
+// the status code is still reported so the UI can distinguish 404 from TCP
+// refused.
+func (p *HTTP) one(ctx context.Context, url string) (time.Duration, int, error) {
 	var firstByte time.Time
 	trace := &httptrace.ClientTrace{
 		GotFirstResponseByte: func() { firstByte = time.Now() },
@@ -107,24 +118,25 @@ func (p *HTTP) one(ctx context.Context, url string) (time.Duration, error) {
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, fmt.Errorf("new request: %w", err)
+		return 0, 0, fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("User-Agent", "gosmokeping/1.0")
 
 	start := time.Now()
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer resp.Body.Close()
 	// Drain a bounded amount so the transport can pool the connection.
 	_, _ = io.CopyN(io.Discard, resp.Body, 4096)
 
+	rtt := time.Since(start)
+	if !firstByte.IsZero() {
+		rtt = firstByte.Sub(start)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		return 0, fmt.Errorf("status %d", resp.StatusCode)
+		return rtt, resp.StatusCode, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	if firstByte.IsZero() {
-		return time.Since(start), nil
-	}
-	return firstByte.Sub(start), nil
+	return rtt, resp.StatusCode, nil
 }

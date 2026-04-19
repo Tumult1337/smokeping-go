@@ -23,6 +23,7 @@ import (
 type StorageReader interface {
 	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution) ([]storage.CyclePoint, error)
 	QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]storage.RTTPoint, error)
+	QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]storage.HTTPPoint, error)
 	QueryLatestHops(ctx context.Context, ref config.TargetRef) ([]storage.HopPoint, error)
 	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration) ([]storage.HopPoint, error)
 	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]storage.HopPoint, error)
@@ -65,6 +66,7 @@ func (s *Server) Router() http.Handler {
 		// Target IDs are group/name so routes must match two segments.
 		r.Get("/targets/{group}/{name}/cycles", s.getCycles)
 		r.Get("/targets/{group}/{name}/rtts", s.getRTTs)
+		r.Get("/targets/{group}/{name}/http", s.getHTTP)
 		r.Get("/targets/{group}/{name}/status", s.getStatus)
 		r.Get("/targets/{group}/{name}/hops", s.getHops)
 		r.Get("/targets/{group}/{name}/hops/timeline", s.getHopsTimeline)
@@ -198,6 +200,39 @@ func (s *Server) getRTTs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"from":   from,
+		"to":     to,
+		"points": points,
+	})
+}
+
+func (s *Server) getHTTP(w http.ResponseWriter, r *http.Request) {
+	ref, ok := s.resolveTarget(w, r)
+	if !ok {
+		return
+	}
+	from, to, ok := parseRange(w, r, 24*time.Hour)
+	if !ok {
+		return
+	}
+	if s.reader == nil {
+		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
+		return
+	}
+	// HTTP samples live only in the raw bucket. 7d matches raw retention and
+	// keeps one "1y"-click from scanning a giant series.
+	if to.Sub(from) > 7*24*time.Hour {
+		writeErr(w, http.StatusBadRequest, "http window limited to 7d")
+		return
+	}
+	points, err := s.reader.QueryHTTPSamples(r.Context(), ref, from, to)
+	if err != nil {
+		s.log.Warn("query http", "err", err)
+		writeErr(w, http.StatusBadGateway, "query failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"target": ref.ID(),
 		"from":   from,
 		"to":     to,
 		"points": points,

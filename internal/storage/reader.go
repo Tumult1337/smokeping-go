@@ -89,6 +89,17 @@ type RTTPoint struct {
 	Seq  int64
 }
 
+// HTTPPoint is one HTTP request sample: RTT, status code, and an error string
+// if the request failed. Status == 0 means no response was received (DNS,
+// refused, TLS, timeout) and Err explains why.
+type HTTPPoint struct {
+	Time   time.Time
+	RTT    float64
+	Status int64
+	Seq    int64
+	Err    string
+}
+
 // HopPoint is the most recent stats for one hop on an MTR path.
 type HopPoint struct {
 	Time      time.Time
@@ -257,6 +268,45 @@ from(bucket: "%s")
 	}
 	if err := res.Err(); err != nil {
 		return nil, fmt.Errorf("read rtts: %w", err)
+	}
+	return out, nil
+}
+
+// QueryHTTPSamples returns per-request HTTP samples for the target across the
+// given window. Always reads the raw bucket — HTTP samples aren't rolled up
+// because 1-2/cycle is already cheap and the status code wouldn't aggregate
+// usefully anyway.
+func (r *Reader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time) ([]HTTPPoint, error) {
+	flux := fmt.Sprintf(`
+from(bucket: "%s")
+  |> range(start: %s, stop: %s)
+  |> filter(fn: (r) => r._measurement == "%s")
+  |> filter(fn: (r) => r.group == "%s" and r.target == "%s")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+`, fluxEscape(r.cfg.BucketRaw), from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano), MeasurementHTTP, fluxEscape(ref.Group), fluxEscape(ref.Target.Name))
+
+	qAPI := r.client.QueryAPI(r.cfg.Org)
+	res, err := qAPI.Query(ctx, flux)
+	if err != nil {
+		return nil, fmt.Errorf("query http: %w", err)
+	}
+	defer res.Close()
+
+	var out []HTTPPoint
+	for res.Next() {
+		rec := res.Record()
+		vals := rec.Values()
+		out = append(out, HTTPPoint{
+			Time:   rec.Time(),
+			RTT:    floatOf(vals["rtt_ms"]),
+			Status: intOf(vals["status_code"]),
+			Seq:    intOf(vals["seq"]),
+			Err:    stringOf(vals["error"]),
+		})
+	}
+	if err := res.Err(); err != nil {
+		return nil, fmt.Errorf("read http: %w", err)
 	}
 	return out, nil
 }

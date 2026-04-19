@@ -23,6 +23,10 @@ const (
 	// tag) because routers along a path flap and we don't want a new series
 	// every time the path changes.
 	MeasurementHop = "probe_mtr_hop"
+	// MeasurementHTTP is one row per HTTP request. status_code is a field (not
+	// tag) to avoid series cardinality exploding on pages that cycle through
+	// error codes.
+	MeasurementHTTP = "probe_http"
 )
 
 // Writer writes completed cycles to InfluxDB. Implements scheduler.Sink.
@@ -100,16 +104,38 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 	}
 	w.write.WritePoint(write.NewPoint(MeasurementCycle, tags, cycleFields, c.Time))
 
-	for i, rtt := range c.RTTs {
-		// Spread individual samples by 1ms so they don't share a timestamp
-		// (Influx would otherwise overwrite points with identical series+time).
-		ts := c.Time.Add(time.Duration(i) * time.Millisecond)
-		w.write.WritePoint(write.NewPoint(
-			MeasurementRTT,
-			tags,
-			map[string]any{"rtt_ms": ms(rtt), "seq": i},
-			ts,
-		))
+	// HTTP cycles get their own per-request measurement with status codes;
+	// emitting probe_rtt on top would double-write the same latencies and bloat
+	// the raw bucket for no UI benefit. For every other probe type, probe_rtt
+	// is the only per-sample record.
+	if len(c.HTTPSamples) > 0 {
+		for i, s := range c.HTTPSamples {
+			ts := s.Time
+			if ts.IsZero() {
+				ts = c.Time.Add(time.Duration(i) * time.Millisecond)
+			}
+			fields := map[string]any{
+				"rtt_ms":      ms(s.RTT),
+				"status_code": s.Status,
+				"seq":         i,
+			}
+			if s.Err != "" {
+				fields["error"] = s.Err
+			}
+			w.write.WritePoint(write.NewPoint(MeasurementHTTP, tags, fields, ts))
+		}
+	} else {
+		for i, rtt := range c.RTTs {
+			// Spread individual samples by 1ms so they don't share a timestamp
+			// (Influx would otherwise overwrite points with identical series+time).
+			ts := c.Time.Add(time.Duration(i) * time.Millisecond)
+			w.write.WritePoint(write.NewPoint(
+				MeasurementRTT,
+				tags,
+				map[string]any{"rtt_ms": ms(rtt), "seq": i},
+				ts,
+			))
+		}
 	}
 
 	for _, hop := range c.Hops {

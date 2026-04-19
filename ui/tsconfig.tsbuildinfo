@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/HopsTable.tsx","./src/MtrHeatmap.tsx","./src/SmokeBarChart.tsx","./src/SmokeChart.tsx","./src/api.ts","./src/main.tsx"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/HopsTable.tsx","./src/HttpChart.tsx","./src/MtrHeatmap.tsx","./src/SmokeBarChart.tsx","./src/SmokeChart.tsx","./src/api.ts","./src/main.tsx"],"version":"5.9.3"}

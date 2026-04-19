@@ -91,6 +91,31 @@ export function getCycles(
   return jsonGet<CyclesResponse>(`/api/v1/targets/${id}/cycles?${params}`);
 }
 
+export interface HttpPoint {
+  Time: string;
+  RTT: number;
+  Status: number;
+  Seq: number;
+  Err: string;
+}
+
+export interface HttpResponse {
+  target: string;
+  from: string;
+  to: string;
+  points: HttpPoint[];
+}
+
+export function getHttpSamples(
+  id: string,
+  from: string,
+  to?: string,
+): Promise<HttpResponse> {
+  const params = new URLSearchParams({ from });
+  if (to) params.set("to", to);
+  return jsonGet<HttpResponse>(`/api/v1/targets/${id}/http?${params}`);
+}
+
 export function getHops(id: string, atSec?: number): Promise<HopsResponse> {
   const q = atSec != null ? `?at=${Math.floor(atSec)}` : "";
   return jsonGet<HopsResponse>(`/api/v1/targets/${id}/hops${q}`);
