@@ -1,5 +1,4 @@
 {
-  "listen": ":8080",
   "cluster": {
     "master_url": "https://master.example.internal",
     "token": "${CLUSTER_TOKEN}",

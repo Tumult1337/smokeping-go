@@ -11,6 +11,7 @@ import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
 import { HopsTable } from "./HopsTable";
 import { MtrHeatmap } from "./MtrHeatmap";
+import { paletteForSorted } from "./palette";
 
 type Range = "-1h" | "-6h" | "-24h" | "-7d" | "-30d" | "-180d" | "-365d";
 type ChartStyle = "band" | "bars";
@@ -194,6 +195,18 @@ export default function App() {
   const hideZeroLossHops = WIDE_RANGES.includes(range);
   const sourceParam = selectedSource ?? undefined;
 
+  // Mirror the chart's palette assignment so the chip text reads in the same
+  // colour as that source's line in the "all" view. Derived from the actual
+  // points (not targetSources) so a source with no data in range stays neutral
+  // — matching the chart, which only paints sources it has data for.
+  const chartPalette = useMemo(() => {
+    if (selectedSource != null) return new Map();
+    const present = new Set<string>();
+    for (const p of points) present.add(p.Source ?? "");
+    if (present.size < 2) return new Map();
+    return paletteForSorted([...present].sort());
+  }, [points, selectedSource]);
+
   const pickTarget = (id: string) => {
     setSelectedId(id);
     setSidebarOpen(false);
@@ -338,16 +351,20 @@ export default function App() {
                     >
                       all
                     </button>
-                    {targetSources.map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                        className={`chip ${selectedSource === s ? "active" : ""}`}
-                        onClick={() => setSelectedSource(s)}
-                      >
-                        {s}
-                      </button>
-                    ))}
+                    {targetSources.map((s) => {
+                      const c = chartPalette.get(s);
+                      return (
+                        <button
+                          key={s}
+                          type="button"
+                          className={`chip ${selectedSource === s ? "active" : ""}`}
+                          style={c ? { color: c.stroke } : undefined}
+                          onClick={() => setSelectedSource(s)}
+                        >
+                          {s}
+                        </button>
+                      );
+                    })}
                   </>
                 )}
               </div>

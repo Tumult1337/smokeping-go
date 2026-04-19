@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
+import { PALETTE } from "./palette";
 
 interface Props {
   points: CyclePoint[];
@@ -29,16 +30,6 @@ type SourceStack = {
   fill: (alpha: number) => string;
   medianColor: string;
 };
-
-// Palette shared with SmokeChart. First entry is the historical teal so a
-// plain single-source chart looks unchanged.
-const PALETTE: { stroke: string; fill: (a: number) => string }[] = [
-  { stroke: "#5eead4", fill: (a) => `rgba(94,234,212,${a})` },
-  { stroke: "#f0b429", fill: (a) => `rgba(240,180,41,${a})` },
-  { stroke: "#e879f9", fill: (a) => `rgba(232,121,249,${a})` },
-  { stroke: "#38bdf8", fill: (a) => `rgba(56,189,248,${a})` },
-  { stroke: "#fb7185", fill: (a) => `rgba(251,113,133,${a})` },
-];
 
 // Classic SmokePing / cocopacket-style rendering: for each cycle we paint a
 // column the full width of its slot (bars touch, no gaps) and stack symmetric

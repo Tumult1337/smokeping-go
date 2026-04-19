@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import uPlot, { type Options, type AlignedData, type Series, type Band } from "uplot";
 import type { CyclePoint } from "./api";
+import { PALETTE } from "./palette";
 
 interface Props {
   points: CyclePoint[];
@@ -9,17 +10,6 @@ interface Props {
   toSec?: number;
   onCyclePick?: (timeSec: number) => void;
 }
-
-// Palette rotated per source so multi-source "all" view stays readable. First
-// entry is the historical single-source teal so plain 1-source charts look
-// unchanged.
-const PALETTE: { stroke: string; fill: (a: number) => string }[] = [
-  { stroke: "#5eead4", fill: (a) => `rgba(94,234,212,${a})` },
-  { stroke: "#f0b429", fill: (a) => `rgba(240,180,41,${a})` },
-  { stroke: "#e879f9", fill: (a) => `rgba(232,121,249,${a})` },
-  { stroke: "#38bdf8", fill: (a) => `rgba(56,189,248,${a})` },
-  { stroke: "#fb7185", fill: (a) => `rgba(251,113,133,${a})` },
-];
 
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
 // median line on top. uPlot's native "band" feature fills the area between
