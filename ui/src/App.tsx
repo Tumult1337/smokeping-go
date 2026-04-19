@@ -21,6 +21,9 @@ const RANGES: { label: string; value: Range }[] = [
   { label: "1y", value: "-365d" },
 ];
 
+// Backend caps HTTP sample queries at 7d (raw-bucket retention).
+const HTTP_RANGES: Range[] = ["-1h", "-6h", "-24h", "-7d"];
+
 const AUTO_REFRESH_MS = 30_000;
 
 export default function App() {
@@ -52,6 +55,7 @@ export default function App() {
   // show the cycle at that unix-seconds timestamp. Cleared when the target
   // or range changes, or when the user clicks "← latest".
   const [pickedSec, setPickedSec] = useState<number | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -142,6 +146,13 @@ export default function App() {
   }, [targets]);
 
   const selected = targets.find((t) => t.id === selectedId) ?? null;
+  const selectedProbeType = selected?.probe_type;
+
+  useEffect(() => {
+    if (selectedProbeType === "http" && !HTTP_RANGES.includes(range)) {
+      setRange("-24h");
+    }
+  }, [selectedProbeType, range]);
   const points = cycles?.points ?? [];
   const latest = points.length ? points[points.length - 1] : null;
   // Pin the chart x-axis to the server's echoed window so clicking 1y vs
@@ -150,8 +161,16 @@ export default function App() {
   const fromSec = cycles?.from ? Math.floor(new Date(cycles.from).getTime() / 1000) : undefined;
   const toSec = cycles?.to ? Math.floor(new Date(cycles.to).getTime() / 1000) : undefined;
 
+  const pickTarget = (id: string) => {
+    setSelectedId(id);
+    setSidebarOpen(false);
+  };
+
   return (
-    <div className="app">
+    <div className={`app ${sidebarOpen ? "sidebar-open" : ""}`}>
+      {sidebarOpen && (
+        <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+      )}
       <aside className="sidebar">
         <h1>gosmokeping</h1>
         {groups.length === 0 && <div className="empty">No targets</div>}
@@ -174,7 +193,7 @@ export default function App() {
                   <button
                     key={t.id}
                     className={`target-item ${t.id === selectedId ? "active" : ""}`}
-                    onClick={() => setSelectedId(t.id)}
+                    onClick={() => pickTarget(t.id)}
                   >
                     {t.name}
                   </button>
@@ -185,14 +204,36 @@ export default function App() {
       </aside>
 
       <main className="main">
-        {!selected && <div className="empty">Select a target</div>}
+        {!selected && (
+          <>
+            <button
+              type="button"
+              className="hamburger"
+              aria-label="Open target list"
+              onClick={() => setSidebarOpen(true)}
+            >
+              ☰
+            </button>
+            <div className="empty">Select a target</div>
+          </>
+        )}
         {selected && (
           <>
             <div className="toolbar">
+              <button
+                type="button"
+                className="hamburger"
+                aria-label="Open target list"
+                onClick={() => setSidebarOpen(true)}
+              >
+                ☰
+              </button>
               <strong>{selected.id}</strong>
               <span style={{ color: "#8a93a6" }}>· {selected.probe}</span>
               <div style={{ flex: 1 }} />
-              {RANGES.map((r) => (
+              {RANGES.filter(
+                (r) => selected.probe_type !== "http" || HTTP_RANGES.includes(r.value),
+              ).map((r) => (
                 <button
                   key={r.value}
                   className={range === r.value ? "active" : ""}
@@ -201,21 +242,25 @@ export default function App() {
                   {r.label}
                 </button>
               ))}
-              <div className="toolbar-sep" />
-              <button
-                className={chartStyle === "band" ? "active" : ""}
-                onClick={() => setChartStyle("band")}
-                title="Smoothed smoke band"
-              >
-                band
-              </button>
-              <button
-                className={chartStyle === "bars" ? "active" : ""}
-                onClick={() => setChartStyle("bars")}
-                title="Classic SmokePing per-cycle bars"
-              >
-                bars
-              </button>
+              {selected.probe_type !== "http" && (
+                <>
+                  <div className="toolbar-sep" />
+                  <button
+                    className={chartStyle === "band" ? "active" : ""}
+                    onClick={() => setChartStyle("band")}
+                    title="Smoothed smoke band"
+                  >
+                    band
+                  </button>
+                  <button
+                    className={chartStyle === "bars" ? "active" : ""}
+                    onClick={() => setChartStyle("bars")}
+                    title="Classic SmokePing per-cycle bars"
+                  >
+                    bars
+                  </button>
+                </>
+              )}
               <button
                 onClick={refresh}
                 disabled={refreshing}

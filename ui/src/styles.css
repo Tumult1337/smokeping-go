@@ -85,6 +85,28 @@ body {
   gap: 8px;
   margin-bottom: 16px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.hamburger {
+  display: none;
+  background: #1a1f2b;
+  color: #cfd3dd;
+  border: 1px solid #2a3142;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+.hamburger:hover { background: #252b3a; }
+
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 9;
 }
 
 .toolbar button {
@@ -106,10 +128,16 @@ body {
   margin: 0 4px;
 }
 
+.hops-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .hops-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  min-width: 560px;
 }
 .hops-table th,
 .hops-table td {
@@ -203,3 +231,65 @@ body {
 /* Match uPlot dark theme to the page. */
 .u-legend { color: #cfd3dd !important; }
 .u-axis { color: #8a93a6; }
+
+@media (max-width: 768px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    background: #0f1115;
+    z-index: 10;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    padding: 16px;
+  }
+  .app.sidebar-open .sidebar {
+    transform: translateX(0);
+    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.4);
+  }
+  .app.sidebar-open .sidebar-backdrop {
+    display: block;
+  }
+
+  .main {
+    padding: 12px;
+    height: 100vh;
+  }
+
+  .hamburger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .toolbar {
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+  .toolbar button {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+  .toolbar-sep {
+    display: none;
+  }
+
+  .chart-wrap {
+    padding: 12px;
+  }
+  .chart-title {
+    font-size: 14px;
+  }
+
+  .stats {
+    gap: 10px;
+    font-size: 12px;
+  }
+}

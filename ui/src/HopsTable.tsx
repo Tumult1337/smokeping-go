@@ -57,6 +57,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt }: Props) {
   return (
     <>
     <HopsHeader atSec={atSec} cycleTime={cycleTime} onResetAt={onResetAt} />
+    <div className="hops-table-wrap">
     <table className="hops-table">
       <thead>
         <tr>
@@ -95,6 +96,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt }: Props) {
         ))}
       </tbody>
     </table>
+    </div>
     </>
   );
 }
