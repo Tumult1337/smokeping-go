@@ -9,6 +9,7 @@ interface Props {
   fromSec?: number;
   toSec?: number;
   onCyclePick?: (timeSec: number) => void;
+  onZoomChange?: (window: { from: number; to: number } | null) => void;
 }
 
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
@@ -19,11 +20,14 @@ interface Props {
 // sharing a single x-axis. Each source gets its own colour from the palette
 // and its own set of 7 series; nulls at timestamps where that source didn't
 // probe are bridged with spanGaps so fills don't break across the interleave.
-export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }: Props) {
+export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const onCyclePickRef = useRef(onCyclePick);
   onCyclePickRef.current = onCyclePick;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
+  const internalScaleRef = useRef(false);
 
   const built = useMemo(() => buildAligned(points), [points]);
   // Stable signature of the source set. Only when this changes do we have to
@@ -71,6 +75,23 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
           (u) => {
             const next = u.cursor.idx ?? null;
             setCursorIdx((prev) => (prev === next ? prev : next));
+          },
+        ],
+        setScale: [
+          (u, key) => {
+            if (key !== "x") return;
+            if (internalScaleRef.current) return;
+            const min = u.scales.x.min;
+            const max = u.scales.x.max;
+            if (min == null || max == null) return;
+            const xs = u.data[0] as number[] | undefined;
+            if (!xs || xs.length === 0) return;
+            const from = Math.floor(min);
+            const to = Math.ceil(max);
+            const dataFrom = xs[0];
+            const dataTo = xs[xs.length - 1];
+            if (from <= dataFrom && to >= dataTo) onZoomChangeRef.current?.(null);
+            else onZoomChangeRef.current?.({ from, to });
           },
         ],
       },
@@ -122,7 +143,11 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
     pinRef.current = { from: fromSec, to: toSec };
     const pin = pinChanged && fromSec != null && toSec != null;
     u.batch(() => {
-      if (pin) u.setScale("x", { min: fromSec, max: toSec });
+      if (pin) {
+        internalScaleRef.current = true;
+        u.setScale("x", { min: fromSec, max: toSec });
+        internalScaleRef.current = false;
+      }
       u.setData(built.data, false);
     });
   }, [built, fromSec, toSec]);
