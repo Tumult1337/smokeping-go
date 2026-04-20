@@ -89,6 +89,19 @@ Key points a reader can't derive from a single file:
   never replies within `maxTTL`, `reached=false` and MTR reports full loss
   instead of mirroring the final intermediate hop.
 
+- **Address-family pinning:** `Target.Family` is `""` / `"v4"` / `"v6"` and
+  every probe routes it through the shared `familyNetwork(base, family)`
+  helper in `internal/probe/probe.go`. Interpretation is per-probe and
+  intentional, not accidental: ICMP/MTR via `net.ResolveIPAddr("ip"|"ip4"|"ip6")`
+  (shared `traceHops` takes family as a parameter); TCP via dialer network
+  `tcp`/`tcp4`/`tcp6`; HTTP by cloning `http.DefaultTransport` with a
+  family-pinned `DialContext` (`HTTP.clientFor` — connection pool is
+  per-family, acceptable because `maxHTTPRequests==2`); DNS by pinning the
+  **record type** via `LookupIP("ip"|"ip4"|"ip6", host)`, **not** the
+  dialer network — the probe measures lookup latency, so restricting A vs
+  AAAA is the semantically correct reading; how the resolver reaches the
+  upstream is left to the OS.
+
 - **Rollup task versioning:** `storage/bootstrap.go` names tasks with a
   `-vN` suffix. Changing the aggregation Flux (new percentile fields, etc.)
   requires bumping the suffix AND adding all prior names to
@@ -132,6 +145,14 @@ Key points a reader can't derive from a single file:
   operator must rotate the token. Target-set fingerprint changes (group
   + name + probe + host + url + interval + pings) trigger a scheduler
   rebuild without tearing down the push loop.
+
+- **Slave config refresh cadence:** `cluster.pull_every` on the slave
+  controls how often `refreshLoop` re-pulls `/config` from the master
+  (default 60s). The special value `"0"` / `"0s"` means one-shot: the
+  initial pre-`Run` pull stays authoritative for the process lifetime
+  and no refresh goroutine is started — operators rely on restart to
+  pick up target-list changes. Any positive duration is used verbatim;
+  unparseable / negative values log a warning and fall back to 60s.
 
 ## Config
 

@@ -3,6 +3,7 @@
     "master_url": "https://master.example.internal",
     "token": "${CLUSTER_TOKEN}",
     "name": "frankfurt-1",
-    "push_every": "5s"
+    "push_every": "5s",
+    "pull_every": "60s"
   }
 }

@@ -37,6 +37,7 @@ func (p *TCP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
 	dialer := &net.Dialer{Timeout: p.timeout}
+	network := familyNetwork("tcp", t.Family)
 	var lastErr error
 
 	for n := range count {
@@ -45,7 +46,7 @@ func (p *TCP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 		}
 		result.Sent++
 		start := time.Now()
-		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		conn, err := dialer.DialContext(ctx, network, addr)
 		if err != nil {
 			result.LossCount++
 			lastErr = err

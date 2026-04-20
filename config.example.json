@@ -34,7 +34,8 @@
         { "name": "cloudflare",      "host": "1.1.1.1",             "probe": "icmp", "alerts": ["high-loss", "high-latency"] },
         { "name": "google-dns",      "host": "8.8.8.8",             "probe": "icmp", "alerts": ["high-loss"] },
         { "name": "example-http",    "url":  "https://example.com", "probe": "http", "alerts": ["high-latency"] },
-        { "name": "example-tcp",     "host": "example.com:443",     "probe": "tcp" },
+        { "name": "example-http-v6", "url":  "https://example.com", "probe": "http", "family": "v6" },
+        { "name": "example-tcp",     "host": "example.com:443",     "probe": "tcp", "family": "v4" },
         { "name": "cloudflare-path", "host": "1.1.1.1",             "probe": "mtr" }
       ]
     }

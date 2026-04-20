@@ -48,6 +48,10 @@ type Target struct {
 	Host    string
 	URL     string
 	Timeout time.Duration
+	// Family pins address resolution to IPv4 ("v4") or IPv6 ("v6") when set;
+	// empty uses the system default. Each probe implementation is responsible
+	// for honoring it (ResolveIPAddr network, dialer network, resolver dial).
+	Family string
 }
 
 // Probe transports round-trip measurements for a given protocol.
@@ -86,6 +90,21 @@ func Build(probes map[string]config.Probe) (*Registry, error) {
 		r.Register(p)
 	}
 	return r, nil
+}
+
+// familyNetwork maps a target Family ("", "v4", "v6") onto a Go net package
+// network string. base is the protocol prefix ("ip", "tcp", "udp"). Empty
+// family returns base unchanged, which lets the OS pick the family — the
+// previous behavior for every probe before Target.Family existed.
+func familyNetwork(base, family string) string {
+	switch family {
+	case "v4":
+		return base + "4"
+	case "v6":
+		return base + "6"
+	default:
+		return base
+	}
 }
 
 func build(name string, pc config.Probe) (Probe, error) {

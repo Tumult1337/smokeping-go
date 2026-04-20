@@ -23,11 +23,11 @@ import (
 // during the trace. Callers that mirror per-hop stats as "target" stats (mtr.go)
 // use this to avoid passing off an intermediate hop's numbers when the target
 // was silent all the way to maxTTL.
-func traceHops(ctx context.Context, host string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
 	if host == "" {
 		return nil, false, errors.New("trace: host required")
 	}
-	ip, err := net.ResolveIPAddr("ip", host)
+	ip, err := net.ResolveIPAddr(familyNetwork("ip", family), host)
 	if err != nil {
 		return nil, false, fmt.Errorf("resolve %q: %w", host, err)
 	}

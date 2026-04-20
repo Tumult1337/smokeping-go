@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"time"
@@ -16,10 +17,11 @@ import (
 // responses count as loss. Body is drained (up to 4KB) to keep the connection
 // pool healthy but we don't measure download time.
 type HTTP struct {
-	name    string
-	timeout time.Duration
-	spacing time.Duration
-	client  *http.Client
+	name     string
+	timeout  time.Duration
+	spacing  time.Duration
+	insecure bool
+	client   *http.Client
 }
 
 // NewHTTP builds an HTTP probe. If insecure is true, TLS verification is
@@ -36,9 +38,10 @@ func NewHTTP(name string, timeout time.Duration, insecure bool) *HTTP {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return &HTTP{
-		name:    name,
-		timeout: timeout,
-		spacing: 500 * time.Millisecond,
+		name:     name,
+		timeout:  timeout,
+		spacing:  500 * time.Millisecond,
+		insecure: insecure,
 		client: &http.Client{
 			Timeout:   timeout,
 			Transport: tr,
@@ -46,6 +49,33 @@ func NewHTTP(name string, timeout time.Duration, insecure bool) *HTTP {
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
+		},
+	}
+}
+
+// clientFor returns a client pinned to the given address family, or the shared
+// client when family is empty. The family-pinned client clones the default
+// transport and overrides its DialContext with a net.Dialer tied to tcp4/tcp6,
+// so connection reuse stays per-family rather than global; with maxHTTPRequests
+// == 2 that's fine.
+func (p *HTTP) clientFor(family string) *http.Client {
+	if family == "" {
+		return p.client
+	}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if p.insecure {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	network := familyNetwork("tcp", family)
+	dialer := &net.Dialer{Timeout: p.timeout, KeepAlive: 30 * time.Second}
+	tr.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	return &http.Client{
+		Timeout:   p.timeout,
+		Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
 	}
 }
@@ -71,6 +101,7 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		RTTs:        make([]time.Duration, 0, count),
 		HTTPSamples: make([]HTTPSample, 0, count),
 	}
+	client := p.clientFor(t.Family)
 	var lastErr error
 
 	for n := range count {
@@ -79,7 +110,7 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		}
 		result.Sent++
 		sampleTime := time.Now()
-		rtt, status, err := p.one(ctx, t.URL)
+		rtt, status, err := p.one(ctx, client, t.URL)
 		sample := HTTPSample{Time: sampleTime, RTT: rtt, Status: status}
 		if err != nil {
 			result.LossCount++
@@ -108,7 +139,7 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 // received), and any error. A non-2xx/3xx response returns a non-nil error but
 // the status code is still reported so the UI can distinguish 404 from TCP
 // refused.
-func (p *HTTP) one(ctx context.Context, url string) (time.Duration, int, error) {
+func (p *HTTP) one(ctx context.Context, client *http.Client, url string) (time.Duration, int, error) {
 	var firstByte time.Time
 	trace := &httptrace.ClientTrace{
 		GotFirstResponseByte: func() { firstByte = time.Now() },
@@ -123,7 +154,7 @@ func (p *HTTP) one(ctx context.Context, url string) (time.Duration, int, error) 
 	req.Header.Set("User-Agent", "gosmokeping/1.0")
 
 	start := time.Now()
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, 0, err
 	}

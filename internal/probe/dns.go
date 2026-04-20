@@ -47,6 +47,13 @@ func (p *DNS) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 		}
 	}
 
+	// Family pins the record type we ask for: "ip4" → A-only, "ip6" → AAAA-only,
+	// "ip" → both. The probe measures lookup latency, so restricting the record
+	// type is the semantically correct interpretation of Target.Family here
+	// (not the network used to reach the upstream resolver, which is a separate
+	// concern we leave to the OS).
+	ipNetwork := familyNetwork("ip", t.Family)
+
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
 	var lastErr error
 	for n := range count {
@@ -56,7 +63,7 @@ func (p *DNS) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 		result.Sent++
 		lookupCtx, cancel := context.WithTimeout(ctx, p.timeout)
 		start := time.Now()
-		_, err := resolver.LookupHost(lookupCtx, t.Host)
+		_, err := resolver.LookupIP(lookupCtx, ipNetwork, t.Host)
 		cancel()
 		if err != nil {
 			result.LossCount++

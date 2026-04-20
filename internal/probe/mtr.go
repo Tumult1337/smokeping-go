@@ -44,7 +44,7 @@ func (m *MTR) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	if count > maxRounds {
 		count = maxRounds
 	}
-	hops, reached, err := traceHops(ctx, t.Host, count, m.maxTTL, m.timeout, m.spacing)
+	hops, reached, err := traceHops(ctx, t.Host, t.Family, count, m.maxTTL, m.timeout, m.spacing)
 	if err != nil {
 		return nil, err
 	}

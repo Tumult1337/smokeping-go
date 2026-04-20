@@ -59,7 +59,7 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	if t.Host == "" {
 		return nil, errors.New("icmp: host required")
 	}
-	ip, err := net.ResolveIPAddr("ip", t.Host)
+	ip, err := net.ResolveIPAddr(familyNetwork("ip", t.Family), t.Host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %q: %w", t.Host, err)
 	}
@@ -106,7 +106,7 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	// visible at startup rather than silently missing MTR for every target.
 	// The "reached" signal is irrelevant here: echo latency is already measured
 	// from the target; we only want the hops list.
-	if hops, _, terr := traceHops(ctx, t.Host, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing); terr == nil {
+	if hops, _, terr := traceHops(ctx, t.Host, t.Family, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing); terr == nil {
 		result.Hops = hops
 	} else if errors.Is(terr, errRawUnavailable) {
 		logRawUnavailableOnce(terr)

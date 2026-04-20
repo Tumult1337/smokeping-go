@@ -133,6 +133,13 @@ type Target struct {
 	URL    string   `json:"url,omitempty"`
 	Probe  string   `json:"probe"`
 	Alerts []string `json:"alerts,omitempty"`
+	// Family pins the address family for probes that resolve a hostname.
+	// "" means system default (whatever getaddrinfo picks first), "v4"
+	// forces A / IPv4, "v6" forces AAAA / IPv6. Applies to every probe
+	// type — ICMP/MTR via ResolveIPAddr("ip4"|"ip6"), TCP via the dialer
+	// network ("tcp4"|"tcp6"), HTTP via a family-pinned DialContext on a
+	// cloned transport, and DNS via a pinned Dial on the net.Resolver.
+	Family string `json:"family,omitempty"`
 	// Slaves restricts probing to the listed slave names. When empty, the
 	// master and every registered slave probe this target (pre-assignment
 	// default). When non-empty, only listed slaves probe it — the master
@@ -144,7 +151,8 @@ type Target struct {
 // Cluster configures master/slave coordination. Fields used by each role:
 //
 //	master: Token (required), Source (default "master")
-//	slave:  MasterURL, Token, Name (all required), PushEvery (default 5s)
+//	slave:  MasterURL, Token, Name (all required), PushEvery (default 5s),
+//	        PullEvery (default 60s; "0s" disables periodic config refresh)
 //
 // Slave identity is set via the --slave CLI flag, not a field here, so the
 // same config shape serves both roles without a redundant role= key.
@@ -154,6 +162,11 @@ type Cluster struct {
 	Name      string `json:"name,omitempty"`
 	Source    string `json:"source,omitempty"`
 	PushEvery string `json:"push_every,omitempty"`
+	// PullEvery controls how often a slave re-pulls its config from the
+	// master. Empty = 60s default; "0" / "0s" = one-shot (pull on startup
+	// only, then rely on operator restart for changes). Any positive
+	// duration is used as-is.
+	PullEvery string `json:"pull_every,omitempty"`
 }
 
 type Alert struct {
@@ -353,6 +366,11 @@ func (c *Config) Validate() error {
 			}
 			if t.Host == "" && t.URL == "" {
 				return fmt.Errorf("target %q: host or url is required", id)
+			}
+			switch t.Family {
+			case "", "v4", "v6":
+			default:
+				return fmt.Errorf("target %q: family must be \"v4\", \"v6\", or empty (got %q)", id, t.Family)
 			}
 			for _, a := range t.Alerts {
 				if _, ok := c.Alerts[a]; !ok {

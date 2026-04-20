@@ -120,10 +120,11 @@ func (s *Scheduler) loopTarget(ctx context.Context, ref config.TargetRef, pr pro
 
 func (s *Scheduler) runCycle(ctx context.Context, ref config.TargetRef, pr probe.Probe) {
 	target := probe.Target{
-		Name:  ref.Target.Name,
-		Group: ref.Group,
-		Host:  ref.Target.Host,
-		URL:   ref.Target.URL,
+		Name:   ref.Target.Name,
+		Group:  ref.Group,
+		Host:   ref.Target.Host,
+		URL:    ref.Target.URL,
+		Family: ref.Target.Family,
 	}
 
 	cycleCtx, cancel := context.WithTimeout(ctx, s.cfg.Interval)

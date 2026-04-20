@@ -354,13 +354,13 @@ func Tokenize(r io.Reader, baseDir, path string) ([]Line, error) {
 		}
 		if strings.HasPrefix(trimmed, "#") {
 			flush()
-			out = append(out, Line{Kind: LineComment, Value: trimmed, Section: section, File: abs, LineNo: lineNo})
+			out = append(out, Line{Kind: LineComment, Section: section, File: abs, LineNo: lineNo})
 			continue
 		}
 		if m := reSection.FindStringSubmatch(trimmed); m != nil {
 			flush()
 			section = m[1]
-			out = append(out, Line{Kind: LineSection, Name: section, Section: "", File: abs, LineNo: lineNo})
+			out = append(out, Line{Kind: LineSection, Section: section, File: abs, LineNo: lineNo})
 			continue
 		}
 		if m := reNode.FindStringSubmatch(trimmed); m != nil {
@@ -818,12 +818,15 @@ func Build(lines []Line) (*SPRoot, error) {
 			// Reset per-section state transitions we care about.
 			probeStack = nil
 			currentAlert = nil
-			// Start capturing raw lines for unrecognised sections.
-			switch l.Name {
+			// Start capturing raw lines for unrecognised sections. On a
+			// LineSection, the section name lives in l.Section (the tokenizer
+			// sets Section = current section for every line, including the
+			// section header itself).
+			switch l.Section {
 			case "General", "Database", "Probes", "Alerts", "Targets":
 				// known
 			default:
-				unknown = &SPUnknown{Section: l.Name}
+				unknown = &SPUnknown{Section: l.Section}
 			}
 			continue
 		}

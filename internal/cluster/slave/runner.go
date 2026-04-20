@@ -23,8 +23,11 @@ type Runner struct {
 	sink   *PushSink
 
 	pushEvery  time.Duration
+	pullEvery  time.Duration // 0 = poll once on startup only
 	batchLimit int
 }
+
+const defaultPullEvery = 60 * time.Second
 
 // NewRunner builds a Runner from the slave's local minimal config. Caller is
 // expected to have already validated it with Config.ValidateMinimal.
@@ -35,12 +38,24 @@ func NewRunner(log *slog.Logger, local *config.Config, version string) *Runner {
 			pushEvery = d
 		}
 	}
+	pullEvery := defaultPullEvery
+	if raw := local.Cluster.PullEvery; raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
+			// d == 0 is meaningful: disables periodic refresh. Only negatives
+			// (and unparseable strings) fall back to the default.
+			pullEvery = d
+		} else {
+			log.Warn("invalid cluster.pull_every, using default",
+				"value", raw, "default", defaultPullEvery, "err", err)
+		}
+	}
 	return &Runner{
 		log:        log,
 		local:      local,
 		client:     NewClient(local.Cluster.MasterURL, local.Cluster.Token, local.Cluster.Name, version),
 		sink:       NewPushSink(log, 600),
 		pushEvery:  pushEvery,
+		pullEvery:  pullEvery,
 		batchLimit: 100,
 	}
 }
@@ -53,10 +68,15 @@ func NewRunner(log *slog.Logger, local *config.Config, version string) *Runner {
 // If the master rejects our token mid-flight (either a refresh or a push)
 // we treat that as fatal and return ErrAuth so the caller can exit non-zero.
 func (r *Runner) Run(ctx context.Context) error {
+	pullEveryLog := any(r.pullEvery)
+	if r.pullEvery == 0 {
+		pullEveryLog = "disabled"
+	}
 	r.log.Info("slave starting",
 		"name", r.local.Cluster.Name,
 		"master", r.local.Cluster.MasterURL,
-		"push_every", r.pushEvery)
+		"push_every", r.pushEvery,
+		"pull_every", pullEveryLog)
 
 	if err := r.registerForever(ctx); err != nil {
 		return err
@@ -111,12 +131,21 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// refreshLoop pulls config from the master every 60s. On a successful non-304
-// response it sends a rebuilt shim to reloads — the lifecycle helper's
+// refreshLoop pulls config from the master every r.pullEvery. On a successful
+// non-304 response it sends a rebuilt shim to reloads — the lifecycle helper's
 // fingerprint check decides whether a restart is actually needed. A 401
 // cancels runCtx with cause ErrAuth and returns.
+//
+// When r.pullEvery == 0 the loop returns immediately: the initial /config
+// pull (done before Run's goroutines start) stays authoritative for this
+// slave's lifetime and the operator must restart the process — or rotate
+// the target list on the master and trigger a slave restart — to pick up
+// changes. No goroutine is kept alive in that mode.
 func (r *Runner) refreshLoop(ctx context.Context, cancelRun context.CancelCauseFunc, etag string, reloads chan<- *config.Config) {
-	t := time.NewTicker(60 * time.Second)
+	if r.pullEvery == 0 {
+		return
+	}
+	t := time.NewTicker(r.pullEvery)
 	defer t.Stop()
 	for {
 		select {
