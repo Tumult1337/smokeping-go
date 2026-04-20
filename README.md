@@ -254,6 +254,25 @@ deploy/             # systemd unit
 docs/screenshots/   # README screenshots
 ```
 
+## Migrating from SmokePing
+
+`smokeping2gosmokeping` reads a SmokePing `Config::Grammar` config and emits
+an equivalent gosmokeping JSON config. It follows `@include` directives and
+translates the common probe/alert shapes; constructs it can't map cleanly
+(unusual probe types, complex alert patterns, `*** Presentation ***` settings)
+are recorded in a sidecar notes file for human review.
+
+```bash
+smokeping2gosmokeping -in /etc/smokeping/config -out config.json
+# writes config.json and config.json.notes.txt
+```
+
+Storage credentials are emitted as `${INFLUX_URL}` / `${INFLUX_TOKEN}` /
+`${INFLUX_ORG}` placeholders — set them in the environment (or in a `.env`
+file next to `config.json`) before starting gosmokeping. Add `-strict` to
+make the tool exit 2 when any construct couldn't be fully translated, useful
+for CI-driven config generation.
+
 ## License
 
 MIT. Fork, break, improve.
