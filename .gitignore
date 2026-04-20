@@ -9,3 +9,4 @@ internal/ui/dist/*
 .DS_Store
 .playwright-mcp/
 .claude/
+.worktrees/
