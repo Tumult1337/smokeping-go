@@ -71,6 +71,11 @@ export function HttpChart({
   const onZoomChangeRef = useRef(onZoomChange);
   onZoomChangeRef.current = onZoomChange;
   const internalScaleRef = useRef(false);
+  // Compare new scale against the requested window (not data extent) so that
+  // drag-zooming into a range that happens to contain all the samples still
+  // registers as a zoom instead of collapsing to a reset.
+  const requestedWindowRef = useRef<{ from?: number; to?: number }>({});
+  requestedWindowRef.current = { from: fromSec, to: toSec };
 
   useEffect(() => {
     let cancelled = false;
@@ -167,14 +172,13 @@ export function HttpChart({
             const min = u.scales.x.min;
             const max = u.scales.x.max;
             if (min == null || max == null) return;
-            const xs = u.data[0] as number[] | undefined;
-            if (!xs || xs.length === 0) return;
             const from = Math.floor(min);
             const to = Math.ceil(max);
-            const dataFrom = xs[0];
-            const dataTo = xs[xs.length - 1];
-            if (from <= dataFrom && to >= dataTo) onZoomChangeRef.current?.(null);
-            else onZoomChangeRef.current?.({ from, to });
+            const reqFrom = requestedWindowRef.current.from;
+            const reqTo = requestedWindowRef.current.to;
+            if (reqFrom == null || reqTo == null) return;
+            if (Math.abs(from - reqFrom) <= 1 && Math.abs(to - reqTo) <= 1) return;
+            onZoomChangeRef.current?.({ from, to });
           },
         ],
       },

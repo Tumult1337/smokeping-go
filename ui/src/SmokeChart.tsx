@@ -28,6 +28,11 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   const onZoomChangeRef = useRef(onZoomChange);
   onZoomChangeRef.current = onZoomChange;
   const internalScaleRef = useRef(false);
+  // Track the requested window so the setScale hook can tell "drag-zoom inside
+  // the pinned range" from "scale already matches the pin" without relying on
+  // data extent (sparse data would collapse the zoom check to a false reset).
+  const requestedWindowRef = useRef<{ from?: number; to?: number }>({});
+  requestedWindowRef.current = { from: fromSec, to: toSec };
 
   const built = useMemo(() => buildAligned(points), [points]);
   // Stable signature of the source set. Only when this changes do we have to
@@ -84,14 +89,15 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
             const min = u.scales.x.min;
             const max = u.scales.x.max;
             if (min == null || max == null) return;
-            const xs = u.data[0] as number[] | undefined;
-            if (!xs || xs.length === 0) return;
             const from = Math.floor(min);
             const to = Math.ceil(max);
-            const dataFrom = xs[0];
-            const dataTo = xs[xs.length - 1];
-            if (from <= dataFrom && to >= dataTo) onZoomChangeRef.current?.(null);
-            else onZoomChangeRef.current?.({ from, to });
+            const reqFrom = requestedWindowRef.current.from;
+            const reqTo = requestedWindowRef.current.to;
+            if (reqFrom == null || reqTo == null) return;
+            // Scale within 1s of the pinned window means uPlot just re-applied
+            // it (round-trip after data refresh) — not a user zoom gesture.
+            if (Math.abs(from - reqFrom) <= 1 && Math.abs(to - reqTo) <= 1) return;
+            onZoomChangeRef.current?.({ from, to });
           },
         ],
       },
@@ -101,15 +107,29 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
     plotRef.current = new uPlot(opts, empty, divRef.current);
 
     const over = plotRef.current.over;
-    const onClick = () => {
+    // Track mousedown position so a drag-zoom release (which also fires click
+    // on the same element) doesn't double as a cycle-pick. 3px threshold
+    // matches uPlot's default drag sensitivity — anything larger is a gesture.
+    let dragStart: { x: number; y: number } | null = null;
+    const onMouseDown = (e: MouseEvent) => {
+      dragStart = { x: e.clientX, y: e.clientY };
+    };
+    const onClick = (e: MouseEvent) => {
       const u = plotRef.current;
       const cb = onCyclePickRef.current;
       if (!u || !cb) return;
+      if (dragStart) {
+        const dx = Math.abs(e.clientX - dragStart.x);
+        const dy = Math.abs(e.clientY - dragStart.y);
+        dragStart = null;
+        if (dx > 3 || dy > 3) return;
+      }
       const idx = u.cursor.idx;
       if (idx == null) return;
       const t = u.data[0][idx] as number | undefined;
       if (t != null) cb(t);
     };
+    over.addEventListener("mousedown", onMouseDown);
     over.addEventListener("click", onClick);
     const ro = new ResizeObserver(() => {
       if (plotRef.current && divRef.current) {
@@ -122,6 +142,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
     ro.observe(divRef.current);
     return () => {
       ro.disconnect();
+      over.removeEventListener("mousedown", onMouseDown);
       over.removeEventListener("click", onClick);
       plotRef.current?.destroy();
       plotRef.current = null;

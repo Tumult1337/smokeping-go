@@ -50,6 +50,11 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   const onZoomChangeRef = useRef(onZoomChange);
   onZoomChangeRef.current = onZoomChange;
   const internalScaleRef = useRef(false);
+  // Track the requested window so the setScale hook can distinguish a user
+  // zoom gesture from uPlot re-applying the pinned range after data refresh.
+  // Data extent is the wrong yardstick when probes are sparse within the pin.
+  const requestedWindowRef = useRef<{ from?: number; to?: number }>({});
+  requestedWindowRef.current = { from: fromSec, to: toSec };
 
   // All data that the draw hook and scale-range callback read from live in
   // refs — the uPlot instance is created once per source set, so closures
@@ -147,14 +152,13 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
             const min = u.scales.x.min;
             const max = u.scales.x.max;
             if (min == null || max == null) return;
-            const xs = u.data[0] as number[] | undefined;
-            if (!xs || xs.length === 0) return;
             const from = Math.floor(min);
             const to = Math.ceil(max);
-            const dataFrom = xs[0];
-            const dataTo = xs[xs.length - 1];
-            if (from <= dataFrom && to >= dataTo) onZoomChangeRef.current?.(null);
-            else onZoomChangeRef.current?.({ from, to });
+            const reqFrom = requestedWindowRef.current.from;
+            const reqTo = requestedWindowRef.current.to;
+            if (reqFrom == null || reqTo == null) return;
+            if (Math.abs(from - reqFrom) <= 1 && Math.abs(to - reqTo) <= 1) return;
+            onZoomChangeRef.current?.({ from, to });
           },
         ],
       },
@@ -168,10 +172,22 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     // closest to the cursor's x value (in data space). The union-based
     // cursor.idx doesn't help here because each source owns its own index.
     const over = plotRef.current.over;
-    const onClick = () => {
+    // Drag-zoom release fires click on the same element; track mousedown coords
+    // so we can suppress the cycle-pick when the user was actually drag-zooming.
+    let dragStart: { x: number; y: number } | null = null;
+    const onMouseDown = (e: MouseEvent) => {
+      dragStart = { x: e.clientX, y: e.clientY };
+    };
+    const onClick = (e: MouseEvent) => {
       const u = plotRef.current;
       const cb = onCyclePickRef.current;
       if (!u || !cb) return;
+      if (dragStart) {
+        const dx = Math.abs(e.clientX - dragStart.x);
+        const dy = Math.abs(e.clientY - dragStart.y);
+        dragStart = null;
+        if (dx > 3 || dy > 3) return;
+      }
       const xVal = u.posToVal(u.cursor.left ?? -1, "x");
       if (!isFinite(xVal)) return;
       let best: number | null = null;
@@ -187,6 +203,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       }
       if (best != null) cb(best);
     };
+    over.addEventListener("mousedown", onMouseDown);
     over.addEventListener("click", onClick);
     const ro = new ResizeObserver(() => {
       if (plotRef.current && divRef.current) {
@@ -199,6 +216,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     ro.observe(divRef.current);
     return () => {
       ro.disconnect();
+      over.removeEventListener("mousedown", onMouseDown);
       over.removeEventListener("click", onClick);
       plotRef.current?.destroy();
       plotRef.current = null;
