@@ -7,6 +7,16 @@ body {
   color: #e6e6e6;
 }
 
+/* Themed scrollbars — Chromium/WebKit needs the pseudo-elements, Firefox
+   takes the two-value shorthand. Palette pulled from the existing chip/button
+   active states so overflowing regions blend with the rest of the UI. */
+::-webkit-scrollbar        { width: 10px; height: 10px; }
+::-webkit-scrollbar-track  { background: #0f1115; }
+::-webkit-scrollbar-thumb  { background: #2a3142; border-radius: 5px; border: 2px solid #0f1115; }
+::-webkit-scrollbar-thumb:hover  { background: #3a4357; }
+::-webkit-scrollbar-corner { background: #0f1115; }
+* { scrollbar-color: #2a3142 #0f1115; scrollbar-width: thin; }
+
 .app {
   display: grid;
   grid-template-columns: 260px 1fr;
@@ -292,6 +302,15 @@ body {
 /* Match uPlot dark theme to the page. */
 .u-legend { color: #cfd3dd !important; }
 .u-axis { color: #8a93a6; }
+
+/* High-contrast range-drag overlay. uPlot's default is rgba(0,0,0,0.07) which
+   is ~invisible on this near-black bg; the teal matches the accent colour so
+   the selection reads as part of the theme. !important because uPlot's own
+   stylesheet is injected after ours at runtime. */
+.u-select {
+  background: rgba(94, 234, 212, 0.18) !important;
+  border: 1px solid rgba(94, 234, 212, 0.55) !important;
+}
 
 @media (max-width: 768px) {
   .app {
