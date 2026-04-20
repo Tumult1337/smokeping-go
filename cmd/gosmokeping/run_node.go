@@ -33,6 +33,9 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 	store := config.NewStore(configPath, cfg)
 
 	store.WatchSIGHUP(ctx, log)
+	if err := store.WatchFile(ctx, log); err != nil {
+		log.Warn("config file watch disabled", "err", err)
+	}
 
 	log.Info("gosmokeping starting",
 		"listen", cfg.Listen,
