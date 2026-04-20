@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -43,7 +43,7 @@ jobs:
           mkdir -p build
           go build -trimpath -ldflags="-s -w" -o build/gosmokeping-linux-amd64 ./cmd/gosmokeping
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: gosmokeping-linux-amd64
           path: build/gosmokeping-linux-amd64
