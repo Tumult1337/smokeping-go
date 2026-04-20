@@ -396,6 +396,14 @@ export default function App() {
                   </button>
                 </>
               )}
+              {zoom && (
+                <button
+                  onClick={() => setZoom(null)}
+                  title="Reset zoom to selected range"
+                >
+                  reset zoom
+                </button>
+              )}
               <button
                 onClick={refresh}
                 disabled={refreshing}
