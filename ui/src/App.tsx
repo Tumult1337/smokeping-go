@@ -29,22 +29,32 @@ type UrlState = {
   mode: ChartStyle | null;
   source: string | null;
   pickedSec: number | null;
+  zoom: { from: number; to: number } | null;
 };
 function readUrlState(): UrlState {
   if (typeof window === "undefined") {
-    return { target: null, range: null, mode: null, source: null, pickedSec: null };
+    return { target: null, range: null, mode: null, source: null, pickedSec: null, zoom: null };
   }
   const p = new URLSearchParams(window.location.search);
   const range = p.get("range") as Range | null;
   const mode = p.get("mode");
   const tRaw = p.get("t");
   const t = tRaw ? Number(tRaw) : NaN;
+  const z0Raw = p.get("z0");
+  const z1Raw = p.get("z1");
+  const z0 = z0Raw ? Number(z0Raw) : NaN;
+  const z1 = z1Raw ? Number(z1Raw) : NaN;
+  const zoom =
+    Number.isFinite(z0) && Number.isFinite(z1) && z1 > z0
+      ? { from: z0, to: z1 }
+      : null;
   return {
     target: p.get("target"),
     range: range && VALID_RANGES.includes(range) ? range : null,
     mode: mode === "bars" || mode === "band" ? mode : null,
     source: p.get("source"),
     pickedSec: Number.isFinite(t) ? t : null,
+    zoom,
   };
 }
 
