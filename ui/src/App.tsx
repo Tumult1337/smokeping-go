@@ -495,6 +495,7 @@ export default function App() {
                     fromSec={fromSec}
                     toSec={toSec}
                     onCyclePick={setPickedSec}
+                    onZoomChange={setZoom}
                   />
                 )}
                 {latest && (

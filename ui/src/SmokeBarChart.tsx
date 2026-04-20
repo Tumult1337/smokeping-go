@@ -16,6 +16,7 @@ interface Props {
   // Invoked when the user clicks a bar; receives that cycle's unix timestamp.
   // Used by the MTR cycle-picker to swap the HopsTable to that moment.
   onCyclePick?: (timeSec: number) => void;
+  onZoomChange?: (window: { from: number; to: number } | null) => void;
 }
 
 type Band = { lo: number; hi: number; alpha: number };
@@ -39,13 +40,16 @@ type SourceStack = {
 // smooth smoke gradient that darkens around the median. The median tick on
 // top is colour-coded by per-cycle loss percentage. In multi-source "all"
 // view, each source gets its own palette entry and is drawn independently.
-export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick }: Props) {
+export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   // Keep onCyclePick in a ref so swapping the callback doesn't force a full
   // chart rebuild (which would flash + lose hover state).
   const onCyclePickRef = useRef(onCyclePick);
   onCyclePickRef.current = onCyclePick;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
+  const internalScaleRef = useRef(false);
 
   // All data that the draw hook and scale-range callback read from live in
   // refs — the uPlot instance is created once per source set, so closures
@@ -136,6 +140,23 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
             setCursorIdx((prev) => (prev === next ? prev : next));
           },
         ],
+        setScale: [
+          (u, key) => {
+            if (key !== "x") return;
+            if (internalScaleRef.current) return;
+            const min = u.scales.x.min;
+            const max = u.scales.x.max;
+            if (min == null || max == null) return;
+            const xs = u.data[0] as number[] | undefined;
+            if (!xs || xs.length === 0) return;
+            const from = Math.floor(min);
+            const to = Math.ceil(max);
+            const dataFrom = xs[0];
+            const dataTo = xs[xs.length - 1];
+            if (from <= dataFrom && to >= dataTo) onZoomChangeRef.current?.(null);
+            else onZoomChangeRef.current?.({ from, to });
+          },
+        ],
       },
     };
 
@@ -202,7 +223,11 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     yRangeRef.current = empty ? [0, 1] : built.yRange;
 
     u.batch(() => {
-      if (pin) u.setScale("x", { min: fromSec, max: toSec });
+      if (pin) {
+        internalScaleRef.current = true;
+        u.setScale("x", { min: fromSec, max: toSec });
+        internalScaleRef.current = false;
+      }
       u.setData(built.data, false);
     });
     if (!empty) {
