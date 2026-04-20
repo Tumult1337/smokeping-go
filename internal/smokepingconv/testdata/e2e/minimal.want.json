@@ -1,0 +1,51 @@
+{
+  "listen": ":8080",
+  "interval": "30s",
+  "pings": 10,
+  "storage": {
+    "backend": "influxv2",
+    "influxv2": {
+      "url": "${INFLUX_URL}",
+      "token": "${INFLUX_TOKEN}",
+      "org": "${INFLUX_ORG}",
+      "bucket_raw": "smokeping_raw",
+      "bucket_1h": "smokeping_1h",
+      "bucket_1d": "smokeping_1d"
+    },
+    "influxv3": {
+      "url": "",
+      "token": "",
+      "database": ""
+    },
+    "prometheus": {
+      "remote_write_url": "",
+      "query_url": "",
+      "bearer_token": ""
+    }
+  },
+  "probes": {
+    "fping": {
+      "type": "icmp",
+      "timeout": "3s"
+    }
+  },
+  "targets": [
+    {
+      "group": "europe",
+      "title": "Europe",
+      "targets": [
+        {
+          "name": "berlin",
+          "title": "Berlin",
+          "host": "berlin.example.com",
+          "probe": "fping"
+        }
+      ]
+    }
+  ],
+  "actions": {
+    "log": {
+      "type": "log"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+skip alert: "weird" pattern "<10,<10,<10,>100,>100" (type=rtt) not expressible as gosmokeping condition — skipped  (source: unsupported.conf:20)
+skip probe: "AnotherSSH" (type AnotherSSH) — no gosmokeping equivalent  (source: unsupported.conf:16)
+skip section: *** Presentation *** ignored (no gosmokeping analogue)
+skip target: ssh-only probe="AnotherSSH" unknown/unsupported — dropped  (source: unsupported.conf:30)
+warn general: storage.influxv2 is a placeholder — edit URL/token/org before running gosmokeping

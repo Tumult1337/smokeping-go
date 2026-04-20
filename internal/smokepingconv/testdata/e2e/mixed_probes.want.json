@@ -1,0 +1,104 @@
+{
+  "listen": ":8080",
+  "interval": "1m0s",
+  "pings": 20,
+  "storage": {
+    "backend": "influxv2",
+    "influxv2": {
+      "url": "${INFLUX_URL}",
+      "token": "${INFLUX_TOKEN}",
+      "org": "${INFLUX_ORG}",
+      "bucket_raw": "smokeping_raw",
+      "bucket_1h": "smokeping_1h",
+      "bucket_1d": "smokeping_1d"
+    },
+    "influxv3": {
+      "url": "",
+      "token": "",
+      "database": ""
+    },
+    "prometheus": {
+      "remote_write_url": "",
+      "query_url": "",
+      "bearer_token": ""
+    }
+  },
+  "probes": {
+    "dns": {
+      "type": "dns",
+      "timeout": "3s"
+    },
+    "curl": {
+      "type": "http",
+      "timeout": "5s",
+      "insecure": true
+    },
+    "fping": {
+      "type": "icmp",
+      "timeout": "5s"
+    },
+    "tcpping": {
+      "type": "tcp",
+      "timeout": "2s"
+    }
+  },
+  "targets": [
+    {
+      "group": "network",
+      "title": "Network",
+      "targets": [
+        {
+          "name": "cloudflare",
+          "host": "1.1.1.1",
+          "probe": "fping"
+        }
+      ]
+    },
+    {
+      "group": "web",
+      "title": "Web",
+      "targets": [
+        {
+          "name": "example",
+          "url": "https://example.com/",
+          "probe": "curl",
+          "alerts": [
+            "slow"
+          ]
+        }
+      ]
+    },
+    {
+      "group": "services",
+      "title": "Services",
+      "targets": [
+        {
+          "name": "api",
+          "host": "api.example.com:443",
+          "probe": "tcpping"
+        }
+      ]
+    }
+  ],
+  "alerts": {
+    "bigloss": {
+      "condition": "loss_pct \u003e 50",
+      "sustained": 3,
+      "actions": [
+        "log"
+      ]
+    },
+    "slow": {
+      "condition": "rtt_median \u003e 100ms",
+      "sustained": 2,
+      "actions": [
+        "log"
+      ]
+    }
+  },
+  "actions": {
+    "log": {
+      "type": "log"
+    }
+  }
+}

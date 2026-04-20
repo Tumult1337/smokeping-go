@@ -1,0 +1,1 @@
+warn general: storage.influxv2 is a placeholder — edit URL/token/org before running gosmokeping

@@ -1,0 +1,50 @@
+{
+  "listen": ":8080",
+  "interval": "1m0s",
+  "pings": 20,
+  "storage": {
+    "backend": "influxv2",
+    "influxv2": {
+      "url": "${INFLUX_URL}",
+      "token": "${INFLUX_TOKEN}",
+      "org": "${INFLUX_ORG}",
+      "bucket_raw": "smokeping_raw",
+      "bucket_1h": "smokeping_1h",
+      "bucket_1d": "smokeping_1d"
+    },
+    "influxv3": {
+      "url": "",
+      "token": "",
+      "database": ""
+    },
+    "prometheus": {
+      "remote_write_url": "",
+      "query_url": "",
+      "bearer_token": ""
+    }
+  },
+  "probes": {
+    "fping": {
+      "type": "icmp",
+      "timeout": "5s"
+    }
+  },
+  "targets": [
+    {
+      "group": "default",
+      "title": "",
+      "targets": [
+        {
+          "name": "host1",
+          "host": "host1.example.com",
+          "probe": "fping"
+        }
+      ]
+    }
+  ],
+  "actions": {
+    "log": {
+      "type": "log"
+    }
+  }
+}
