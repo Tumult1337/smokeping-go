@@ -12,7 +12,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY --from=ui /src/ui/dist ./internal/ui/dist
+COPY --from=ui /src/internal/ui/dist ./internal/ui/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gosmokeping ./cmd/gosmokeping
 
 FROM alpine:3.20
