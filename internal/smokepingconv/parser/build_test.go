@@ -75,6 +75,35 @@ host = paris.example.com
 	}
 }
 
+func TestBuild_SectionlessFragment(t *testing.T) {
+	src := `+ europe
+probe = FPing
+++ berlin
+host = berlin.example.com
+`
+	lines, err := Tokenize(strings.NewReader(src), "/tmp", "/tmp/frag.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := Build(lines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !root.SectionlessTargets {
+		t.Error("SectionlessTargets not flagged")
+	}
+	if root.Targets == nil || len(root.Targets.Children) != 1 {
+		t.Fatalf("targets: %+v", root.Targets)
+	}
+	europe := root.Targets.Children[0]
+	if europe.Name != "europe" || europe.Params["probe"] != "FPing" {
+		t.Errorf("europe: %+v", europe)
+	}
+	if len(europe.Children) != 1 || europe.Children[0].Params["host"] != "berlin.example.com" {
+		t.Errorf("berlin: %+v", europe.Children)
+	}
+}
+
 func TestBuild_UnknownSection(t *testing.T) {
 	src := `*** Presentation ***
 template = /etc/smokeping/basepage.html

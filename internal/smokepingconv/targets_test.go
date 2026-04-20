@@ -1,6 +1,7 @@
 package smokepingconv
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/tumult/gosmokeping/internal/smokepingconv/parser"
@@ -70,6 +71,41 @@ func TestMapTargets_HttpURLFormat(t *testing.T) {
 	tgt := groups[0].Targets[0]
 	if tgt.URL != "https://example.com/" || tgt.Host != "" {
 		t.Errorf("target: %+v", tgt)
+	}
+}
+
+func TestMapTargets_SlavesAndNomasterpoll(t *testing.T) {
+	root := &parser.SPRoot{Targets: &parser.SPNode{
+		Params: map[string]string{"probe": "FPing"},
+		Children: []*parser.SPNode{
+			{Name: "edge", Params: map[string]string{"slaves": "a, b"}, Children: []*parser.SPNode{
+				{Name: "host1", Params: map[string]string{"host": "h1.example.com", "nomasterpoll": "yes"}},
+				{Name: "host2", Params: map[string]string{"host": "h2.example.com", "slaves": "c"}},
+				{Name: "host3", Params: map[string]string{"host": "h3.example.com", "nomasterpoll": "yes"}},
+			}},
+		},
+	}}
+	info := map[string]ProbeInfo{"FPing": {Key: "fping", Type: "icmp"}}
+	groups, notes := mapTargets(root, info, nil)
+	if len(groups) != 1 || len(groups[0].Targets) != 3 {
+		t.Fatalf("groups: %+v", groups)
+	}
+	h1 := groups[0].Targets[0]
+	h2 := groups[0].Targets[1]
+	if len(h1.Slaves) != 2 || h1.Slaves[0] != "a" || h1.Slaves[1] != "b" {
+		t.Errorf("h1 slaves (inherited): %+v", h1.Slaves)
+	}
+	if len(h2.Slaves) != 1 || h2.Slaves[0] != "c" {
+		t.Errorf("h2 slaves (child override): %+v", h2.Slaves)
+	}
+	var count int
+	for _, n := range notes {
+		if strings.Contains(n.Detail, "nomasterpoll") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 1 nomasterpoll note, got %d: %+v", count, notes)
 	}
 }
 

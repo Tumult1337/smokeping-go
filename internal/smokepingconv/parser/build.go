@@ -87,7 +87,15 @@ func Build(lines []Line) (*SPRoot, error) {
 			continue
 		}
 
-		switch l.Section {
+		// No section header seen yet: treat content lines as if they were
+		// inside *** Targets *** (typical of @include fragments).
+		section := l.Section
+		if section == "" && (l.Kind == LineNode || l.Kind == LineAssign) {
+			section = "Targets"
+			root.SectionlessTargets = true
+		}
+
+		switch section {
 		case "General":
 			// Not retained — gosmokeping has no analogue. Tracked as skip-section
 			// by default (mapper emits a single note).

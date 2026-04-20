@@ -8,6 +8,11 @@ type SPRoot struct {
 	Alerts   []SPAlert         `json:"alerts,omitempty"`
 	Targets  *SPNode           `json:"targets,omitempty"`
 	Unknown  []SPUnknown       `json:"unknown,omitempty"`
+	// SectionlessTargets is set when the input has node/assign lines before
+	// any *** Section *** header — typical of @include fragments meant to be
+	// pulled into a master config. Build routes those lines to Targets; the
+	// mapper surfaces a warn note so the operator knows it happened.
+	SectionlessTargets bool `json:"sectionless_targets,omitempty"`
 }
 
 type SPProbe struct {

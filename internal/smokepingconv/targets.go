@@ -29,7 +29,13 @@ func mapTargets(root *parser.SPRoot, probeInfo map[string]ProbeInfo, extNotes []
 		path   []string // slugged path to this node, excluding the node itself
 		probe  string   // inherited probe reference
 		alerts []string // inherited alert list
+		slaves []string // inherited slave-assignment list
 	}
+
+	// nomasterpoll is informational in gosmokeping — a non-empty target.Slaves
+	// already causes the master to skip local probing. Note once to reassure
+	// the operator their semantics are preserved.
+	var noteNomasterpollOnce bool
 
 	var walk func(f frame)
 	walk = func(f frame) {
@@ -41,11 +47,23 @@ func mapTargets(root *parser.SPRoot, probeInfo map[string]ProbeInfo, extNotes []
 
 		probe := f.probe
 		alerts := f.alerts
+		slaves := f.slaves
 		if v, ok := n.Params["probe"]; ok {
 			probe = v
 		}
 		if v, ok := n.Params["alerts"]; ok {
 			alerts = splitCSV(v)
+		}
+		if v, ok := n.Params["slaves"]; ok {
+			slaves = splitCSV(v)
+		}
+		if _, ok := n.Params["nomasterpoll"]; ok && !noteNomasterpollOnce {
+			notes = append(notes, Note{
+				Level: LevelWarn, Category: CatTarget,
+				Detail: "nomasterpoll ignored — gosmokeping's master already skips targets with non-empty slaves",
+				Source: sourceOf(n.File, n.LineNo),
+			})
+			noteNomasterpollOnce = true
 		}
 
 		host := n.Params["host"]
@@ -89,6 +107,9 @@ func mapTargets(root *parser.SPRoot, probeInfo map[string]ProbeInfo, extNotes []
 			}
 			if len(alerts) > 0 {
 				tgt.Alerts = alerts
+			}
+			if len(slaves) > 0 {
+				tgt.Slaves = append([]string(nil), slaves...)
 			}
 			switch pi.Type {
 			case "http":
@@ -135,11 +156,11 @@ func mapTargets(root *parser.SPRoot, probeInfo map[string]ProbeInfo, extNotes []
 		}
 
 		for _, c := range n.Children {
-			walk(frame{node: c, path: pathSelf, probe: probe, alerts: alerts})
+			walk(frame{node: c, path: pathSelf, probe: probe, alerts: alerts, slaves: slaves})
 		}
 	}
 
-	walk(frame{node: rootNode, path: nil, probe: rootNode.Params["probe"], alerts: splitCSV(rootNode.Params["alerts"])})
+	walk(frame{node: rootNode, path: nil, probe: rootNode.Params["probe"], alerts: splitCSV(rootNode.Params["alerts"]), slaves: splitCSV(rootNode.Params["slaves"])})
 
 	return groupsOrdered, notes
 }

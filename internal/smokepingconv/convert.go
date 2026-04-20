@@ -61,6 +61,12 @@ func Convert(r io.Reader, baseDir, path string) (*config.Config, []Note, error) 
 	}
 
 	var notes []Note
+	if root.SectionlessTargets {
+		notes = append(notes, Note{
+			Level: LevelWarn, Category: CatSection,
+			Detail: "no *** Section *** header seen — treating all content as Targets (input looks like an @include fragment)",
+		})
+	}
 	notes = append(notes, dbNotes...)
 	notes = append(notes, probeNotes...)
 	notes = append(notes, targetNotes...)
