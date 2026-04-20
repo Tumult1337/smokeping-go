@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,7 +19,8 @@ import (
 
 // runNode is the default (non-slave) entrypoint: loads a full config, wires
 // storage + alerts + UI + optional cluster master endpoints, and blocks
-// running the scheduler until ctx is cancelled.
+// running the scheduler (via Supervisor, so SIGHUP-triggered target edits are
+// applied live) until ctx is cancelled.
 func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -32,12 +34,6 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 
 	store.WatchSIGHUP(ctx, log)
 
-	registry, err := probe.Build(cfg.Probes)
-	if err != nil {
-		log.Error("build probes", "err", err)
-		os.Exit(1)
-	}
-
 	log.Info("gosmokeping starting",
 		"listen", cfg.Listen,
 		"interval", cfg.Interval,
@@ -45,27 +41,30 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		"targets", len(cfg.AllTargets()))
 
 	sinks := []scheduler.Sink{&scheduler.LogSink{Log: log}}
-	var clusterRegistry *master.Registry
 	var reader api.StorageReader
-	if cfg.InfluxDB.URL != "" && cfg.InfluxDB.Token != "" {
-		if err := storage.Bootstrap(ctx, log, cfg.InfluxDB); err != nil {
-			log.Error("bootstrap storage", "err", err)
-			os.Exit(1)
-		}
-		writer := storage.NewWriter(log, cfg.InfluxDB)
-		defer writer.Close()
-		sinks = append(sinks, writer)
 
-		r := storage.NewReader(cfg.InfluxDB)
-		defer r.Close()
-		reader = r
-	} else {
-		log.Warn("influxdb not configured, running without persistent storage")
+	backend, err := openStorage(ctx, log, cfg.Storage)
+	switch {
+	case err == nil:
+		defer backend.close()
+		sinks = append(sinks, backend.sink)
+		reader = backend.reader
+	case errors.Is(err, storage.ErrDisabled):
+		log.Warn("storage backend disabled, running without persistent storage",
+			"backend", cfg.Storage.Backend)
+	case errors.Is(err, storage.ErrBackendNotImplemented):
+		log.Error("configured storage backend is not implemented",
+			"backend", cfg.Storage.Backend)
+		os.Exit(1)
+	default:
+		log.Error("open storage", "backend", cfg.Storage.Backend, "err", err)
+		os.Exit(1)
 	}
 
+	var evaluator *alert.Evaluator
 	if len(cfg.Alerts) > 0 {
 		dispatcher := alert.NewDispatcher(log, store)
-		evaluator, err := alert.NewEvaluator(log, store, dispatcher)
+		evaluator, err = alert.NewEvaluator(log, store, dispatcher)
 		if err != nil {
 			log.Error("init alert evaluator", "err", err)
 			os.Exit(1)
@@ -80,7 +79,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 	var clusterHandler http.Handler
 	var slaveLister api.SlaveLister
 	if cfg.Cluster != nil && cfg.Cluster.Token != "" {
-		clusterRegistry = master.NewRegistry()
+		clusterRegistry := master.NewRegistry()
 		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token).Handler()
 		slaveLister = clusterRegistry
 		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
@@ -101,12 +100,36 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		}
 	}()
 
-	// The master probes only unassigned targets locally; anything with an
-	// explicit Slaves list is the assigned slaves' job. The stored cfg is
-	// still the UI/ingest source of truth — only the scheduler sees the
-	// filtered view.
-	sch := scheduler.New(log, registry, fanout, master.LocalTargets(cfg))
-	sch.Run(ctx)
+	// The Supervisor owns the scheduler goroutine across config reloads. Build
+	// rebuilds the probe registry and reapplies master.LocalTargets on every
+	// reload so slave reassignments and probe-timeout edits take effect live.
+	// OnReload re-parses alert conditions on the same thread.
+	sup := &scheduler.Supervisor{
+		Log:   log,
+		Store: store,
+		Build: func(c *config.Config) (*scheduler.Scheduler, error) {
+			registry, err := probe.Build(c.Probes)
+			if err != nil {
+				return nil, err
+			}
+			return scheduler.New(log, registry, fanout, master.LocalTargets(c)), nil
+		},
+		OnReload: func(c *config.Config) {
+			if evaluator != nil {
+				if err := evaluator.Refresh(); err != nil {
+					log.Error("alert refresh failed, keeping previous conditions", "err", err)
+				}
+			}
+			log.Info("config reload applied",
+				"targets", len(c.AllTargets()),
+				"interval", c.Interval,
+				"pings", c.Pings)
+		},
+	}
+	if err := sup.Run(ctx); err != nil {
+		log.Error("scheduler supervisor", "err", err)
+		os.Exit(1)
+	}
 
 	log.Info("gosmokeping shutting down")
 }

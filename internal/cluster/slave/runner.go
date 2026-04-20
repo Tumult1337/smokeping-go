@@ -77,7 +77,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("build scheduler: %w", err)
 	}
-	fingerprint := targetsFingerprint(buildShim(resp, r.local.Cluster))
+	fingerprint := scheduler.Fingerprint(buildShim(resp, r.local.Cluster))
 
 	schedCtx, schedCancel := context.WithCancel(runCtx)
 	schedDone := make(chan struct{})
@@ -125,7 +125,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			etag = newEtag
 			newShim := buildShim(newResp, r.local.Cluster)
-			newFingerprint := targetsFingerprint(newShim)
+			newFingerprint := scheduler.Fingerprint(newShim)
 			if newFingerprint == fingerprint {
 				continue
 			}

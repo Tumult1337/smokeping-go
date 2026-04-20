@@ -85,7 +85,7 @@ func TestEvaluatorLifecycle(t *testing.T) {
 	cfg := &config.Config{
 		Interval: time.Minute,
 		Pings:    10,
-		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw"},
+		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Alerts: map[string]config.Alert{
 			"high-latency": {Condition: "rtt_median > 50ms", Sustained: 2, Actions: []string{"log"}},
@@ -145,7 +145,7 @@ func TestEvaluatorPerSourceState(t *testing.T) {
 	cfg := &config.Config{
 		Interval: time.Minute,
 		Pings:    10,
-		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw"},
+		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Alerts: map[string]config.Alert{
 			"high-latency": {Condition: "rtt_median > 50ms", Sustained: 2, Actions: []string{"log"}},
@@ -231,7 +231,7 @@ func TestDispatcherDiscord(t *testing.T) {
 	cfg := &config.Config{
 		Interval: time.Minute,
 		Pings:    5,
-		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw"},
+		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Alerts:   map[string]config.Alert{"down": {Condition: "loss_pct > 0", Sustained: 1, Actions: []string{"discord"}}},
 		Actions:  map[string]config.Action{"discord": {Type: "discord", URL: srv.URL}},

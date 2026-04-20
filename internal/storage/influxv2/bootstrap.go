@@ -1,4 +1,4 @@
-package storage
+package influxv2
 
 import (
 	"context"
@@ -25,7 +25,10 @@ const (
 // If a bucket already exists its retention is not modified (operators may have
 // intentionally tuned it). If a task with the same name exists, its Flux is
 // left as-is for the same reason.
-func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxDB) error {
+// Bootstrap ensures buckets and rollup tasks exist for the v2 backend.
+// Safe to call repeatedly; existing buckets keep their retention and
+// existing tasks keep their Flux body.
+func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV2) error {
 	if cfg.Bucket1h == "" || cfg.Bucket1d == "" {
 		log.Info("rollup buckets not configured, skipping task bootstrap",
 			"bucket_1h", cfg.Bucket1h, "bucket_1d", cfg.Bucket1d)

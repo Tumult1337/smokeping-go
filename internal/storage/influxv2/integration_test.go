@@ -1,6 +1,6 @@
 //go:build integration
 
-package storage
+package influxv2
 
 import (
 	"context"
@@ -12,11 +12,14 @@ import (
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
 	"github.com/tumult/gosmokeping/internal/stats"
+	"github.com/tumult/gosmokeping/internal/storage"
 )
 
 // Integration tests require a live InfluxDB v2 at INFLUX_URL with INFLUX_TOKEN
-// and INFLUX_ORG set. Run with: go test -tags=integration ./internal/storage
-func testConfig(t *testing.T) config.InfluxDB {
+// and INFLUX_ORG set. Run with:
+//
+//	go test -tags=integration ./internal/storage/influxv2
+func testConfig(t *testing.T) config.InfluxV2 {
 	t.Helper()
 	url := os.Getenv("INFLUX_URL")
 	token := os.Getenv("INFLUX_TOKEN")
@@ -24,7 +27,7 @@ func testConfig(t *testing.T) config.InfluxDB {
 	if url == "" || token == "" || org == "" {
 		t.Skip("INFLUX_URL/INFLUX_TOKEN/INFLUX_ORG not set")
 	}
-	return config.InfluxDB{
+	return config.InfluxV2{
 		URL:       url,
 		Token:     token,
 		Org:       org,
@@ -72,7 +75,7 @@ func TestBootstrapAndWrite(t *testing.T) {
 
 	from := c.Time.Add(-time.Minute)
 	to := c.Time.Add(time.Minute)
-	cycles, err := r.QueryCycles(ctx, c.Target, from, to, ResolutionRaw, "")
+	cycles, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, "")
 	if err != nil {
 		t.Fatalf("query cycles: %v", err)
 	}
@@ -129,7 +132,7 @@ func TestSourceTagRoundtrip(t *testing.T) {
 	from := c.Time.Add(-time.Minute)
 	to := c.Time.Add(time.Minute)
 
-	matching, err := r.QueryCycles(ctx, c.Target, from, to, ResolutionRaw, "eu-west")
+	matching, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, "eu-west")
 	if err != nil {
 		t.Fatalf("query cycles (matching source): %v", err)
 	}
@@ -137,7 +140,7 @@ func TestSourceTagRoundtrip(t *testing.T) {
 		t.Fatal("no cycles with source=eu-west")
 	}
 
-	other, err := r.QueryCycles(ctx, c.Target, from, to, ResolutionRaw, "us-east")
+	other, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, "us-east")
 	if err != nil {
 		t.Fatalf("query cycles (other source): %v", err)
 	}
@@ -145,7 +148,7 @@ func TestSourceTagRoundtrip(t *testing.T) {
 		t.Errorf("got %d cycles with source=us-east, want 0", len(other))
 	}
 
-	unfiltered, err := r.QueryCycles(ctx, c.Target, from, to, ResolutionRaw, "")
+	unfiltered, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, "")
 	if err != nil {
 		t.Fatalf("query cycles (unfiltered): %v", err)
 	}

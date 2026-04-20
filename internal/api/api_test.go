@@ -61,7 +61,7 @@ func newTestServer(t *testing.T, reader StorageReader) http.Handler {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw", Token: "secret"},
+		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw", Token: "secret"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -117,7 +117,7 @@ func TestListTargetsTitles(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw"},
+		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -177,7 +177,7 @@ func TestListSourcesMasterWithRegisteredSlaves(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw"},
+		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -237,7 +237,7 @@ func TestListTargetsPerTargetSources(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		InfluxDB: config.InfluxDB{URL: "http://x", BucketRaw: "raw"},
+		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",

@@ -90,6 +90,51 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadLegacyInfluxdbKey(t *testing.T) {
+	// Pre-Storage configs used a top-level "influxdb" block; existing
+	// installs must keep loading without an edit.
+	cfg, err := Load(writeTmp(t, minimalConfig))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Storage.Backend != BackendInfluxV2 {
+		t.Errorf("backend = %q, want %q", cfg.Storage.Backend, BackendInfluxV2)
+	}
+	got := cfg.Storage.InfluxV2
+	want := InfluxV2{URL: "http://localhost:8086", Token: "t", Org: "o",
+		BucketRaw: "raw", Bucket1h: "h", Bucket1d: "d"}
+	if got != want {
+		t.Errorf("legacy influxdb fold mismatch:\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+func TestLoadStorageNewShape(t *testing.T) {
+	body := `{
+      "listen": ":8080",
+      "interval": "30s",
+      "pings": 10,
+      "storage": {
+        "backend": "influxv2",
+        "influxv2": { "url": "http://x", "token": "tok", "org": "o",
+                      "bucket_raw": "raw", "bucket_1h": "h", "bucket_1d": "d" }
+      },
+      "probes": { "icmp": { "type": "icmp", "timeout": "2s" } },
+      "targets": [{
+        "group": "g", "targets": [{ "name": "t", "host": "h", "probe": "icmp" }]
+      }]
+    }`
+	cfg, err := Load(writeTmp(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Storage.Backend != BackendInfluxV2 {
+		t.Errorf("backend = %q, want %q", cfg.Storage.Backend, BackendInfluxV2)
+	}
+	if cfg.Storage.InfluxV2.URL != "http://x" {
+		t.Errorf("url = %q", cfg.Storage.InfluxV2.URL)
+	}
+}
+
 func TestLoadEnvExpansion(t *testing.T) {
 	t.Setenv("INFLUX_TOKEN", "secret123")
 	body := strings.Replace(minimalConfig, `"token": "t"`, `"token": "${INFLUX_TOKEN}"`, 1)
@@ -97,8 +142,8 @@ func TestLoadEnvExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.InfluxDB.Token != "secret123" {
-		t.Errorf("token = %q, want secret123", cfg.InfluxDB.Token)
+	if cfg.Storage.InfluxV2.Token != "secret123" {
+		t.Errorf("token = %q, want secret123", cfg.Storage.InfluxV2.Token)
 	}
 }
 
@@ -108,8 +153,8 @@ func TestValidateErrors(t *testing.T) {
 		mutate  func(*Config)
 		wantSub string
 	}{
-		{"missing influx url", func(c *Config) { c.InfluxDB.URL = "" }, "influxdb.url"},
-		{"missing raw bucket", func(c *Config) { c.InfluxDB.BucketRaw = "" }, "bucket_raw"},
+		{"missing influx url", func(c *Config) { c.Storage.InfluxV2.URL = "" }, "influxv2.url"},
+		{"missing raw bucket", func(c *Config) { c.Storage.InfluxV2.BucketRaw = "" }, "bucket_raw"},
 		{"unknown probe ref", func(c *Config) {
 			g := c.Targets[0]
 			g.Targets[0].Probe = "nope"

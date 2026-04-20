@@ -1,4 +1,7 @@
-package storage
+// Package influxv2 is the InfluxDB v2 storage backend. It writes cycles via
+// the v2 write API and queries them back via Flux; rollup buckets (1h, 1d)
+// are populated by tasks this package installs in Bootstrap.
+package influxv2
 
 import (
 	"context"
@@ -17,30 +20,33 @@ import (
 )
 
 const (
-	MeasurementCycle = "probe_cycle"
-	MeasurementRTT   = "probe_rtt"
-	// MeasurementHop is one row per hop per MTR cycle. hop_ip is a field (not
+	measurementCycle = "probe_cycle"
+	measurementRTT   = "probe_rtt"
+	// measurementHop is one row per hop per MTR cycle. hop_ip is a field (not
 	// tag) because routers along a path flap and we don't want a new series
 	// every time the path changes.
-	MeasurementHop = "probe_mtr_hop"
-	// MeasurementHTTP is one row per HTTP request. status_code is a field (not
+	measurementHop = "probe_mtr_hop"
+	// measurementHTTP is one row per HTTP request. status_code is a field (not
 	// tag) to avoid series cardinality exploding on pages that cycle through
 	// error codes.
-	MeasurementHTTP = "probe_http"
+	measurementHTTP = "probe_http"
 )
 
 // Writer writes completed cycles to InfluxDB. Implements scheduler.Sink.
 // Two points per cycle: a cycle-level aggregate in the raw bucket, plus one
-// point per individual RTT (also in the raw bucket) so the UI can render the
-// full smoke band at close range. The 1h/1d buckets are populated by tasks.
+// point per individual RTT (also in the raw bucket) so the UI can render
+// the full smoke band at close range. The 1h/1d buckets are populated by
+// rollup tasks installed in Bootstrap.
 type Writer struct {
 	log    *slog.Logger
 	client influxdb2.Client
 	write  api.WriteAPI
-	cfg    config.InfluxDB
+	cfg    config.InfluxV2
 }
 
-func NewWriter(log *slog.Logger, cfg config.InfluxDB) *Writer {
+// NewWriter constructs a Writer backed by a new v2 client. The caller must
+// Close the returned Writer on shutdown to flush buffered writes.
+func NewWriter(log *slog.Logger, cfg config.InfluxV2) *Writer {
 	client := influxdb2.NewClient(cfg.URL, cfg.Token)
 	wa := client.WriteAPI(cfg.Org, cfg.BucketRaw)
 	// Log async write errors instead of silently dropping them.
@@ -62,6 +68,9 @@ func (w *Writer) Close() {
 	}
 }
 
+// OnCycle satisfies scheduler.Sink. Writes a cycle-level aggregate point
+// plus either per-ping RTT rows or per-request HTTP rows (mutually
+// exclusive — see comment below), plus one row per MTR hop when present.
 func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 	tags := map[string]string{
 		"target": c.Target.Target.Name,
@@ -107,7 +116,7 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 		"loss_count": c.LossCount,
 		"pings_sent": c.Sent,
 	}
-	w.write.WritePoint(write.NewPoint(MeasurementCycle, tags, cycleFields, c.Time))
+	w.write.WritePoint(write.NewPoint(measurementCycle, tags, cycleFields, c.Time))
 
 	// HTTP cycles get their own per-request measurement with status codes;
 	// emitting probe_rtt on top would double-write the same latencies and bloat
@@ -127,7 +136,7 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 			if s.Err != "" {
 				fields["error"] = s.Err
 			}
-			w.write.WritePoint(write.NewPoint(MeasurementHTTP, tags, fields, ts))
+			w.write.WritePoint(write.NewPoint(measurementHTTP, tags, fields, ts))
 		}
 	} else {
 		for i, rtt := range c.RTTs {
@@ -135,7 +144,7 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 			// (Influx would otherwise overwrite points with identical series+time).
 			ts := c.Time.Add(time.Duration(i) * time.Millisecond)
 			w.write.WritePoint(write.NewPoint(
-				MeasurementRTT,
+				measurementRTT,
 				tags,
 				map[string]any{"rtt_ms": ms(rtt), "seq": i},
 				ts,
@@ -158,7 +167,7 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 		if hop.Sent > 0 {
 			lossPct = 100 * float64(hop.Lost) / float64(hop.Sent)
 		}
-		w.write.WritePoint(write.NewPoint(MeasurementHop, hopTags, map[string]any{
+		w.write.WritePoint(write.NewPoint(measurementHop, hopTags, map[string]any{
 			"hop_ip":     hop.IP,
 			"rtt_min":    ms(summary.Min),
 			"rtt_max":    ms(summary.Max),
