@@ -13,6 +13,15 @@ import (
 // block. Anything not in this list comes after, sorted alphabetically.
 var preferredProbeOrder = []string{"icmp", "tcp", "http", "dns"}
 
+// probeShim mirrors config.rawProbe so emitted JSON round-trips through
+// config.Load — in particular, Timeout must be a duration string, not the
+// raw int nanoseconds time.Duration marshals to by default.
+type probeShim struct {
+	Type     string `json:"type"`
+	Timeout  string `json:"timeout"`
+	Insecure bool   `json:"insecure,omitempty"`
+}
+
 // Marshal returns a deterministic JSON encoding of cfg:
 //   - probes keys in preferredProbeOrder first, then remaining keys sorted
 //   - alerts / actions sorted alphabetically (Go's default map ordering)
@@ -89,7 +98,9 @@ func encodeProbes(probes map[string]config.Probe) (json.RawMessage, error) {
 		kb, _ := json.Marshal(k)
 		buf.Write(kb)
 		buf.WriteString(":")
-		vb, err := json.Marshal(probes[k])
+		p := probes[k]
+		ps := probeShim{Type: p.Type, Timeout: p.Timeout.String(), Insecure: p.Insecure}
+		vb, err := json.Marshal(ps)
 		if err != nil {
 			return nil, fmt.Errorf("marshal probe %q: %w", k, err)
 		}
