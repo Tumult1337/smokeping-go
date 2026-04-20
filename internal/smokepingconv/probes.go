@@ -104,6 +104,19 @@ func mapProbes(root *parser.SPRoot) (map[string]config.Probe, map[string]ProbeIn
 	for _, p := range root.Probes {
 		visit(p, "")
 	}
+
+	// Seed defaults for SmokePing built-in probe names that weren't declared
+	// in *** Probes ***. Real-world configs often omit the section and just
+	// reference `probe = FPing` (etc.) from the targets tree. We only add to
+	// `info` so lookups resolve; the probes map entry is synthesized on first
+	// reference in Convert.
+	for spName, gosmokeType := range probeTypeMap {
+		if _, declared := info[spName]; declared {
+			continue
+		}
+		info[spName] = ProbeInfo{Key: slug(spName), Type: gosmokeType}
+	}
+
 	return probes, info, notes
 }
 
