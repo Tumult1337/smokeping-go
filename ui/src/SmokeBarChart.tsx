@@ -173,30 +173,28 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     // updates flow through the setData effect below.
   }, [height, sourcesKey]);
 
+  // Pin the x scale before setData so uPlot doesn't briefly auto-range to the
+  // data's actual span (causing a "narrow" flash) before the scale effect
+  // snaps to the requested window.
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
+    const pin = fromSec != null && toSec != null;
+    const empty = built.stacks.length === 0;
 
-    if (built.stacks.length === 0) {
-      stacksRef.current = [];
-      yRangeRef.current = [0, 1];
-      u.setData(built.data);
-      return;
+    stacksRef.current = empty ? [] : built.stacks;
+    yRangeRef.current = empty ? [0, 1] : built.yRange;
+
+    u.batch(() => {
+      if (pin) u.setScale("x", { min: fromSec, max: toSec });
+      u.setData(built.data, !pin);
+    });
+    if (!empty) {
+      // setData already triggers a redraw, but hooks.draw closes over refs we
+      // just mutated — force another pass so the fresh stacks land.
+      u.redraw(false, true);
     }
-
-    stacksRef.current = built.stacks;
-    yRangeRef.current = built.yRange;
-    u.setData(built.data);
-    // setData already triggers a redraw, but hooks.draw closes over refs we
-    // just mutated — force another pass so the fresh stacks land.
-    u.redraw(false, true);
-  }, [built]);
-
-  useEffect(() => {
-    const u = plotRef.current;
-    if (!u || fromSec == null || toSec == null) return;
-    u.setScale("x", { min: fromSec, max: toSec });
-  }, [fromSec, toSec]);
+  }, [built, fromSec, toSec]);
 
   return (
     <div className="chart-host" style={{ minHeight: height }}>

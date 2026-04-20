@@ -88,17 +88,18 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
     // updates flow through the setData effect below so refreshes don't flash.
   }, [height, sourcesKey]);
 
+  // Pin the x scale before setData so uPlot doesn't auto-range to the data's
+  // actual span — with sparse coverage that flashes a narrow auto-fit window
+  // for one frame before the scale effect snaps to the requested range.
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
-    u.setData(built.data);
-  }, [built]);
-
-  useEffect(() => {
-    const u = plotRef.current;
-    if (!u || fromSec == null || toSec == null) return;
-    u.setScale("x", { min: fromSec, max: toSec });
-  }, [fromSec, toSec]);
+    const pin = fromSec != null && toSec != null;
+    u.batch(() => {
+      if (pin) u.setScale("x", { min: fromSec, max: toSec });
+      u.setData(built.data, !pin);
+    });
+  }, [built, fromSec, toSec]);
 
   return (
     <div className="chart-host" style={{ minHeight: height }}>

@@ -137,30 +137,33 @@ export function HttpChart({
     };
   }, [height]);
 
+  // Pin the x scale before setData so uPlot doesn't briefly auto-range to the
+  // data's actual span (the "6h flash" when switching to a wider window with
+  // sparse coverage) before the scale effect snaps to the requested range.
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
+    const pin = fromSec != null && toSec != null;
+    let data: AlignedData;
     if (points.length === 0) {
-      u.setData([[], [], []]);
-      return;
+      data = [[], [], []];
+    } else {
+      const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
+      // Failed requests (status == 0 AND rtt == 0) still render a visible
+      // marker so the outage is obvious — pin them to a small floor height
+      // so they don't collapse to zero.
+      let rttMax = 1;
+      for (const p of points) if (p.RTT > rttMax) rttMax = p.RTT;
+      const failHeight = Math.max(rttMax * 0.15, 1);
+      const rtts = points.map((p) => (p.Status === 0 ? failHeight : p.RTT));
+      const statuses = points.map((p) => p.Status);
+      data = [ts, rtts, statuses];
     }
-    const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-    // Failed requests (status == 0 AND rtt == 0) still render a visible marker
-    // so the outage is obvious — pin them to a small floor height so they
-    // don't collapse to zero.
-    let rttMax = 1;
-    for (const p of points) if (p.RTT > rttMax) rttMax = p.RTT;
-    const failHeight = Math.max(rttMax * 0.15, 1);
-    const rtts = points.map((p) => (p.Status === 0 ? failHeight : p.RTT));
-    const statuses = points.map((p) => p.Status);
-    u.setData([ts, rtts, statuses]);
-  }, [points]);
-
-  useEffect(() => {
-    const u = plotRef.current;
-    if (!u || fromSec == null || toSec == null) return;
-    u.setScale("x", { min: fromSec, max: toSec });
-  }, [fromSec, toSec]);
+    u.batch(() => {
+      if (pin) u.setScale("x", { min: fromSec, max: toSec });
+      u.setData(data, !pin);
+    });
+  }, [points, fromSec, toSec]);
 
   if (error) return <div className="error">{error}</div>;
 
