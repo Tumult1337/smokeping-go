@@ -114,6 +114,7 @@ export default function App() {
   // or range changes, or when the user clicks "← latest". Initial value
   // comes from ?t=<unix> so a shared link lands on the chosen cycle.
   const [pickedSec, setPickedSec] = useState<number | null>(initialUrl.pickedSec);
+  const [zoom, setZoom] = useState<{ from: number; to: number } | null>(initialUrl.zoom);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
@@ -157,9 +158,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const fromArg = zoom ? String(zoom.from) : range;
+  const toArg = zoom ? String(zoom.to) : undefined;
+
   useEffect(() => {
     if (!selectedId) return;
-    const key = `${selectedId}|${range}|${resolution}|${selectedSource ?? ""}`;
+    const zoomKey = zoom ? `${zoom.from}-${zoom.to}` : "";
+    const key = `${selectedId}|${range}|${resolution}|${selectedSource ?? ""}|${zoomKey}`;
     const prevKey = fetchKeyRef.current;
     const isKeyChange = prevKey !== key;
     fetchKeyRef.current = key;
@@ -174,7 +179,7 @@ export default function App() {
     }
     setRefreshing(true);
     let cancelled = false;
-    getCycles(selectedId, range, undefined, resolution, selectedSource ?? undefined)
+    getCycles(selectedId, fromArg, toArg, resolution, selectedSource ?? undefined)
       .then((c) => {
         if (!cancelled) setCycles(c);
       })
@@ -190,7 +195,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, range, resolution, refreshTick, selectedSource]);
+  }, [selectedId, range, resolution, refreshTick, selectedSource, zoom]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -211,12 +216,16 @@ export default function App() {
     if (chartStyle !== "band") p.set("mode", chartStyle);
     if (selectedSource) p.set("source", selectedSource);
     if (pickedSec != null) p.set("t", String(pickedSec));
+    if (zoom) {
+      p.set("z0", String(zoom.from));
+      p.set("z1", String(zoom.to));
+    }
     const qs = p.toString();
     const url = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`;
     if (url !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
       window.history.replaceState(null, "", url);
     }
-  }, [selectedId, range, chartStyle, selectedSource, pickedSec]);
+  }, [selectedId, range, chartStyle, selectedSource, pickedSec, zoom]);
 
   const refresh = useCallback(() => {
     setRefreshTick((n) => n + 1);
@@ -281,6 +290,8 @@ export default function App() {
 
   const pickTarget = (id: string) => {
     setSelectedId(id);
+    setZoom(null);
+    setPickedSec(null);
     setSidebarOpen(false);
   };
 
@@ -358,7 +369,10 @@ export default function App() {
                 <button
                   key={r.value}
                   className={range === r.value ? "active" : ""}
-                  onClick={() => setRange(r.value)}
+                  onClick={() => {
+                    setRange(r.value);
+                    setZoom(null);
+                  }}
                 >
                   {r.label}
                 </button>
