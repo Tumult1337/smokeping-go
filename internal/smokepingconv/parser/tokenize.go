@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -13,21 +14,31 @@ var (
 	reSection = regexp.MustCompile(`^\*\*\*\s+(.+?)\s+\*\*\*\s*$`)
 	reNode    = regexp.MustCompile(`^(\++)\s*(\S+.*?)\s*$`)
 	reAssign  = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$`)
+	reInclude = regexp.MustCompile(`^@include\s+(.+?)\s*$`)
 )
 
-// Tokenize reads a SmokePing config file into []Line. It does NOT expand
-// @include — that's the caller's job (see ExpandIncludes). This split keeps
-// single-file tokenization pure and testable.
+// Tokenize reads a SmokePing config file into []Line. @include directives are
+// expanded inline (relative to the including file's directory). Cycles are
+// detected and reported as errors.
 //
 // path should be the absolute path of the source file (used for Line.File);
-// baseDir is currently unused here but kept in the signature so the API
-// matches the include-aware variant that wraps this one.
+// baseDir is currently unused here but kept in the signature for API
+// consistency.
 func Tokenize(r io.Reader, baseDir, path string) ([]Line, error) {
+	return tokenizeRec(r, baseDir, path, map[string]bool{})
+}
+
+func tokenizeRec(r io.Reader, baseDir, path string, visited map[string]bool) ([]Line, error) {
 	_ = baseDir
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("tokenize: resolve path %q: %w", path, err)
 	}
+	if visited[abs] {
+		return nil, fmt.Errorf("tokenize: include cycle at %s", abs)
+	}
+	visited[abs] = true
+	defer delete(visited, abs)
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -99,6 +110,26 @@ func Tokenize(r io.Reader, baseDir, path string) ([]Line, error) {
 				continue
 			}
 			out = append(out, l)
+			continue
+		}
+		if m := reInclude.FindStringSubmatch(trimmed); m != nil {
+			flush()
+			ipath := m[1]
+			if !filepath.IsAbs(ipath) {
+				ipath = filepath.Join(filepath.Dir(abs), ipath)
+			}
+			f, ierr := os.Open(ipath)
+			if ierr != nil {
+				return nil, fmt.Errorf("%s:%d: @include %s: %w", abs, lineNo, ipath, ierr)
+			}
+			sub, serr := tokenizeRec(f, filepath.Dir(ipath), ipath, visited)
+			f.Close()
+			if serr != nil {
+				return nil, serr
+			}
+			// Sub-file has its own section state; inherit nothing — the parent
+			// section label resumes naturally on subsequent parent lines.
+			out = append(out, sub...)
 			continue
 		}
 		flush()
