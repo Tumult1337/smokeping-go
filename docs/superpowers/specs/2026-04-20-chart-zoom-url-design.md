@@ -82,14 +82,17 @@ automatically track zoom.
 
 ## Detecting drag-zoom inside the chart
 
-Each uPlot chart (`SmokeChart`, `SmokeBarChart`, `HttpChart`) grows two props:
+Each uPlot chart (`SmokeChart`, `SmokeBarChart`, `HttpChart`) grows one new
+prop:
 
 ```ts
 onZoomChange?: (window: {from: number; to: number} | null) => void;
-zoom?: {from: number; to: number} | null;  // unused today — reserved for
-                                            //  consumers that want to show
-                                            //  "zoomed" affordances
 ```
+
+The chart does NOT need a separate `zoom` prop — App already hands it the
+correct `fromSec`/`toSec` for the window it should render (zoom values when
+zoomed, server echo otherwise). Those are stable across refreshes in the
+zoomed case, so the existing pin logic naturally stops re-pinning.
 
 We distinguish user drag-zoom from our own programmatic `setScale` via a ref
 flag. uPlot's `setScale` hook fires synchronously inside `u.setScale(...)`, so
@@ -131,39 +134,41 @@ chart (same pattern as `onCyclePickRef`).
 
 ## Pinning behavior
 
-The chart's pin effect becomes:
+The chart's existing pin effect keeps the same shape — it already reacts to
+`fromSec`/`toSec` changes. The only change is wrapping the programmatic
+`setScale` call with the `internalScaleRef` flag so the new `setScale` hook
+doesn't misfire during pinning:
 
 ```ts
-const targetFrom = zoom ? zoom.from : fromSec;
-const targetTo   = zoom ? zoom.to   : toSec;
-
 const pinChanged =
-  pinRef.current.from !== targetFrom || pinRef.current.to !== targetTo;
-pinRef.current = { from: targetFrom, to: targetTo };
+  pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
+pinRef.current = { from: fromSec, to: toSec };
 
 u.batch(() => {
-  if (pinChanged && targetFrom != null && targetTo != null) {
+  if (pinChanged && fromSec != null && toSec != null) {
     internalScaleRef.current = true;
-    u.setScale("x", { min: targetFrom, max: targetTo });
+    u.setScale("x", { min: fromSec, max: toSec });
     internalScaleRef.current = false;
   }
   u.setData(built.data, false);
 });
 ```
 
-Auto-refresh behavior under each state:
+Auto-refresh behavior under each state (the subtle fix is that `fromSec` /
+`toSec` already come out stable when zoomed, because App drives the fetch
+with absolute bounds):
 
-- **Unzoomed**: `fromSec`/`toSec` slide forward as the server echo advances
-  each refresh tick. `pinChanged` is true → we re-pin to the sliding window.
-  Matches today's behavior.
-- **Zoomed**: the fetch uses absolute `z0,z1`. Server echoes the same
-  `from`/`to` on every refresh, and the pin target comes from `zoom` (not the
-  echo) so it's stable across refreshes. `pinChanged` false → no re-pin → no
-  viewport jump.
+- **Unzoomed**: App fetches with relative `from=-24h`. Server echoes a
+  sliding `[now - 24h, now]`. `fromSec`/`toSec` advance each tick,
+  `pinChanged` is true, we re-pin to the sliding window. Matches today's
+  behavior.
+- **Zoomed**: App fetches with absolute `from=z0&to=z1`. Server echoes
+  `[z0, z1]` identically on every refresh, so `fromSec`/`toSec` are stable.
+  `pinChanged` false → no re-pin → no viewport jump.
 - **Zoomed, user drags again**: `setScale` hook fires (internal flag is
-  false) → `onZoomChange({from,to})` → App updates `zoom` → `pinChanged`
-  true → we re-pin. The re-pin sets `internalScaleRef=true`, so no feedback
-  loop.
+  false) → `onZoomChange({from,to})` → App updates `zoom` → refetch returns
+  new bounds → `pinChanged` true → we re-pin. The re-pin sets
+  `internalScaleRef=true` while uPlot runs the hook, so no feedback loop.
 
 ## URL format
 
