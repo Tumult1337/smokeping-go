@@ -128,6 +128,10 @@ export function HttpChart({
         { label: "status", stroke: "transparent", points: { show: false } },
       ],
       legend: { live: true },
+      // Disable uPlot's default dblclick (auto-resets scales) so our own
+      // handler owns the gesture — clears the zoom via onZoomChange(null)
+      // without a spurious data-extent round-trip through setScale.
+      cursor: { bind: { dblclick: () => null } },
       hooks: {
         draw: [
           (u) => {
@@ -186,6 +190,11 @@ export function HttpChart({
 
     const empty: AlignedData = [[], [], []];
     plotRef.current = new uPlot(opts, empty, divRef.current);
+    const over = plotRef.current.over;
+    const onDblClick = () => {
+      onZoomChangeRef.current?.(null);
+    };
+    over.addEventListener("dblclick", onDblClick);
     const ro = new ResizeObserver(() => {
       if (plotRef.current && divRef.current) {
         plotRef.current.setSize({
@@ -197,6 +206,7 @@ export function HttpChart({
     ro.observe(divRef.current);
     return () => {
       ro.disconnect();
+      over.removeEventListener("dblclick", onDblClick);
       plotRef.current?.destroy();
       plotRef.current = null;
     };

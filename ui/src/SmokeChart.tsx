@@ -75,6 +75,11 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       // Built-in legend hidden — we render a per-source row below the chart
       // with NAME first and all percentile readouts inline.
       legend: { show: false },
+      // Disable uPlot's default dblclick (resets scales to data extent) so
+      // our own handler owns the gesture; otherwise the stock reset fires
+      // first and the setScale hook pushes a bogus zoom range before we
+      // clear it.
+      cursor: { bind: { dblclick: () => null } },
       hooks: {
         setCursor: [
           (u) => {
@@ -111,6 +116,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
     // on the same element) doesn't double as a cycle-pick. 3px threshold
     // matches uPlot's default drag sensitivity — anything larger is a gesture.
     let dragStart: { x: number; y: number } | null = null;
+    // Deferred cycle-pick so a dblclick can intercept and clear the zoom
+    // instead. 200ms is the usual click/dblclick disambiguation window.
+    let pendingClick: number | null = null;
     const onMouseDown = (e: MouseEvent) => {
       dragStart = { x: e.clientX, y: e.clientY };
     };
@@ -127,10 +135,23 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       const idx = u.cursor.idx;
       if (idx == null) return;
       const t = u.data[0][idx] as number | undefined;
-      if (t != null) cb(t);
+      if (t == null) return;
+      if (pendingClick != null) window.clearTimeout(pendingClick);
+      pendingClick = window.setTimeout(() => {
+        pendingClick = null;
+        cb(t);
+      }, 200);
+    };
+    const onDblClick = () => {
+      if (pendingClick != null) {
+        window.clearTimeout(pendingClick);
+        pendingClick = null;
+      }
+      onZoomChangeRef.current?.(null);
     };
     over.addEventListener("mousedown", onMouseDown);
     over.addEventListener("click", onClick);
+    over.addEventListener("dblclick", onDblClick);
     const ro = new ResizeObserver(() => {
       if (plotRef.current && divRef.current) {
         plotRef.current.setSize({
@@ -142,8 +163,10 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
     ro.observe(divRef.current);
     return () => {
       ro.disconnect();
+      if (pendingClick != null) window.clearTimeout(pendingClick);
       over.removeEventListener("mousedown", onMouseDown);
       over.removeEventListener("click", onClick);
+      over.removeEventListener("dblclick", onDblClick);
       plotRef.current?.destroy();
       plotRef.current = null;
     };

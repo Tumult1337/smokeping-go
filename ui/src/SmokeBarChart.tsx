@@ -120,6 +120,10 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
         points: { show: false },
         // Keep the vertical x-hair; y-hair off to stay out of the smoke.
         y: false,
+        // Disable uPlot's default dblclick (resets scales to data extent) so
+        // our own dblclick listener owns the gesture without the stock reset
+        // firing first and pushing a bogus range through the setScale hook.
+        bind: { dblclick: () => null },
       },
       hooks: {
         draw: [
@@ -175,6 +179,8 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     // Drag-zoom release fires click on the same element; track mousedown coords
     // so we can suppress the cycle-pick when the user was actually drag-zooming.
     let dragStart: { x: number; y: number } | null = null;
+    // Defer single-click cycle-pick so dblclick (zoom reset) can cancel it.
+    let pendingClick: number | null = null;
     const onMouseDown = (e: MouseEvent) => {
       dragStart = { x: e.clientX, y: e.clientY };
     };
@@ -201,10 +207,24 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
           }
         }
       }
-      if (best != null) cb(best);
+      if (best == null) return;
+      const picked = best;
+      if (pendingClick != null) window.clearTimeout(pendingClick);
+      pendingClick = window.setTimeout(() => {
+        pendingClick = null;
+        cb(picked);
+      }, 200);
+    };
+    const onDblClick = () => {
+      if (pendingClick != null) {
+        window.clearTimeout(pendingClick);
+        pendingClick = null;
+      }
+      onZoomChangeRef.current?.(null);
     };
     over.addEventListener("mousedown", onMouseDown);
     over.addEventListener("click", onClick);
+    over.addEventListener("dblclick", onDblClick);
     const ro = new ResizeObserver(() => {
       if (plotRef.current && divRef.current) {
         plotRef.current.setSize({
@@ -216,8 +236,10 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     ro.observe(divRef.current);
     return () => {
       ro.disconnect();
+      if (pendingClick != null) window.clearTimeout(pendingClick);
       over.removeEventListener("mousedown", onMouseDown);
       over.removeEventListener("click", onClick);
+      over.removeEventListener("dblclick", onDblClick);
       plotRef.current?.destroy();
       plotRef.current = null;
     };
