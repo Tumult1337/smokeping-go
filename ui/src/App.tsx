@@ -474,6 +474,9 @@ export default function App() {
                   fromSec={fromSec}
                   toSec={toSec}
                   source={sourceParam}
+                  onZoomChange={setZoom}
+                  fromArg={fromArg}
+                  toArg={toArg}
                 />
               </div>
             ) : (

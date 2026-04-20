@@ -11,6 +11,10 @@ interface Props {
   fromSec?: number;
   toSec?: number;
   source?: string;
+  onZoomChange?: (window: { from: number; to: number } | null) => void;
+  // Absolute window override. When set, supersedes `range` for the fetch.
+  fromArg?: string;
+  toArg?: string;
 }
 
 // Color by status class. Network error (status==0) gets its own color so you
@@ -40,6 +44,9 @@ export function HttpChart({
   fromSec,
   toSec,
   source,
+  onZoomChange,
+  fromArg,
+  toArg,
 }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -61,11 +68,14 @@ export function HttpChart({
   paletteRef.current = palette;
   const pointsRef = useRef(points);
   pointsRef.current = points;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
+  const internalScaleRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    getHttpSamples(targetId, range, undefined, source)
+    getHttpSamples(targetId, fromArg ?? range, toArg, source)
       .then((r) => {
         if (!cancelled) setPoints(r.points ?? []);
       })
@@ -78,7 +88,7 @@ export function HttpChart({
     return () => {
       cancelled = true;
     };
-  }, [targetId, range, refreshTick, source]);
+  }, [targetId, range, refreshTick, source, fromArg, toArg]);
 
   // Create uPlot once. setData drives refreshes so the DOM node stays in
   // place — destroy/recreate on every tick collapses the wrapper and the
@@ -150,6 +160,23 @@ export function HttpChart({
             ctx.restore();
           },
         ],
+        setScale: [
+          (u, key) => {
+            if (key !== "x") return;
+            if (internalScaleRef.current) return;
+            const min = u.scales.x.min;
+            const max = u.scales.x.max;
+            if (min == null || max == null) return;
+            const xs = u.data[0] as number[] | undefined;
+            if (!xs || xs.length === 0) return;
+            const from = Math.floor(min);
+            const to = Math.ceil(max);
+            const dataFrom = xs[0];
+            const dataTo = xs[xs.length - 1];
+            if (from <= dataFrom && to >= dataTo) onZoomChangeRef.current?.(null);
+            else onZoomChangeRef.current?.({ from, to });
+          },
+        ],
       },
     };
 
@@ -198,7 +225,11 @@ export function HttpChart({
       data = [ts, rtts, statuses];
     }
     u.batch(() => {
-      if (pin) u.setScale("x", { min: fromSec, max: toSec });
+      if (pin) {
+        internalScaleRef.current = true;
+        u.setScale("x", { min: fromSec, max: toSec });
+        internalScaleRef.current = false;
+      }
       u.setData(data, false);
     });
   }, [points, fromSec, toSec]);
