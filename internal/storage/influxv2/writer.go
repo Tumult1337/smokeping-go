@@ -94,27 +94,12 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 		"rtt_mean":   ms(c.Summary.Mean),
 		"rtt_median": ms(c.Summary.Median),
 		"rtt_stddev": ms(c.Summary.StdDev),
-		"rtt_p5":     ms(c.Summary.P5),
-		"rtt_p10":    ms(c.Summary.P10),
-		"rtt_p15":    ms(c.Summary.P15),
-		"rtt_p20":    ms(c.Summary.P20),
-		"rtt_p25":    ms(c.Summary.P25),
-		"rtt_p30":    ms(c.Summary.P30),
-		"rtt_p35":    ms(c.Summary.P35),
-		"rtt_p40":    ms(c.Summary.P40),
-		"rtt_p45":    ms(c.Summary.P45),
-		"rtt_p55":    ms(c.Summary.P55),
-		"rtt_p60":    ms(c.Summary.P60),
-		"rtt_p65":    ms(c.Summary.P65),
-		"rtt_p70":    ms(c.Summary.P70),
-		"rtt_p75":    ms(c.Summary.P75),
-		"rtt_p80":    ms(c.Summary.P80),
-		"rtt_p85":    ms(c.Summary.P85),
-		"rtt_p90":    ms(c.Summary.P90),
-		"rtt_p95":    ms(c.Summary.P95),
 		"loss_pct":   lossPct,
 		"loss_count": c.LossCount,
 		"pings_sent": c.Sent,
+	}
+	for _, spec := range stats.PercentileSet {
+		cycleFields["rtt_"+spec.Name] = ms(spec.Get(c.Summary))
 	}
 	w.write.WritePoint(write.NewPoint(measurementCycle, tags, cycleFields, c.Time))
 

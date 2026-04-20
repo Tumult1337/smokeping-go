@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData } from "uplot";
 import { getHttpSamples, type HttpPoint } from "./api";
+import { paletteForSorted } from "./palette";
 
 interface Props {
   targetId: string;
@@ -44,6 +45,22 @@ export function HttpChart({
   const plotRef = useRef<uPlot | null>(null);
   const [points, setPoints] = useState<HttpPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  // Sorted source names → palette map, matching SmokeChart's convention so a
+  // given node wears the same colour everywhere on the page. Derived from the
+  // data (not the target.sources list) so a source with no samples in range
+  // doesn't claim a slot.
+  const palette = useMemo(() => {
+    const uniq = new Set<string>();
+    for (const p of points) uniq.add(p.Source ?? "");
+    return paletteForSorted([...uniq].sort());
+  }, [points]);
+  // The draw hook runs off refs because the uPlot instance is built once per
+  // mount and its closures can't see later renders' palette/points.
+  const paletteRef = useRef(palette);
+  paletteRef.current = palette;
+  const pointsRef = useRef(points);
+  pointsRef.current = points;
 
   useEffect(() => {
     let cancelled = false;
@@ -103,15 +120,32 @@ export function HttpChart({
             const xs = u.data[0] as number[];
             const ys = u.data[1] as number[];
             const sts = u.data[2] as number[];
+            const pts = pointsRef.current;
+            const pal = paletteRef.current;
             if (xs.length === 0) return;
             const barW = 3;
+            // Height of the top status-class cap. Small enough that the
+            // source colour dominates the body; big enough that a 5xx stands
+            // out at a glance.
+            const capH = 3;
             ctx.save();
+            // Clip to plot bbox so bars at the edge don't paint over the
+            // y-axis labels when the user drag-zooms into a narrow window.
+            ctx.beginPath();
+            ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
+            ctx.clip();
             for (let i = 0; i < xs.length; i++) {
               const x = u.valToPos(xs[i], "x", true);
               const y = u.valToPos(ys[i], "y", true);
               const y0 = u.valToPos(0, "y", true);
-              ctx.fillStyle = colorFor(sts[i]);
+              const src = pts[i]?.Source ?? "";
+              const body = pal.get(src)?.stroke ?? colorFor(sts[i]);
+              ctx.fillStyle = body;
               ctx.fillRect(x - barW / 2, y, barW, y0 - y);
+              // Thin cap encodes the status class so outages stay visually
+              // loud without losing source identity on the body.
+              ctx.fillStyle = colorFor(sts[i]);
+              ctx.fillRect(x - barW / 2, y, barW, Math.min(capH, y0 - y));
             }
             ctx.restore();
           },
@@ -137,13 +171,17 @@ export function HttpChart({
     };
   }, [height]);
 
-  // Pin the x scale before setData so uPlot doesn't briefly auto-range to the
-  // data's actual span (the "6h flash" when switching to a wider window with
-  // sparse coverage) before the scale effect snaps to the requested range.
+  // Pin the x scale only when the requested window changes. On a plain data
+  // refresh (same fromSec/toSec) we skip the pin and pass resetScales=false
+  // so any drag-zoom survives the tick.
+  const pinRef = useRef<{ from?: number; to?: number }>({});
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
-    const pin = fromSec != null && toSec != null;
+    const pinChanged =
+      pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
+    pinRef.current = { from: fromSec, to: toSec };
+    const pin = pinChanged && fromSec != null && toSec != null;
     let data: AlignedData;
     if (points.length === 0) {
       data = [[], [], []];
@@ -161,7 +199,7 @@ export function HttpChart({
     }
     u.batch(() => {
       if (pin) u.setScale("x", { min: fromSec, max: toSec });
-      u.setData(data, !pin);
+      u.setData(data, false);
     });
   }, [points, fromSec, toSec]);
 
@@ -187,6 +225,17 @@ export function HttpChart({
               error: <strong style={{ color: "#ef4444" }}>{last.Err.slice(0, 64)}</strong>
             </span>
           )}
+        </div>
+      )}
+      {palette.size > 1 && (
+        <div className="stats" style={{ marginTop: 8, fontSize: 12, color: "#8a93a6" }}>
+          <span className="source-label" style={{ marginRight: 4 }}>sources:</span>
+          {[...palette.entries()].map(([name, p]) => (
+            <span key={name || "—"} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <span style={{ display: "inline-block", width: 10, height: 10, background: p.stroke, borderRadius: 2 }} />
+              {name || "—"}
+            </span>
+          ))}
         </div>
       )}
       <HttpLegend />

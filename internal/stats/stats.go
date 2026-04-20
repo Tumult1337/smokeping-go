@@ -59,31 +59,17 @@ func Compute(rtts []time.Duration) Summary {
 	}
 	stddevNs := math.Sqrt(sqSum / float64(n))
 
-	return Summary{
+	out := Summary{
 		Min:    sorted[0],
 		Max:    sorted[n-1],
 		Mean:   time.Duration(meanNs),
 		Median: percentile(sorted, 0.50),
 		StdDev: time.Duration(stddevNs),
-		P5:     percentile(sorted, 0.05),
-		P10:    percentile(sorted, 0.10),
-		P15:    percentile(sorted, 0.15),
-		P20:    percentile(sorted, 0.20),
-		P25:    percentile(sorted, 0.25),
-		P30:    percentile(sorted, 0.30),
-		P35:    percentile(sorted, 0.35),
-		P40:    percentile(sorted, 0.40),
-		P45:    percentile(sorted, 0.45),
-		P55:    percentile(sorted, 0.55),
-		P60:    percentile(sorted, 0.60),
-		P65:    percentile(sorted, 0.65),
-		P70:    percentile(sorted, 0.70),
-		P75:    percentile(sorted, 0.75),
-		P80:    percentile(sorted, 0.80),
-		P85:    percentile(sorted, 0.85),
-		P90:    percentile(sorted, 0.90),
-		P95:    percentile(sorted, 0.95),
 	}
+	for _, spec := range PercentileSet {
+		spec.Set(&out, percentile(sorted, spec.Ratio))
+	}
+	return out
 }
 
 // percentile uses linear interpolation between closest ranks.

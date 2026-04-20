@@ -12,15 +12,14 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY --from=ui /src/internal/ui/dist ./internal/ui/dist
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/gosmokeping ./cmd/gosmokeping
+COPY --from=ui /src/ui/dist ./internal/ui/dist
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/gosmokeping ./cmd/gosmokeping
 
 FROM alpine:3.20
 RUN apk add --no-cache libcap ca-certificates tzdata \
     && addgroup -S gosmokeping \
     && adduser -S -G gosmokeping gosmokeping
 COPY --from=build /out/gosmokeping /usr/local/bin/gosmokeping
-# Grant CAP_NET_RAW to the binary so ICMP probes work without root.
 RUN setcap cap_net_raw+ep /usr/local/bin/gosmokeping
 USER gosmokeping
 EXPOSE 8080

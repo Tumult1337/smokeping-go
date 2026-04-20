@@ -299,6 +299,51 @@ body {
   margin-left: 4px;
 }
 
+/* Per-source latency legend below SmokeChart / SmokeBarChart. One row per
+   source: source name first (coloured to match its line), all percentile
+   readouts inline on the same line. Replaces uPlot's default one-row-per-series
+   legend which repeated the source name on every percentile. */
+.smoke-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #8a93a6;
+  font-variant-numeric: tabular-nums;
+}
+.smoke-legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 14px;
+  row-gap: 2px;
+  align-items: baseline;
+}
+.smoke-legend-name {
+  font-weight: 600;
+  min-width: 80px;
+}
+.smoke-legend-val {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.smoke-legend-val:hover { color: #cfd3dd; }
+.smoke-legend-val.off {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+.smoke-legend-val strong {
+  color: #e6e6e6;
+  margin-left: 2px;
+  font-weight: 500;
+}
+.smoke-legend-val.off strong { color: #8a93a6; }
+
 /* Match uPlot dark theme to the page. */
 .u-legend { color: #cfd3dd !important; }
 .u-axis { color: #8a93a6; }

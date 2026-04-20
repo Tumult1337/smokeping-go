@@ -1,0 +1,10 @@
+add a new binary for smokeping config -> gosmokeping config 
+
+if there is a hostname for icmp resolve it, add an optinal parameter to use v4 or v6
+change set poll interval/disable poll except on startup for slaves
+
+# doing rn
+if zoomed in the graph goes outside of the  chart area on the left on some graphs
+shareable links -> update url mit target + timestamp selected and mode etc, stop reseting zoom on data refresh/disable refresh if zoomed in
+website ping change the colors to the ones of the node
+

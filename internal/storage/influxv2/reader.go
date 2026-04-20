@@ -77,17 +77,14 @@ func (r *Reader) bucketFor(res storage.Resolution) (string, error) {
 // QueryCycles returns probe_cycle rows for one target across [from, to].
 // If the picked rollup tier is empty (e.g. the 1h task hasn't run yet), it
 // falls back to successively finer tiers so fresh installs still show data.
-//
-// source is optional: when empty, no source filter is applied — pre-cluster
-// data (no `source` tag) still renders. When set, rows are filtered to that
-// exact source value.
-func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution, source string) ([]storage.CyclePoint, error) {
+// See QueryFilter for Source semantics.
+func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution, f storage.QueryFilter) ([]storage.CyclePoint, error) {
 	for _, try := range fallbackChain(res) {
 		bucket, err := r.bucketFor(try)
 		if err != nil {
 			return nil, err
 		}
-		points, err := r.queryCyclesFrom(ctx, bucket, ref, from, to, source)
+		points, err := r.queryCyclesFrom(ctx, bucket, ref, from, to, f.Source)
 		if err != nil {
 			return nil, err
 		}
@@ -132,7 +129,7 @@ from(bucket: "%s")
 	for res2.Next() {
 		rec := res2.Record()
 		vals := rec.Values()
-		out = append(out, storage.CyclePoint{
+		cp := storage.CyclePoint{
 			Time:      rec.Time(),
 			Source:    stringOf(vals["source"]),
 			Min:       floatOf(vals["rtt_min"]),
@@ -140,28 +137,14 @@ from(bucket: "%s")
 			Mean:      floatOf(vals["rtt_mean"]),
 			Median:    floatOf(vals["rtt_median"]),
 			StdDev:    floatOf(vals["rtt_stddev"]),
-			P5:        floatOf(vals["rtt_p5"]),
-			P10:       floatOf(vals["rtt_p10"]),
-			P15:       floatOf(vals["rtt_p15"]),
-			P20:       floatOf(vals["rtt_p20"]),
-			P25:       floatOf(vals["rtt_p25"]),
-			P30:       floatOf(vals["rtt_p30"]),
-			P35:       floatOf(vals["rtt_p35"]),
-			P40:       floatOf(vals["rtt_p40"]),
-			P45:       floatOf(vals["rtt_p45"]),
-			P55:       floatOf(vals["rtt_p55"]),
-			P60:       floatOf(vals["rtt_p60"]),
-			P65:       floatOf(vals["rtt_p65"]),
-			P70:       floatOf(vals["rtt_p70"]),
-			P75:       floatOf(vals["rtt_p75"]),
-			P80:       floatOf(vals["rtt_p80"]),
-			P85:       floatOf(vals["rtt_p85"]),
-			P90:       floatOf(vals["rtt_p90"]),
-			P95:       floatOf(vals["rtt_p95"]),
 			LossPct:   floatOf(vals["loss_pct"]),
 			LossCount: intOf(vals["loss_count"]),
 			Sent:      intOf(vals["pings_sent"]),
-		})
+		}
+		for _, acc := range storage.CyclePointPercentileAccessors {
+			acc.Set(&cp, floatOf(vals["rtt_"+acc.Name]))
+		}
+		out = append(out, cp)
 	}
 	if err := res2.Err(); err != nil {
 		return nil, fmt.Errorf("read cycles: %w", err)
@@ -170,8 +153,9 @@ from(bucket: "%s")
 }
 
 // QueryRTTs returns individual ping samples. Always reads the raw bucket —
-// rollups don't retain per-ping data. See QueryCycles for `source` semantics.
-func (r *Reader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.RTTPoint, error) {
+// rollups don't retain per-ping data.
+func (r *Reader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.RTTPoint, error) {
+	source := f.Source
 	flux := fmt.Sprintf(`
 from(bucket: "%s")
   |> range(start: %s, stop: %s)
@@ -207,8 +191,9 @@ from(bucket: "%s")
 // QueryHTTPSamples returns per-request HTTP samples for the target across the
 // given window. Always reads the raw bucket — HTTP samples aren't rolled up
 // because 1-2/cycle is already cheap and the status code wouldn't aggregate
-// usefully anyway. See QueryCycles for `source` semantics.
-func (r *Reader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HTTPPoint, error) {
+// usefully anyway.
+func (r *Reader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HTTPPoint, error) {
+	source := f.Source
 	flux := fmt.Sprintf(`
 from(bucket: "%s")
   |> range(start: %s, stop: %s)
@@ -231,6 +216,7 @@ from(bucket: "%s")
 		vals := rec.Values()
 		out = append(out, storage.HTTPPoint{
 			Time:   rec.Time(),
+			Source: stringOf(vals["source"]),
 			RTT:    floatOf(vals["rtt_ms"]),
 			Status: intOf(vals["status_code"]),
 			Seq:    intOf(vals["seq"]),
@@ -247,11 +233,10 @@ from(bucket: "%s")
 // closest to `at`, within ±window. Picks by minimum absolute time distance
 // across all hop rows in the window, then returns every hop sharing that
 // cycle's timestamp. Empty result means no cycles hit the window.
-// See QueryCycles for `source` semantics.
-func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, source string) ([]storage.HopPoint, error) {
+func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	from := at.Add(-window)
 	to := at.Add(window)
-	all, err := r.queryHopsRange(ctx, ref, from, to, source)
+	all, err := r.queryHopsRange(ctx, ref, from, to, f.Source)
 	if err != nil {
 		return nil, err
 	}
@@ -280,9 +265,9 @@ func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.
 
 // QueryHopsTimeline returns every hop row across [from, to], sorted by time
 // then hop_index. Used by the UI heatmap to render per-hop loss over the
-// requested window. See QueryCycles for `source` semantics.
-func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {
-	return r.queryHopsRange(ctx, ref, from, to, source)
+// requested window.
+func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
+	return r.queryHopsRange(ctx, ref, from, to, f.Source)
 }
 
 func (r *Reader) queryHopsRange(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {
@@ -348,8 +333,8 @@ func absDur(d time.Duration) time.Duration {
 // matching it. Grouping by hop_index and taking the latest per index — the
 // earlier approach — leaves stale rows for higher indexes when the path
 // shrinks, rendering phantom hops past the current target.
-func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, source string) ([]storage.HopPoint, error) {
-	all, err := r.queryHopsRange(ctx, ref, time.Now().Add(-24*time.Hour), time.Now(), source)
+func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
+	all, err := r.queryHopsRange(ctx, ref, time.Now().Add(-24*time.Hour), time.Now(), f.Source)
 	if err != nil {
 		return nil, err
 	}

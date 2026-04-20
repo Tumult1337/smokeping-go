@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
@@ -12,6 +13,7 @@ import (
 	"github.com/influxdata/influxdb-client-go/v2/domain"
 
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/stats"
 )
 
 // Retention periods for the three tiers (seconds).
@@ -150,9 +152,35 @@ func ensureTask(ctx context.Context, log *slog.Logger, client influxdb2.Client, 
 }
 
 // fluxRollup returns a Flux task that rolls probe_cycle from src to dst,
-// preserving the smoke band: min of mins, max of maxes, mean of medians, p5 of
-// p5s, p95 of p95s, sum of losses and sent.
+// preserving the smoke band: min of mins, max of maxes, mean of medians, mean
+// of each percentile, sum of losses and sent. Percentile entries are driven
+// by stats.PercentileSet so adding or removing a percentile is a single-file
+// edit and can't drift out of sync with the writer/reader.
 func fluxRollup(srcBucket, dstBucket string, window time.Duration) string {
+	base := []struct{ field, fn string }{
+		{"rtt_min", "min"},
+		{"rtt_max", "max"},
+		{"rtt_mean", "mean"},
+		{"rtt_median", "mean"},
+		{"rtt_stddev", "mean"},
+	}
+	tail := []struct{ field, fn string }{
+		{"loss_pct", "mean"},
+		{"loss_count", "sum"},
+		{"pings_sent", "sum"},
+	}
+
+	var lines strings.Builder
+	for _, e := range base {
+		fmt.Fprintf(&lines, "  agg(field: %q, fn: %s),\n", e.field, e.fn)
+	}
+	for _, spec := range stats.PercentileSet {
+		fmt.Fprintf(&lines, "  agg(field: %q, fn: mean),\n", "rtt_"+spec.Name)
+	}
+	for _, e := range tail {
+		fmt.Fprintf(&lines, "  agg(field: %q, fn: %s),\n", e.field, e.fn)
+	}
+
 	return fmt.Sprintf(`
 src = from(bucket: "%s")
   |> range(start: -task.every)
@@ -165,35 +193,9 @@ agg = (field, fn) =>
     |> set(key: "_measurement", value: "probe_cycle")
 
 union(tables: [
-  agg(field: "rtt_min",    fn: min),
-  agg(field: "rtt_max",    fn: max),
-  agg(field: "rtt_mean",   fn: mean),
-  agg(field: "rtt_median", fn: mean),
-  agg(field: "rtt_stddev", fn: mean),
-  agg(field: "rtt_p5",     fn: mean),
-  agg(field: "rtt_p10",    fn: mean),
-  agg(field: "rtt_p15",    fn: mean),
-  agg(field: "rtt_p20",    fn: mean),
-  agg(field: "rtt_p25",    fn: mean),
-  agg(field: "rtt_p30",    fn: mean),
-  agg(field: "rtt_p35",    fn: mean),
-  agg(field: "rtt_p40",    fn: mean),
-  agg(field: "rtt_p45",    fn: mean),
-  agg(field: "rtt_p55",    fn: mean),
-  agg(field: "rtt_p60",    fn: mean),
-  agg(field: "rtt_p65",    fn: mean),
-  agg(field: "rtt_p70",    fn: mean),
-  agg(field: "rtt_p75",    fn: mean),
-  agg(field: "rtt_p80",    fn: mean),
-  agg(field: "rtt_p85",    fn: mean),
-  agg(field: "rtt_p90",    fn: mean),
-  agg(field: "rtt_p95",    fn: mean),
-  agg(field: "loss_pct",   fn: mean),
-  agg(field: "loss_count", fn: sum),
-  agg(field: "pings_sent", fn: sum),
-])
+%s])
   |> to(bucket: "%s")
-`, fluxEscape(srcBucket), formatEvery(window), fluxEscape(dstBucket))
+`, fluxEscape(srcBucket), formatEvery(window), lines.String(), fluxEscape(dstBucket))
 }
 
 func formatEvery(d time.Duration) string {

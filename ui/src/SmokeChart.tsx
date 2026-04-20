@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series, type Band } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE } from "./palette";
@@ -31,6 +31,17 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
   // in-place setData handles value updates.
   const sourcesKey = built.sources.join("|");
 
+  // Cursor idx drives the custom legend below the chart. null = cursor off the
+  // plot; the legend falls back to the last data index (uPlot-default "live"
+  // behaviour) so a static chart still reads meaningful numbers.
+  const [cursorIdx, setCursorIdx] = useState<number | null>(null);
+  // Flat series indices the user toggled off in the legend. Reset whenever
+  // the source set changes so the mapping stays sane after rebuild.
+  const [hidden, setHidden] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    setHidden(new Set());
+  }, [sourcesKey]);
+
   useEffect(() => {
     if (!divRef.current) return;
 
@@ -52,7 +63,17 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
       ],
       series: built.series,
       bands: built.bands,
-      legend: { live: true },
+      // Built-in legend hidden — we render a per-source row below the chart
+      // with NAME first and all percentile readouts inline.
+      legend: { show: false },
+      hooks: {
+        setCursor: [
+          (u) => {
+            const next = u.cursor.idx ?? null;
+            setCursorIdx((prev) => (prev === next ? prev : next));
+          },
+        ],
+      },
     };
 
     const empty: AlignedData = [[], ...built.series.slice(1).map(() => [] as number[])] as AlignedData;
@@ -88,23 +109,89 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick }
     // updates flow through the setData effect below so refreshes don't flash.
   }, [height, sourcesKey]);
 
-  // Pin the x scale before setData so uPlot doesn't auto-range to the data's
-  // actual span — with sparse coverage that flashes a narrow auto-fit window
-  // for one frame before the scale effect snaps to the requested range.
+  // Pin the x scale when the requested window changes (range button, new
+  // target). On a plain data refresh within the same window we skip the pin
+  // and pass resetScales=false to setData so any drag-zoom the user applied
+  // survives the refresh — they shouldn't have to re-zoom every 30s.
+  const pinRef = useRef<{ from?: number; to?: number }>({});
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
-    const pin = fromSec != null && toSec != null;
+    const pinChanged =
+      pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
+    pinRef.current = { from: fromSec, to: toSec };
+    const pin = pinChanged && fromSec != null && toSec != null;
     u.batch(() => {
       if (pin) u.setScale("x", { min: fromSec, max: toSec });
-      u.setData(built.data, !pin);
+      u.setData(built.data, false);
     });
   }, [built, fromSec, toSec]);
+
+  // Apply the hidden-series set to uPlot. Runs on every mount (in case the
+  // chart was just rebuilt — e.g. the 5173-dev HMR reload) and on every
+  // toggle. Any series not in `hidden` is re-shown, so un-clicking restores.
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u) return;
+    u.batch(() => {
+      for (let i = 1; i < u.series.length; i++) {
+        u.setSeries(i, { show: !hidden.has(i) });
+      }
+    });
+  }, [hidden, sourcesKey]);
+
+  // Resolve the index the legend should show. Cursor-hover wins; otherwise
+  // fall back to the last column so idle state reads the latest values.
+  const xCol = built.data[0] as number[] | undefined;
+  const lastIdx = xCol && xCol.length > 0 ? xCol.length - 1 : null;
+  const legendIdx = cursorIdx != null ? cursorIdx : lastIdx;
 
   return (
     <div className="chart-host" style={{ minHeight: height }}>
       <div ref={divRef} style={{ width: "100%" }} />
       {points.length === 0 && <div className="chart-empty">No data in range</div>}
+      {points.length > 0 && (
+        <div className="smoke-legend">
+          {built.sources.map((src, srcIdx) => {
+            const palette = PALETTE[srcIdx % PALETTE.length];
+            const base = 1 + srcIdx * PCT_LABELS.length;
+            return (
+              <div className="smoke-legend-row" key={src || `src-${srcIdx}`}>
+                <span
+                  className="smoke-legend-name"
+                  style={{ color: palette.stroke }}
+                >
+                  {src || "—"}
+                </span>
+                {PCT_LABELS.map((label, j) => {
+                  const col = built.data[base + j] as (number | null)[] | undefined;
+                  const v = legendIdx != null && col ? col[legendIdx] : null;
+                  const seriesIdx = base + j;
+                  const off = hidden.has(seriesIdx);
+                  return (
+                    <button
+                      type="button"
+                      className={`smoke-legend-val${off ? " off" : ""}`}
+                      key={label}
+                      onClick={() =>
+                        setHidden((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(seriesIdx)) next.delete(seriesIdx);
+                          else next.add(seriesIdx);
+                          return next;
+                        })
+                      }
+                    >
+                      {label}:{" "}
+                      <strong>{v == null ? "—" : v.toFixed(1)}</strong>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

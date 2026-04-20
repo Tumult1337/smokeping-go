@@ -67,85 +67,82 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// runCtx gates both the scheduler and the push loop. We cancel it with a
-	// cause of ErrAuth when either loop sees a 401, so Run returns that error
+	// runCtx gates the scheduler, refresh, and push loops. Any of them can
+	// cancel it with cause = ErrAuth on a 401, so Run returns that error
 	// verbatim to main() which exits non-zero.
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
 
-	sched, err := r.buildScheduler(buildShim(resp, r.local.Cluster))
-	if err != nil {
-		return fmt.Errorf("build scheduler: %w", err)
-	}
-	fingerprint := scheduler.Fingerprint(buildShim(resp, r.local.Cluster))
-
-	schedCtx, schedCancel := context.WithCancel(runCtx)
-	schedDone := make(chan struct{})
-	go func() {
-		sched.Run(schedCtx)
-		close(schedDone)
-	}()
+	reloads := make(chan *config.Config, 1)
 
 	pushDone := make(chan struct{})
 	go func() {
+		defer close(pushDone)
 		if err := r.pushLoop(runCtx); err != nil {
 			cancelRun(err)
 		}
-		close(pushDone)
 	}()
 
-	refreshT := time.NewTicker(60 * time.Second)
-	defer refreshT.Stop()
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		r.refreshLoop(runCtx, cancelRun, etag, reloads)
+	}()
 
+	initial := buildShim(resp, r.local.Cluster)
+	lifecycleErr := scheduler.RunLifecycle(runCtx, scheduler.LifecycleOptions{
+		Log:     r.log,
+		Initial: initial,
+		Build:   func(c *config.Config) (*scheduler.Scheduler, error) { return r.buildScheduler(c) },
+		Reloads: reloads,
+	})
+	if lifecycleErr != nil {
+		// Initial build failure — surface it so main() exits non-zero.
+		cancelRun(fmt.Errorf("build scheduler: %w", lifecycleErr))
+	}
+
+	<-pushDone
+	<-refreshDone
+	r.finalFlush()
+
+	if cause := context.Cause(runCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return cause
+	}
+	return nil
+}
+
+// refreshLoop pulls config from the master every 60s. On a successful non-304
+// response it sends a rebuilt shim to reloads — the lifecycle helper's
+// fingerprint check decides whether a restart is actually needed. A 401
+// cancels runCtx with cause ErrAuth and returns.
+func (r *Runner) refreshLoop(ctx context.Context, cancelRun context.CancelCauseFunc, etag string, reloads chan<- *config.Config) {
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
 	for {
 		select {
-		case <-runCtx.Done():
-			schedCancel()
-			<-schedDone
-			<-pushDone
-			r.finalFlush()
-			if cause := context.Cause(runCtx); cause != nil && !errors.Is(cause, context.Canceled) {
-				return cause
-			}
-			return nil
-
-		case <-refreshT.C:
-			newResp, newEtag, err := r.client.PullConfig(runCtx, etag)
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			newResp, newEtag, err := r.client.PullConfig(ctx, etag)
 			if errors.Is(err, ErrNotModified) {
 				continue
 			}
 			if errors.Is(err, ErrAuth) {
 				r.log.Error("token rejected, exiting")
 				cancelRun(err)
-				continue
+				return
 			}
 			if err != nil {
 				r.log.Warn("config refresh failed, keeping stale", "err", err)
 				continue
 			}
 			etag = newEtag
-			newShim := buildShim(newResp, r.local.Cluster)
-			newFingerprint := scheduler.Fingerprint(newShim)
-			if newFingerprint == fingerprint {
-				continue
+			shim := buildShim(newResp, r.local.Cluster)
+			select {
+			case reloads <- shim:
+			case <-ctx.Done():
+				return
 			}
-			r.log.Info("config changed, restarting scheduler")
-			schedCancel()
-			<-schedDone
-
-			newSched, err := r.buildScheduler(newShim)
-			if err != nil {
-				r.log.Error("rebuild scheduler failed, keeping previous target set", "err", err)
-				// Restart the previous scheduler so we don't go dark.
-				schedCtx, schedCancel = context.WithCancel(runCtx)
-				schedDone = make(chan struct{})
-				go func() { sched.Run(schedCtx); close(schedDone) }()
-				continue
-			}
-			sched, fingerprint = newSched, newFingerprint
-			schedCtx, schedCancel = context.WithCancel(runCtx)
-			schedDone = make(chan struct{})
-			go func() { sched.Run(schedCtx); close(schedDone) }()
 		}
 	}
 }

@@ -18,19 +18,6 @@ import (
 	"github.com/tumult/gosmokeping/internal/storage"
 )
 
-// StorageReader is the subset of storage.Reader the API needs. A named interface
-// (vs. taking *storage.Reader) lets tests stub without spinning up Influx.
-// Trailing `source` parameter is optional: "" means no source filter
-// (backward-compat with pre-cluster data).
-type StorageReader interface {
-	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution, source string) ([]storage.CyclePoint, error)
-	QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.RTTPoint, error)
-	QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HTTPPoint, error)
-	QueryLatestHops(ctx context.Context, ref config.TargetRef, source string) ([]storage.HopPoint, error)
-	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, source string) ([]storage.HopPoint, error)
-	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error)
-}
-
 // SlaveLister reports the names of slaves currently registered with the
 // master. Master mode plugs the cluster Registry in here; standalone and
 // slave mode leave it nil.
@@ -41,7 +28,7 @@ type SlaveLister interface {
 type Server struct {
 	log            *slog.Logger
 	store          *config.Store
-	reader         StorageReader
+	reader         storage.Reader
 	uiFS           fs.FS
 	clusterHandler http.Handler
 	slaves         SlaveLister
@@ -51,7 +38,7 @@ type Server struct {
 type Options struct {
 	Log    *slog.Logger
 	Store  *config.Store
-	Reader StorageReader
+	Reader storage.Reader
 	// UIFS is the filesystem holding the built SPA (index.html + assets/).
 	// May be nil — routes will 404 for UI paths in that case.
 	UIFS fs.FS
@@ -260,13 +247,13 @@ func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := pickResolution(r.URL.Query().Get("resolution"), from, to)
-	source := r.URL.Query().Get("source")
+	filter := storage.QueryFilter{Source: r.URL.Query().Get("source")}
 
 	if s.reader == nil {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
 		return
 	}
-	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, res, source)
+	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, res, filter)
 	if err != nil {
 		s.log.Warn("query cycles", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -293,7 +280,7 @@ func (s *Server) getRTTs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
 		return
 	}
-	points, err := s.reader.QueryRTTs(r.Context(), ref, from, to, r.URL.Query().Get("source"))
+	points, err := s.reader.QueryRTTs(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
 		s.log.Warn("query rtts", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -325,7 +312,7 @@ func (s *Server) getHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "http window limited to 7d")
 		return
 	}
-	points, err := s.reader.QueryHTTPSamples(r.Context(), ref, from, to, r.URL.Query().Get("source"))
+	points, err := s.reader.QueryHTTPSamples(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
 		s.log.Warn("query http", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -354,16 +341,16 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 	// hops view from any moment of the main chart. Absent = latest.
 	var hops []storage.HopPoint
 	var err error
-	source := r.URL.Query().Get("source")
+	filter := storage.QueryFilter{Source: r.URL.Query().Get("source")}
 	if atStr := r.URL.Query().Get("at"); atStr != "" {
 		at, perr := parseTimeParam(atStr, time.Time{}, time.Now())
 		if perr != nil {
 			writeErr(w, http.StatusBadRequest, "invalid at: expected RFC3339, unix seconds, or duration like -1h")
 			return
 		}
-		hops, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute, source)
+		hops, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute, filter)
 	} else {
-		hops, err = s.reader.QueryLatestHops(r.Context(), ref, source)
+		hops, err = s.reader.QueryLatestHops(r.Context(), ref, filter)
 	}
 	if err != nil {
 		s.log.Warn("query hops", "err", err)
@@ -392,7 +379,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "hops/timeline window limited to 7d")
 		return
 	}
-	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, r.URL.Query().Get("source"))
+	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
 		s.log.Warn("query hops timeline", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -418,7 +405,7 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	// Show the last 50 cycles from the raw bucket.
 	to := time.Now()
 	from := to.Add(-24 * time.Hour)
-	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.ResolutionRaw, r.URL.Query().Get("source"))
+	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.ResolutionRaw, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "query failed")
 		return

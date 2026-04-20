@@ -44,7 +44,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		"targets", len(cfg.AllTargets()))
 
 	sinks := []scheduler.Sink{&scheduler.LogSink{Log: log}}
-	var reader api.StorageReader
+	var reader storage.Reader
 
 	backend, err := openStorage(ctx, log, cfg.Storage)
 	switch {

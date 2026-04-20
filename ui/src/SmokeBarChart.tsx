@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE } from "./palette";
+
+const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
 interface Props {
   points: CyclePoint[];
@@ -50,41 +52,41 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   // captured at construction time would go stale after each setData.
   const stacksRef = useRef<SourceStack[]>([]);
   const yRangeRef = useRef<[number, number]>([0, 1]);
+  // Hidden-label set the draw hook consults when deciding whether to paint
+  // each band + median. Kept in a ref so the draw closure (captured at uPlot
+  // construction) always reads the current value.
+  const hiddenRef = useRef<Set<string>>(new Set());
 
   const built = useMemo(() => buildSources(points), [points]);
   const sourcesKey = built.sources.join("|");
 
+  // Cursor idx drives the custom legend below the chart. See SmokeChart for
+  // the same pattern — we disable uPlot's built-in legend and render one row
+  // per source with NAME first and the 8 readouts inline.
+  const [cursorIdx, setCursorIdx] = useState<number | null>(null);
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setHidden(new Set());
+  }, [sourcesKey]);
+  useEffect(() => {
+    hiddenRef.current = hidden;
+    plotRef.current?.redraw(false, true);
+  }, [hidden]);
+
   useEffect(() => {
     if (!divRef.current) return;
 
-    const msFmt = (v: number | null) => (v == null ? "—" : v.toFixed(2));
-    const pctFmt = (v: number | null) => (v == null ? "—" : `${v.toFixed(1)}%`);
-
-    // Build one legend row per source. Order per source is
-    // min/p5/p25/median/p75/p95/max/loss — must match the data column order
-    // in buildSources().
+    // Built-in uPlot series are still required so data columns stay bound;
+    // labels are only used by the (hidden) internal legend so they can stay
+    // dumb placeholders.
     const series: Series[] = [{}];
-    // Only prefix labels when disambiguating between sources — a single-source
-    // chart should read "min / p5 / …" unchanged.
-    const prefixed = built.sources.length > 1;
     built.sources.forEach((name) => {
-      const prefix = prefixed && name ? `${name}/` : "";
-      const mk = (label: string, fmt: (v: number | null) => string): Series => ({
-        label: `${prefix}${label}`,
+      const mk = (label: string): Series => ({
+        label: `${name}/${label}`,
         stroke: "transparent",
         points: { show: false },
-        value: (_u, v) => fmt(v),
       });
-      series.push(
-        mk("min", msFmt),
-        mk("p5", msFmt),
-        mk("p25", msFmt),
-        mk(prefixed ? name || "median" : "median", msFmt),
-        mk("p75", msFmt),
-        mk("p95", msFmt),
-        mk("max", msFmt),
-        mk("loss", pctFmt),
-      );
+      for (const label of BAR_PCT_LABELS) series.push(mk(label));
     });
 
     const opts: Options = {
@@ -104,7 +106,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
         },
       ],
       series,
-      legend: { show: true, live: true },
+      legend: { show: false },
       cursor: {
         points: { show: false },
         // Keep the vertical x-hair; y-hair off to stay out of the smoke.
@@ -117,10 +119,21 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
             if (stacks.length === 0) return;
             const ctx = u.ctx;
             ctx.save();
+            // Clip to the plot area so bars near the edges don't spill into
+            // the axis gutter when the user drag-zooms into a narrow window.
+            ctx.beginPath();
+            ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
+            ctx.clip();
             for (const stack of stacks) {
-              drawStack(u, ctx, stack);
+              drawStack(u, ctx, stack, hiddenRef.current);
             }
             ctx.restore();
+          },
+        ],
+        setCursor: [
+          (u) => {
+            const next = u.cursor.idx ?? null;
+            setCursorIdx((prev) => (prev === next ? prev : next));
           },
         ],
       },
@@ -173,13 +186,16 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     // updates flow through the setData effect below.
   }, [height, sourcesKey]);
 
-  // Pin the x scale before setData so uPlot doesn't briefly auto-range to the
-  // data's actual span (causing a "narrow" flash) before the scale effect
-  // snaps to the requested window.
+  // Pin the x scale only when the requested window changes. A plain data
+  // refresh passes resetScales=false so user drag-zooms survive the tick.
+  const pinRef = useRef<{ from?: number; to?: number }>({});
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
-    const pin = fromSec != null && toSec != null;
+    const pinChanged =
+      pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
+    pinRef.current = { from: fromSec, to: toSec };
+    const pin = pinChanged && fromSec != null && toSec != null;
     const empty = built.stacks.length === 0;
 
     stacksRef.current = empty ? [] : built.stacks;
@@ -187,7 +203,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
 
     u.batch(() => {
       if (pin) u.setScale("x", { min: fromSec, max: toSec });
-      u.setData(built.data, !pin);
+      u.setData(built.data, false);
     });
     if (!empty) {
       // setData already triggers a redraw, but hooks.draw closes over refs we
@@ -200,6 +216,78 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     <div className="chart-host" style={{ minHeight: height }}>
       <div ref={divRef} style={{ width: "100%" }} />
       {points.length === 0 && <div className="chart-empty">No data in range</div>}
+      {points.length > 0 && (
+        <BarChartLegend
+          built={built}
+          cursorIdx={cursorIdx}
+          hidden={hidden}
+          setHidden={setHidden}
+        />
+      )}
+    </div>
+  );
+}
+
+function BarChartLegend({
+  built,
+  cursorIdx,
+  hidden,
+  setHidden,
+}: {
+  built: Built;
+  cursorIdx: number | null;
+  hidden: Set<string>;
+  setHidden: (updater: (prev: Set<string>) => Set<string>) => void;
+}) {
+  const xCol = built.data[0] as number[] | undefined;
+  const lastIdx = xCol && xCol.length > 0 ? xCol.length - 1 : null;
+  const legendIdx = cursorIdx != null ? cursorIdx : lastIdx;
+
+  const toggle = (label: string) =>
+    setHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+
+  return (
+    <div className="smoke-legend">
+      {built.sources.map((src, srcIdx) => {
+        const palette = PALETTE[srcIdx % PALETTE.length];
+        const base = 1 + srcIdx * BAR_PCT_LABELS.length;
+        return (
+          <div className="smoke-legend-row" key={src || `src-${srcIdx}`}>
+            <span
+              className="smoke-legend-name"
+              style={{ color: palette.stroke }}
+            >
+              {src || "—"}
+            </span>
+            {BAR_PCT_LABELS.map((label, j) => {
+              const col = built.data[base + j] as (number | null)[] | undefined;
+              const v = legendIdx != null && col ? col[legendIdx] : null;
+              const txt =
+                v == null
+                  ? "—"
+                  : label === "loss"
+                  ? `${v.toFixed(1)}%`
+                  : v.toFixed(1);
+              const off = hidden.has(label);
+              return (
+                <button
+                  type="button"
+                  className={`smoke-legend-val${off ? " off" : ""}`}
+                  key={label}
+                  onClick={() => toggle(label)}
+                >
+                  {label}: <strong>{txt}</strong>
+                </button>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -328,7 +416,29 @@ function buildSources(points: CyclePoint[]): Built {
   };
 }
 
-function drawStack(u: uPlot, ctx: CanvasRenderingContext2D, stack: SourceStack) {
+// Labels that toggle each drawStack band. Index lines up with the filtered
+// bands array — hiding either end of a pair drops that band. Intermediate
+// 5% bands fold into the nearest legend-visible pair (p10..p90 hides with
+// p5/p95, etc.) so a single click collapses the whole band family.
+const BAND_PAIRS: { lo: string; hi: string }[] = [
+  { lo: "min", hi: "max" },
+  { lo: "p5", hi: "p95" },
+  { lo: "p5", hi: "p95" },
+  { lo: "p5", hi: "p95" },
+  { lo: "p5", hi: "p95" },
+  { lo: "p25", hi: "p75" },
+  { lo: "p25", hi: "p75" },
+  { lo: "p25", hi: "p75" },
+  { lo: "p25", hi: "p75" },
+  { lo: "p25", hi: "p75" },
+];
+
+function drawStack(
+  u: uPlot,
+  ctx: CanvasRenderingContext2D,
+  stack: SourceStack,
+  hidden: Set<string>,
+) {
   const { ts, bands: bandsArr, medians, losses } = stack;
   const n = ts.length;
   if (n === 0) return;
@@ -338,6 +448,9 @@ function drawStack(u: uPlot, ctx: CanvasRenderingContext2D, stack: SourceStack) 
   // regardless of how uneven the sample cadence is. Endpoint bars mirror
   // their single neighbour's gap.
   const cxs = ts.map((t) => u.valToPos(t, "x", true));
+
+  const medHidden = hidden.has("median");
+  const lossHidden = hidden.has("loss");
 
   for (let i = 0; i < n; i++) {
     const cx = cxs[i];
@@ -359,16 +472,24 @@ function drawStack(u: uPlot, ctx: CanvasRenderingContext2D, stack: SourceStack) 
     const x = Math.floor(leftEdge);
     const w = Math.max(1, Math.ceil(rightEdge) - x);
 
-    for (const band of bandsArr[i]) {
+    bandsArr[i].forEach((band, b) => {
+      const pair = BAND_PAIRS[b];
+      if (pair && (hidden.has(pair.lo) || hidden.has(pair.hi))) return;
       const yHi = u.valToPos(band.hi, "y", true);
       const yLo = u.valToPos(band.lo, "y", true);
       ctx.fillStyle = stack.fill(band.alpha);
       ctx.fillRect(x, yHi, w, yLo - yHi);
-    }
+    });
 
-    const yMed = Math.round(u.valToPos(medians[i], "y", true));
-    ctx.fillStyle = lossColor(losses[i], stack.medianColor);
-    ctx.fillRect(x, yMed, w, 1);
+    if (!medHidden) {
+      const yMed = Math.round(u.valToPos(medians[i], "y", true));
+      // Toggling "loss" off in the legend suppresses the outage coloring so
+      // the median tick falls back to the plain palette stroke.
+      ctx.fillStyle = lossHidden
+        ? stack.medianColor
+        : lossColor(losses[i], stack.medianColor);
+      ctx.fillRect(x, yMed, w, 1);
+    }
   }
 }
 

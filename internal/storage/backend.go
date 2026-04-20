@@ -16,14 +16,22 @@ import (
 
 // Reader is the query surface every backend exposes to the API. Kept
 // narrow on purpose: adding a method forces every backend to implement it,
-// so prefer new filter parameters on existing methods when possible.
+// so new filter knobs belong on QueryFilter rather than as new parameters.
 type Reader interface {
-	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res Resolution, source string) ([]CyclePoint, error)
-	QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]RTTPoint, error)
-	QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]HTTPPoint, error)
-	QueryLatestHops(ctx context.Context, ref config.TargetRef, source string) ([]HopPoint, error)
-	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, source string) ([]HopPoint, error)
-	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]HopPoint, error)
+	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res Resolution, f QueryFilter) ([]CyclePoint, error)
+	QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]RTTPoint, error)
+	QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HTTPPoint, error)
+	QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) ([]HopPoint, error)
+	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f QueryFilter) ([]HopPoint, error)
+	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HopPoint, error)
+}
+
+// QueryFilter narrows a query along orthogonal dimensions. Zero value = no
+// filtering; pre-cluster data (which carries no source tag) still returns.
+// Add new fields here instead of lengthening Reader method signatures.
+type QueryFilter struct {
+	// Source, when non-empty, limits rows to that exact `source` tag value.
+	Source string
 }
 
 // Resolution picks which retention tier to query. Backends that don't
@@ -93,9 +101,11 @@ type RTTPoint struct {
 }
 
 // HTTPPoint is one HTTP request sample. Status == 0 means no response was
-// received (DNS, refused, TLS, timeout) and Err explains why.
+// received (DNS, refused, TLS, timeout) and Err explains why. Source
+// identifies the probe origin, matching CyclePoint.Source.
 type HTTPPoint struct {
 	Time   time.Time
+	Source string
 	RTT    float64
 	Status int64
 	Seq    int64

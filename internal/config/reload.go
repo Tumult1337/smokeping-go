@@ -15,11 +15,15 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// Store holds the live Config and notifies a single subscriber on reload.
+// The "one subscriber" shape matches actual use — only the scheduler
+// Supervisor listens — and keeps the Reload → Subscriber handoff ordered
+// on a single channel instead of fanning across a slice.
 type Store struct {
 	path string
 	cur  atomic.Pointer[Config]
 	mu   sync.Mutex
-	subs []chan<- *Config
+	sub  chan<- *Config
 }
 
 func NewStore(path string, initial *Config) *Store {
@@ -32,10 +36,15 @@ func (s *Store) Current() *Config {
 	return s.cur.Load()
 }
 
+// Subscribe registers the single reload listener. Panics if called twice;
+// the store is intentionally 1:1 with the lifecycle helper.
 func (s *Store) Subscribe(ch chan<- *Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.subs = append(s.subs, ch)
+	if s.sub != nil {
+		panic("config: Store.Subscribe called more than once")
+	}
+	s.sub = ch
 }
 
 func (s *Store) Reload() error {
@@ -45,11 +54,11 @@ func (s *Store) Reload() error {
 	}
 	s.cur.Store(cfg)
 	s.mu.Lock()
-	subs := append([]chan<- *Config(nil), s.subs...)
+	sub := s.sub
 	s.mu.Unlock()
-	for _, ch := range subs {
+	if sub != nil {
 		select {
-		case ch <- cfg:
+		case sub <- cfg:
 		default:
 		}
 	}

@@ -25,37 +25,37 @@ type stubReader struct {
 	lastSource string
 }
 
-func (s *stubReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution, source string) ([]storage.CyclePoint, error) {
-	s.lastSource = source
+func (s *stubReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution, f storage.QueryFilter) ([]storage.CyclePoint, error) {
+	s.lastSource = f.Source
 	return s.cycles, s.err
 }
 
-func (s *stubReader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.RTTPoint, error) {
-	s.lastSource = source
+func (s *stubReader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.RTTPoint, error) {
+	s.lastSource = f.Source
 	return s.rtts, s.err
 }
 
-func (s *stubReader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HTTPPoint, error) {
-	s.lastSource = source
+func (s *stubReader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HTTPPoint, error) {
+	s.lastSource = f.Source
 	return s.http, s.err
 }
 
-func (s *stubReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, source string) ([]storage.HopPoint, error) {
-	s.lastSource = source
+func (s *stubReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
+	s.lastSource = f.Source
 	return s.hops, s.err
 }
 
-func (s *stubReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, source string) ([]storage.HopPoint, error) {
-	s.lastSource = source
+func (s *stubReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) ([]storage.HopPoint, error) {
+	s.lastSource = f.Source
 	return s.hops, s.err
 }
 
-func (s *stubReader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {
-	s.lastSource = source
+func (s *stubReader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
+	s.lastSource = f.Source
 	return s.hops, s.err
 }
 
-func newTestServer(t *testing.T, reader StorageReader) http.Handler {
+func newTestServer(t *testing.T, reader storage.Reader) http.Handler {
 	t.Helper()
 	cfg := &config.Config{
 		Listen:   ":0",

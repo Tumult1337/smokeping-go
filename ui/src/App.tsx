@@ -18,6 +18,36 @@ type ChartStyle = "band" | "bars";
 const CHART_STYLE_KEY = "gosmokeping.chartStyle";
 const COLLAPSED_GROUPS_KEY = "gosmokeping.collapsedGroups";
 
+const VALID_RANGES: Range[] = ["-1h", "-6h", "-24h", "-7d", "-30d", "-180d", "-365d"];
+
+// readUrlState plucks the shareable-link params the app writes on every
+// state change. Kept loose: unknown values fall through to defaults so a
+// malformed URL never wedges the app.
+type UrlState = {
+  target: string | null;
+  range: Range | null;
+  mode: ChartStyle | null;
+  source: string | null;
+  pickedSec: number | null;
+};
+function readUrlState(): UrlState {
+  if (typeof window === "undefined") {
+    return { target: null, range: null, mode: null, source: null, pickedSec: null };
+  }
+  const p = new URLSearchParams(window.location.search);
+  const range = p.get("range") as Range | null;
+  const mode = p.get("mode");
+  const tRaw = p.get("t");
+  const t = tRaw ? Number(tRaw) : NaN;
+  return {
+    target: p.get("target"),
+    range: range && VALID_RANGES.includes(range) ? range : null,
+    mode: mode === "bars" || mode === "band" ? mode : null,
+    source: p.get("source"),
+    pickedSec: Number.isFinite(t) ? t : null,
+  };
+}
+
 // Ranges wide enough that long MTR paths become visual clutter; we drop
 // clean hops so the table + heatmap stay readable.
 const WIDE_RANGES: Range[] = ["-6h", "-24h", "-7d", "-30d", "-180d", "-365d"];
@@ -38,11 +68,15 @@ const HTTP_RANGES: Range[] = ["-1h", "-6h", "-24h", "-7d"];
 const AUTO_REFRESH_MS = 30_000;
 
 export default function App() {
+  // URL state is read once at mount; later writes go through the sync effect
+  // so the address bar tracks the UI without forcing React to re-parse on
+  // every render.
+  const initialUrl = useMemo(() => readUrlState(), []);
   const [targets, setTargets] = useState<Target[]>([]);
   // null = "all sources" — no source param forwarded.
-  const [selectedSource, setSelectedSource] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [range, setRange] = useState<Range>("-24h");
+  const [selectedSource, setSelectedSource] = useState<string | null>(initialUrl.source);
+  const [selectedId, setSelectedId] = useState<string | null>(initialUrl.target);
+  const [range, setRange] = useState<Range>(initialUrl.range ?? "-24h");
   const resolution: Resolution = "auto";
   const [cycles, setCycles] = useState<CyclesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +84,7 @@ export default function App() {
   const [refreshTick, setRefreshTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [chartStyle, setChartStyle] = useState<ChartStyle>(() => {
+    if (initialUrl.mode) return initialUrl.mode;
     const saved = typeof localStorage !== "undefined" ? localStorage.getItem(CHART_STYLE_KEY) : null;
     return saved === "bars" ? "bars" : "band";
   });
@@ -66,8 +101,9 @@ export default function App() {
   const fetchKeyRef = useRef<string>("");
   // Historical MTR pin: when set, HopsTable and the heatmap marker
   // show the cycle at that unix-seconds timestamp. Cleared when the target
-  // or range changes, or when the user clicks "← latest".
-  const [pickedSec, setPickedSec] = useState<number | null>(null);
+  // or range changes, or when the user clicks "← latest". Initial value
+  // comes from ?t=<unix> so a shared link lands on the chosen cycle.
+  const [pickedSec, setPickedSec] = useState<number | null>(initialUrl.pickedSec);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
@@ -99,7 +135,13 @@ export default function App() {
     listTargets()
       .then((t) => {
         setTargets(t);
-        if (t.length && !selectedId) setSelectedId(t[0].id);
+        // Honor URL target if it exists in the list; otherwise fall back to
+        // the first available so a stale bookmark doesn't leave the page
+        // empty.
+        setSelectedId((cur) => {
+          if (cur && t.some((x) => x.id === cur)) return cur;
+          return t.length ? t[0].id : null;
+        });
       })
       .catch((e) => setError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -108,15 +150,17 @@ export default function App() {
   useEffect(() => {
     if (!selectedId) return;
     const key = `${selectedId}|${range}|${resolution}|${selectedSource ?? ""}`;
-    const isKeyChange = fetchKeyRef.current !== key;
+    const prevKey = fetchKeyRef.current;
+    const isKeyChange = prevKey !== key;
     fetchKeyRef.current = key;
     setError(null);
     // Only clear the chart on a target/range/source change — a plain refresh
     // keeps the current view until the new data arrives, so it doesn't flash
-    // empty.
+    // empty. Skip the pickedSec wipe on the very first fetch so a URL like
+    // ?target=…&t=… lands on the chosen cycle instead of reverting to latest.
     if (isKeyChange) {
       setCycles(null);
-      setPickedSec(null);
+      if (prevKey !== "") setPickedSec(null);
     }
     setRefreshing(true);
     let cancelled = false;
@@ -145,6 +189,24 @@ export default function App() {
     }, AUTO_REFRESH_MS);
     return () => clearInterval(id);
   }, [autoRefresh]);
+
+  // Mirror UI state into the URL so the current view is shareable via copy-
+  // paste. replaceState (not pushState) keeps the back button sane — we're
+  // not creating history entries for every range toggle.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const p = new URLSearchParams();
+    if (selectedId) p.set("target", selectedId);
+    if (range !== "-24h") p.set("range", range);
+    if (chartStyle !== "band") p.set("mode", chartStyle);
+    if (selectedSource) p.set("source", selectedSource);
+    if (pickedSec != null) p.set("t", String(pickedSec));
+    const qs = p.toString();
+    const url = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`;
+    if (url !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+      window.history.replaceState(null, "", url);
+    }
+  }, [selectedId, range, chartStyle, selectedSource, pickedSec]);
 
   const refresh = useCallback(() => {
     setRefreshTick((n) => n + 1);
