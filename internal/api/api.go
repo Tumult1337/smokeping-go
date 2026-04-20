@@ -112,6 +112,12 @@ func Serve(ctx context.Context, log *slog.Logger, addr string, handler http.Hand
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout is generous because /api/v1/cluster/cycles accepts up to
+		// 100 MiB from slaves over potentially slow links. WriteTimeout covers
+		// the widest Flux query we expect (1d bucket, max window).
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {

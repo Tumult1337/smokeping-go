@@ -16,6 +16,14 @@ import (
 	"github.com/tumult/gosmokeping/internal/scheduler"
 )
 
+// Caps on ingest body size. Register is tiny JSON; /cycles carries at most
+// ~600 cycles × a few hundred bytes, so 100 MiB is a paranoid upper bound
+// that still stops a compromised bearer from exhausting memory.
+const (
+	maxRegisterBody = 64 << 10  // 64 KiB
+	maxCyclesBody   = 100 << 20 // 100 MiB
+)
+
 // Server wires the three cluster endpoints against the master's config store,
 // slave registry, and downstream Sink (usually the same Fanout local cycles
 // feed into, so slave data reaches Writer + Evaluator + LogSink identically).
@@ -52,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRegisterBody)
 	var req cluster.RegisterReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -91,6 +100,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxCyclesBody)
 	var batch cluster.CycleBatch
 	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)

@@ -34,6 +34,12 @@ func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
 }
 
 func (d *ActionDispatcher) Dispatch(ctx context.Context, e Event) {
+	// Only notify when an alert enters or leaves firing — pending transitions
+	// are too noisy for operators and the state-change log line already
+	// captures them for debugging.
+	if e.Next != StateFiring && e.Prev != StateFiring {
+		return
+	}
 	cfg := d.store.Current()
 	for _, name := range e.Alert.Actions {
 		action, ok := cfg.Actions[name]
@@ -66,6 +72,7 @@ func (d *ActionDispatcher) Dispatch(ctx context.Context, e Event) {
 func (d *ActionDispatcher) webhook(ctx context.Context, a config.Action, body string, e Event) {
 	payload := map[string]any{
 		"target":  e.Target.ID(),
+		"source":  e.Cycle.Source,
 		"alert":   e.AlertName,
 		"state":   string(e.Next),
 		"prev":    string(e.Prev),
@@ -109,6 +116,7 @@ func (d *ActionDispatcher) exec(ctx context.Context, a config.Action, body strin
 		fmt.Sprintf("ALERT_TARGET=%s", e.Target.ID()),
 		fmt.Sprintf("ALERT_NAME=%s", e.AlertName),
 		fmt.Sprintf("ALERT_STATE=%s", e.Next),
+		fmt.Sprintf("ALERT_SOURCE=%s", e.Cycle.Source),
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		d.log.Warn("exec", "command", a.Command, "err", err, "output", string(out))
@@ -123,16 +131,21 @@ func (d *ActionDispatcher) exec(ctx context.Context, a config.Action, body strin
 func (d *ActionDispatcher) discord(ctx context.Context, a config.Action, body string, e Event) {
 	desc := discordDescription(a.Template, body, e)
 
+	fields := []map[string]any{
+		{"name": "State", "value": fmt.Sprintf("%s → %s", e.Prev, e.Next), "inline": true},
+		{"name": "Loss", "value": lossField(e.Cycle.LossCount, e.Cycle.Sent), "inline": true},
+		{"name": "Median RTT", "value": rttField(e.Cycle.Summary.Median), "inline": true},
+	}
+	if e.Cycle.Source != "" {
+		fields = append(fields, map[string]any{"name": "Source", "value": e.Cycle.Source, "inline": true})
+	}
+
 	embed := map[string]any{
 		"title":       fmt.Sprintf("%s — %s", e.AlertName, e.Target.ID()),
 		"description": desc,
 		"color":       discordColor(e.Next),
 		"timestamp":   e.Time.UTC().Format(time.RFC3339),
-		"fields": []map[string]any{
-			{"name": "State", "value": fmt.Sprintf("%s → %s", e.Prev, e.Next), "inline": true},
-			{"name": "Loss", "value": lossField(e.Cycle.LossCount, e.Cycle.Sent), "inline": true},
-			{"name": "Median RTT", "value": rttField(e.Cycle.Summary.Median), "inline": true},
-		},
+		"fields":      fields,
 	}
 
 	payload := map[string]any{"embeds": []any{embed}}
