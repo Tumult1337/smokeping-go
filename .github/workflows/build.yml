@@ -31,11 +31,6 @@ jobs:
           npm ci
           npm run build
 
-      - name: Copy UI assets
-        run: |
-          mkdir -p internal/ui/dist
-          cp -r ui/dist/* internal/ui/dist/
-
       - uses: actions/setup-go@v6
         with:
           go-version: "1.26.1"
