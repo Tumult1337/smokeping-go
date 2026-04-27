@@ -44,13 +44,18 @@ const (
 	Resolution1d  Resolution = "1d"
 )
 
-// PickResolution chooses a tier by requested span. 7d fits the raw bucket
-// retention so any span within that stays at raw — avoids empty results
-// from rollup tasks that haven't run yet on a fresh install.
+// PickResolution chooses a tier by requested span. Raw is reserved for
+// day-or-narrower windows so weekly+ views render cheaply from the 1h
+// rollup; the chart trades sub-hour fidelity for far fewer points (and
+// hence faster Influx queries and smoother hover). Operators can still
+// force raw via the `?resolution=raw` API override. The `?resolution=raw`
+// override and the queryCyclesFrom fallback chain together protect fresh
+// installs where the 1h task hasn't ticked yet — an empty rollup tier
+// transparently falls back to raw.
 func PickResolution(from, to time.Time) Resolution {
 	span := to.Sub(from)
 	switch {
-	case span <= 7*24*time.Hour:
+	case span <= 24*time.Hour:
 		return ResolutionRaw
 	case span <= 180*24*time.Hour:
 		return Resolution1h

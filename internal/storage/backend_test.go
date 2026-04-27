@@ -13,8 +13,8 @@ func TestPickResolution(t *testing.T) {
 	}{
 		{1 * time.Hour, ResolutionRaw},
 		{24 * time.Hour, ResolutionRaw},
-		{7 * 24 * time.Hour, ResolutionRaw},
-		{8 * 24 * time.Hour, Resolution1h},
+		{25 * time.Hour, Resolution1h},
+		{7 * 24 * time.Hour, Resolution1h},
 		{30 * 24 * time.Hour, Resolution1h},
 		{180 * 24 * time.Hour, Resolution1h},
 		{365 * 24 * time.Hour, Resolution1d},
