@@ -100,10 +100,15 @@ func Serve(ctx context.Context, log *slog.Logger, addr string, handler http.Hand
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		// ReadTimeout is generous because /api/v1/cluster/cycles accepts up to
-		// 100 MiB from slaves over potentially slow links. WriteTimeout covers
-		// the widest Flux query we expect (1d bucket, max window).
+		// 100 MiB from slaves over potentially slow links. WriteTimeout has to
+		// accommodate the slowest read path: a 7d hops/timeline query against
+		// the raw bucket can legitimately take 60-90s of Influx server time
+		// (see influxv2.NewReader, which sets a 90s HTTP timeout for that
+		// case). Anything tighter cancels the response before Influx can
+		// finish, surfaces as 502 to the UI, and prevents CachingReader from
+		// ever warming the entry.
 		ReadTimeout:  60 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 	errCh := make(chan error, 1)

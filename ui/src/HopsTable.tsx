@@ -24,21 +24,18 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
     setErr(null);
-    getHops(targetId, atSec, source)
+    const controller = new AbortController();
+    getHops(targetId, atSec, source, controller.signal)
       .then((r) => {
-        if (cancelled) return;
         const rows = r.hops ?? [];
         setHops(rows);
         setCycleTime(rows.length > 0 ? rows[0].Time : null);
       })
       .catch((e) => {
-        if (!cancelled) setErr(String(e));
+        if (e?.name !== "AbortError") setErr(String(e));
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [targetId, refreshTick, atSec, source]);
 
   if (err) return <div className="error">{err}</div>;

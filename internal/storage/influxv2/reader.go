@@ -46,8 +46,16 @@ type Reader struct {
 
 // NewReader constructs a Reader backed by a new v2 client. Caller must
 // Close it on shutdown.
+//
+// HTTP timeout is raised to 90s (default is 20s) because bucketed
+// hops/timeline queries at 7d have to scan ~600k raw rows from disk before
+// aggregating and can legitimately take 30-60s on a busy InfluxDB; the
+// default would deadline-exceed and surface as a generic 502 to the UI.
+// CachingReader's TTL means the slow path runs at most once per minute
+// per (target, window) pair, so the cost is bounded.
 func NewReader(cfg config.InfluxV2) *Reader {
-	return &Reader{client: influxdb2.NewClient(cfg.URL, cfg.Token), cfg: cfg}
+	opts := influxdb2.DefaultOptions().SetHTTPRequestTimeout(90)
+	return &Reader{client: influxdb2.NewClientWithOptions(cfg.URL, cfg.Token, opts), cfg: cfg}
 }
 
 func (r *Reader) Close() { r.client.Close() }
@@ -263,11 +271,97 @@ func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.
 	return out, nil
 }
 
-// QueryHopsTimeline returns every hop row across [from, to], sorted by time
-// then hop_index. Used by the UI heatmap to render per-hop loss over the
-// requested window.
+// QueryHopsTimeline returns hops across [from, to] for the heatmap. For
+// narrow windows (≤6h) it returns raw per-cycle rows; for wider windows it
+// aggregates server-side into time buckets so the response stays small —
+// see storage.BucketForHops for the tier table. A 7d view at 20s probe
+// interval is ~600k raw rows / ~113MB JSON; bucketed at 15m the same view
+// is ~9k rows / ~1.5MB.
 func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
-	return r.queryHopsRange(ctx, ref, from, to, f.Source)
+	bucket := storage.BucketForHops(to.Sub(from))
+	if bucket == 0 {
+		return r.queryHopsRange(ctx, ref, from, to, f.Source)
+	}
+	return r.queryHopsBucketed(ctx, ref, from, to, f.Source, bucket)
+}
+
+// queryHopsBucketed aggregates per-cycle hop rows into fixed-width time
+// buckets. The heatmap only renders loss%, so we keep it lean: pivot the
+// loss_count + pings_sent fields once, then `window + reduce` to roll up
+// per-bucket sums in a single read pass. Earlier versions used five parallel
+// `aggregateWindow` streams (sum/sum/mean/min/max for loss + the rtt
+// distribution); over a 7d window that re-scanned the raw bucket five times
+// and timed out the default 20s HTTP deadline. Dropping the rtt fields is
+// fine because HopsTable uses /hops?at=… which stays unbucketed and carries
+// the full per-cycle distribution. hop_ip is also dropped — it varies
+// cycle-to-cycle when the path changes and the heatmap doesn't use it.
+//
+// LossPct is recomputed from the bucket sums (sum(loss_count) /
+// sum(pings_sent) * 100). Bucket timestamp is the window start.
+func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, bucket time.Duration) ([]storage.HopPoint, error) {
+	every := bucket.String()
+	flux := fmt.Sprintf(`
+from(bucket: %q)
+  |> range(start: %s, stop: %s)
+  |> filter(fn: (r) => r._measurement == %q)
+  |> filter(fn: (r) => r.group == %q and r.target == %q)%s
+  |> filter(fn: (r) => r._field == "loss_count" or r._field == "pings_sent")
+  |> pivot(rowKey: ["_time", "hop_index"], columnKey: ["_field"], valueColumn: "_value")
+  |> window(every: %s)
+  |> reduce(
+       identity: {loss_count: 0, pings_sent: 0},
+       fn: (r, accumulator) => ({
+         loss_count: accumulator.loss_count + int(v: r.loss_count),
+         pings_sent: accumulator.pings_sent + int(v: r.pings_sent),
+       }))
+  |> duplicate(column: "_start", as: "_time")
+  |> group(columns: ["hop_index"])
+`, fluxEscape(r.cfg.BucketRaw),
+		from.UTC().Format(time.RFC3339Nano), to.UTC().Format(time.RFC3339Nano),
+		measurementHop,
+		fluxEscape(ref.Group), fluxEscape(ref.Target.Name),
+		sourceFilter(source),
+		every,
+	)
+
+	qAPI := r.client.QueryAPI(r.cfg.Org)
+	res, err := qAPI.Query(ctx, flux)
+	if err != nil {
+		return nil, fmt.Errorf("query hops bucketed: %w", err)
+	}
+	defer res.Close()
+
+	var out []storage.HopPoint
+	for res.Next() {
+		rec := res.Record()
+		vals := rec.Values()
+		idx, _ := strconv.ParseInt(stringOf(vals["hop_index"]), 10, 64)
+		sent := intOf(vals["pings_sent"])
+		lost := intOf(vals["loss_count"])
+		lossPct := 0.0
+		if sent > 0 {
+			lossPct = 100 * float64(lost) / float64(sent)
+		}
+		out = append(out, storage.HopPoint{
+			Time:      rec.Time(),
+			Source:    stringOf(vals["source"]),
+			Index:     idx,
+			LossPct:   lossPct,
+			LossCount: lost,
+			Sent:      sent,
+		})
+	}
+	if err := res.Err(); err != nil {
+		return nil, fmt.Errorf("read hops bucketed: %w", err)
+	}
+	// hop_index is a string tag — re-sort numerically, breaking ties by time.
+	slices.SortStableFunc(out, func(a, b storage.HopPoint) int {
+		if c := a.Time.Compare(b.Time); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Index, b.Index)
+	})
+	return out, nil
 }
 
 func (r *Reader) queryHopsRange(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {
@@ -294,6 +388,7 @@ from(bucket: "%s")
 		idx, _ := strconv.ParseInt(stringOf(vals["hop_index"]), 10, 64)
 		out = append(out, storage.HopPoint{
 			Time:      rec.Time(),
+			Source:    stringOf(vals["source"]),
 			Index:     idx,
 			IP:        stringOf(vals["hop_ip"]),
 			Min:       floatOf(vals["rtt_min"]),

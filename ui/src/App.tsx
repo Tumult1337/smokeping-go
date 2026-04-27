@@ -114,6 +114,20 @@ export default function App() {
   // or range changes, or when the user clicks "← latest". Initial value
   // comes from ?t=<unix> so a shared link lands on the chosen cycle.
   const [pickedSec, setPickedSec] = useState<number | null>(initialUrl.pickedSec);
+  // Source override forwarded by an MtrHeatmap click: the probe origin whose
+  // data dominated the clicked column (worst loss). The HopsTable uses this
+  // in preference to the global source filter so a click on a slave's lossy
+  // bucket actually shows the slave's path, not the master's clean cycle for
+  // the same timestamp. Cleared on "← latest", target change, etc.
+  const [pickedSource, setPickedSource] = useState<string | null>(null);
+  const handleCyclePick = useCallback((timeSec: number, source?: string) => {
+    setPickedSec(timeSec);
+    // Chart clicks (SmokeChart / SmokeBarChart) don't pass a source, so
+    // pickedSource resets to null and the HopsTable reverts to the global
+    // filter. Heatmap clicks pass the column's worst-loss source. Explicit
+    // "" (pre-cluster row, no source tag) also clears the override.
+    setPickedSource(source && source !== "" ? source : null);
+  }, []);
   const [zoom, setZoom] = useState<{ from: number; to: number } | null>(initialUrl.zoom);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -175,7 +189,10 @@ export default function App() {
     // ?target=…&t=… lands on the chosen cycle instead of reverting to latest.
     if (isKeyChange) {
       setCycles(null);
-      if (prevKey !== "") setPickedSec(null);
+      if (prevKey !== "") {
+        setPickedSec(null);
+        setPickedSource(null);
+      }
     }
     setRefreshing(true);
     let cancelled = false;
@@ -292,6 +309,7 @@ export default function App() {
     setSelectedId(id);
     setZoom(null);
     setPickedSec(null);
+    setPickedSource(null);
     setSidebarOpen(false);
   };
 
@@ -489,7 +507,7 @@ export default function App() {
                     points={points}
                     fromSec={fromSec}
                     toSec={toSec}
-                    onCyclePick={setPickedSec}
+                    onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
                   />
                 ) : (
@@ -497,7 +515,7 @@ export default function App() {
                     points={points}
                     fromSec={fromSec}
                     toSec={toSec}
-                    onCyclePick={setPickedSec}
+                    onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
                   />
                 )}
@@ -532,8 +550,11 @@ export default function App() {
                     targetId={selected.id}
                     refreshTick={refreshTick}
                     atSec={pickedSec ?? undefined}
-                    onResetAt={() => setPickedSec(null)}
-                    source={sourceParam}
+                    onResetAt={() => {
+                      setPickedSec(null);
+                      setPickedSource(null);
+                    }}
+                    source={pickedSource ?? sourceParam}
                     hideZeroLoss={hideZeroLossHops && pickedSec == null}
                   />
                 </div>
@@ -545,7 +566,7 @@ export default function App() {
                       refreshTick={refreshTick}
                       fromSec={fromSec}
                       toSec={toSec}
-                      onCyclePick={setPickedSec}
+                      onCyclePick={handleCyclePick}
                       selectedSec={pickedSec ?? undefined}
                       source={sourceParam}
                       hideZeroLoss={hideZeroLossHops}

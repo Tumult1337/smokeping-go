@@ -64,6 +64,32 @@ func PickResolution(from, to time.Time) Resolution {
 	}
 }
 
+// BucketForHops returns the time-bucket size hops/timeline should aggregate
+// to for a query covering `span`, or 0 to mean "no aggregation, return raw
+// per-cycle rows". Hops do NOT have pre-baked rollups (only the raw bucket
+// stores per-cycle hop data), so wide-window timelines have to aggregate
+// at query time. The tiers are picked so the result row count tracks the
+// heatmap canvas width (~666 px in current UI):
+//
+//	span ≤ 6h:           raw      — fine detail at narrow zoom
+//	6h < span ≤ 24h:     1m       — 1440 cells max
+//	24h < span ≤ 7d:     15m      — 672 cells max for 7d
+//	span > 7d:           15m      — defensive; the API caps timeline at 7d
+//
+// A 7d view at 20s probe interval previously returned ~30k cycles × ~13
+// hops = ~600k rows / ~113MB JSON; at 15m buckets the same view returns
+// ~672 × ~13 = ~8.7k rows / ~1.5MB.
+func BucketForHops(span time.Duration) time.Duration {
+	switch {
+	case span <= 6*time.Hour:
+		return 0
+	case span <= 24*time.Hour:
+		return time.Minute
+	default:
+		return 15 * time.Minute
+	}
+}
+
 // CyclePoint is one row of aggregate per-cycle data. Source identifies the
 // probe origin (master / slave name); empty for pre-cluster rows that
 // carry no source tag.
@@ -117,9 +143,15 @@ type HTTPPoint struct {
 	Err    string
 }
 
-// HopPoint is the most recent stats for one hop on an MTR path.
+// HopPoint is the most recent stats for one hop on an MTR path. Source
+// identifies the probe origin (master / slave name), matching CyclePoint;
+// empty for pre-cluster rows. The heatmap and HopsTable rely on it to
+// disambiguate per-source paths when more than one origin probes the
+// target — without it a click on a slave's lossy bucket would silently
+// return the master's clean cycle for the same timestamp.
 type HopPoint struct {
 	Time      time.Time
+	Source    string
 	Index     int64
 	IP        string
 	Min       float64

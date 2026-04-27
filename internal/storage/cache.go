@@ -48,8 +48,50 @@ type CachingReader struct {
 	items map[cycleCacheKey]*list.Element
 	order *list.List // front = most recently used
 
+	// hopsMax bounds the hops LRU separately from cycles because each hops
+	// entry (a 7d timeline) can be hundreds of KB to a few MB — much bigger
+	// than a cycles entry. Default = max; override via direct field access.
+	hopsMax      int
+	hopsMu       sync.Mutex
+	hopsItems    map[hopsCacheKey]*list.Element
+	hopsOrder    *list.List
+	hopsInflight map[hopsCacheKey]*hopsInflight
+
 	// nowFn lets tests freeze time without monkey-patching time.Now.
 	nowFn func() time.Time
+}
+
+type hopsCacheKey struct {
+	kind                hopsKind
+	group, name, source string
+	// fromUnix/toUnix used for timeline + hopsAt windows; both zero for latest.
+	fromUnix, toUnix int64
+}
+
+type hopsKind uint8
+
+const (
+	hopsKindLatest hopsKind = iota
+	hopsKindAt
+	hopsKindTimeline
+)
+
+type hopsCacheEntry struct {
+	key     hopsCacheKey
+	points  []HopPoint
+	expires time.Time
+}
+
+// hopsInflight dedupes concurrent identical misses. Each hops query at 7d
+// against real Influx returns ~600k rows / ~113MB JSON and takes 10-15s, so
+// letting N parallel UI fetches stampede the same query (the React mount
+// + range-button click + auto-refresh tick easily produce 3) is N× the
+// load on Influx and N× the memory footprint. With singleflight only the
+// first call runs the query; the rest wait on `done` and copy out `points`.
+type hopsInflight struct {
+	done   chan struct{}
+	points []HopPoint
+	err    error
 }
 
 type cycleCacheKey struct {
@@ -71,11 +113,15 @@ func NewCachingReader(inner Reader, max int) *CachingReader {
 		max = 256
 	}
 	return &CachingReader{
-		inner: inner,
-		max:   max,
-		items: make(map[cycleCacheKey]*list.Element, max),
-		order: list.New(),
-		nowFn: time.Now,
+		inner:     inner,
+		max:       max,
+		items:     make(map[cycleCacheKey]*list.Element, max),
+		order:     list.New(),
+		hopsMax:      max,
+		hopsItems:    make(map[hopsCacheKey]*list.Element, max),
+		hopsOrder:    list.New(),
+		hopsInflight: make(map[hopsCacheKey]*hopsInflight),
+		nowFn:     time.Now,
 	}
 }
 
@@ -110,15 +156,178 @@ func (c *CachingReader) QueryHTTPSamples(ctx context.Context, ref config.TargetR
 }
 
 func (c *CachingReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) ([]HopPoint, error) {
-	return c.inner.QueryLatestHops(ctx, ref, f)
+	// Latest is always live: TTL = cacheTTLLive so a fresh cycle replaces the
+	// stale entry within ~1 ping interval. fromUnix/toUnix stay zero since
+	// the call has no window.
+	key := hopsCacheKey{
+		kind:   hopsKindLatest,
+		group:  ref.Group,
+		name:   ref.Target.Name,
+		source: f.Source,
+	}
+	return c.fetchHops(ctx, key, cacheTTLLive, func(ctx context.Context) ([]HopPoint, error) {
+		return c.inner.QueryLatestHops(ctx, ref, f)
+	})
 }
 
 func (c *CachingReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f QueryFilter) ([]HopPoint, error) {
-	return c.inner.QueryHopsAt(ctx, ref, at, window, f)
+	// Quantize `at` so two clicks landing in the same minute share an entry.
+	// `window` becomes part of the key so an unusual override doesn't collide.
+	key := hopsCacheKey{
+		kind:     hopsKindAt,
+		group:    ref.Group,
+		name:     ref.Target.Name,
+		source:   f.Source,
+		fromUnix: floorUnix(at, cacheKeyToQuantum),
+		toUnix:   int64(window / time.Second),
+	}
+	return c.fetchHops(ctx, key, c.ttlFor(at), func(ctx context.Context) ([]HopPoint, error) {
+		return c.inner.QueryHopsAt(ctx, ref, at, window, f)
+	})
 }
 
 func (c *CachingReader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HopPoint, error) {
-	return c.inner.QueryHopsTimeline(ctx, ref, from, to, f)
+	// Same quantization scheme as cycles: 5m floor on from, 60s ceil on to.
+	// This lets the heatmap's 30s auto-refresh tick reuse the cached slice
+	// roughly half the time, and identical wide-window views (7d, etc.)
+	// always hit warm.
+	key := hopsCacheKey{
+		kind:     hopsKindTimeline,
+		group:    ref.Group,
+		name:     ref.Target.Name,
+		source:   f.Source,
+		fromUnix: floorUnix(from, cacheKeyFromQuantum),
+		toUnix:   ceilUnix(to, cacheKeyToQuantum),
+	}
+	return c.fetchHops(ctx, key, c.ttlFor(to), func(ctx context.Context) ([]HopPoint, error) {
+		return c.inner.QueryHopsTimeline(ctx, ref, from, to, f)
+	})
+}
+
+// fetchHops is the cache + singleflight helper shared by the three hops
+// query paths. Callers supply the cache key, the TTL the result should live
+// for on success, and a closure that runs the inner reader. Behaviour:
+//   - cache hit (within TTL): copy of cached slice, no lock contention with
+//     other keys.
+//   - in-flight call for the same key: wait on the leader's `done` channel
+//     and return a copy of its result (or its error). Avoids duplicate
+//     Influx queries when the UI rapidly remounts / changes range / ticks.
+//   - cache miss with no leader: spawn one goroutine that runs the query
+//     under a context decoupled from any single caller, store on success,
+//     signal everyone waiting on `done`. The originating caller becomes a
+//     waiter on the same channel, so the leader/waiter paths are unified.
+//
+// The decoupling is load-bearing: a 7d hops query takes 30-60s, and a
+// browser nav / range click / AbortController fire would otherwise cancel
+// the leader's ctx, kill the Influx query, and propagate ctx.Canceled to
+// every waiter — the slow path would never warm the cache. With
+// context.WithoutCancel the in-flight query keeps running on the
+// inner-Reader's own HTTP timeout (90s) and the next request lands on a
+// warm entry.
+//
+// Errors are NOT cached (matches QueryCycles): a transient Influx hiccup
+// shouldn't poison subsequent fetches.
+func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl time.Duration, run func(context.Context) ([]HopPoint, error)) ([]HopPoint, error) {
+	if hops, ok := c.hopsLookup(key); ok {
+		return hops, nil
+	}
+
+	c.hopsMu.Lock()
+	call, leader := c.hopsInflight[key], false
+	if call == nil {
+		// No leader yet — register one and become it. Spawn the actual run
+		// below after we've dropped the lock.
+		call = &hopsInflight{done: make(chan struct{})}
+		c.hopsInflight[key] = call
+		leader = true
+	}
+	c.hopsMu.Unlock()
+
+	if leader {
+		go c.runHopsLeader(ctx, key, ttl, call, run)
+	}
+
+	select {
+	case <-call.done:
+	case <-ctx.Done():
+		// This caller (leader or waiter) gave up — but the goroutine keeps
+		// running so other waiters and future requests still benefit.
+		return nil, ctx.Err()
+	}
+	if call.err != nil {
+		return nil, call.err
+	}
+	out := make([]HopPoint, len(call.points))
+	copy(out, call.points)
+	return out, nil
+}
+
+// runHopsLeader executes the inner query under a context detached from any
+// single caller (see fetchHops doc), records the result on `call`, removes
+// the in-flight slot, and signals waiters. The cache store happens BEFORE
+// close(done) so the entry is guaranteed to be warm by the time any caller
+// returns — both for correctness (a follow-up request on the same goroutine
+// hits the cache immediately) and to give the close a happens-before edge
+// over the store, which keeps tests that mutate the fake clock after the
+// leader returns race-free.
+func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl time.Duration, call *hopsInflight, run func(context.Context) ([]HopPoint, error)) {
+	runCtx := context.WithoutCancel(ctx)
+	hops, err := run(runCtx)
+
+	if err == nil {
+		c.hopsStore(key, hops, ttl)
+	}
+
+	c.hopsMu.Lock()
+	delete(c.hopsInflight, key)
+	c.hopsMu.Unlock()
+
+	call.points = hops
+	call.err = err
+	close(call.done)
+}
+
+func (c *CachingReader) hopsLookup(key hopsCacheKey) ([]HopPoint, bool) {
+	c.hopsMu.Lock()
+	defer c.hopsMu.Unlock()
+	elem, ok := c.hopsItems[key]
+	if !ok {
+		return nil, false
+	}
+	e := elem.Value.(*hopsCacheEntry)
+	if c.nowFn().After(e.expires) {
+		c.hopsOrder.Remove(elem)
+		delete(c.hopsItems, key)
+		return nil, false
+	}
+	c.hopsOrder.MoveToFront(elem)
+	out := make([]HopPoint, len(e.points))
+	copy(out, e.points)
+	return out, true
+}
+
+func (c *CachingReader) hopsStore(key hopsCacheKey, hops []HopPoint, ttl time.Duration) {
+	c.hopsMu.Lock()
+	defer c.hopsMu.Unlock()
+	expires := c.nowFn().Add(ttl)
+	if elem, ok := c.hopsItems[key]; ok {
+		e := elem.Value.(*hopsCacheEntry)
+		e.points = hops
+		e.expires = expires
+		c.hopsOrder.MoveToFront(elem)
+		return
+	}
+	e := &hopsCacheEntry{key: key, points: hops, expires: expires}
+	elem := c.hopsOrder.PushFront(e)
+	c.hopsItems[key] = elem
+	for c.hopsOrder.Len() > c.hopsMax {
+		oldest := c.hopsOrder.Back()
+		if oldest == nil {
+			break
+		}
+		c.hopsOrder.Remove(oldest)
+		delete(c.hopsItems, oldest.Value.(*hopsCacheEntry).key)
+	}
 }
 
 func (c *CachingReader) ttlFor(to time.Time) time.Duration {

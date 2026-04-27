@@ -14,6 +14,7 @@ export interface Target {
 
 export interface HopPoint {
   Time: string;
+  Source: string;
   Index: number;
   IP: string;
   Min: number;
@@ -70,8 +71,8 @@ export interface CyclesResponse {
 
 export type Resolution = "raw" | "1h" | "1d" | "auto";
 
-async function jsonGet<T>(url: string): Promise<T> {
-  const r = await fetch(url);
+async function jsonGet<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(url, { signal });
   if (!r.ok) {
     const body = await r.text();
     throw new Error(`${r.status}: ${body}`);
@@ -137,6 +138,7 @@ export function getHops(
   id: string,
   atSec?: number,
   source?: string,
+  signal?: AbortSignal,
 ): Promise<HopsResponse> {
   const params = new URLSearchParams();
   if (atSec != null) params.set("at", String(Math.floor(atSec)));
@@ -144,6 +146,7 @@ export function getHops(
   const qs = params.toString();
   return jsonGet<HopsResponse>(
     `/api/v1/targets/${id}/hops${qs ? `?${qs}` : ""}`,
+    signal,
   );
 }
 
@@ -159,11 +162,13 @@ export function getHopsTimeline(
   from: string,
   to?: string,
   source?: string,
+  signal?: AbortSignal,
 ): Promise<HopsTimelineResponse> {
   const params = new URLSearchParams({ from });
   if (to) params.set("to", to);
   if (source) params.set("source", source);
   return jsonGet<HopsTimelineResponse>(
     `/api/v1/targets/${id}/hops/timeline?${params}`,
+    signal,
   );
 }

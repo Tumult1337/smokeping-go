@@ -8,8 +8,13 @@ interface Props {
   fromSec: number;
   toSec: number;
   // Click anywhere on the heatmap → bubble up the unix timestamp so the
-  // HopsTable can swap to that cycle. Same callback as the main chart.
-  onCyclePick?: (timeSec: number) => void;
+  // HopsTable can swap to that cycle. The optional `source` arg names the
+  // probe origin whose data dominated the clicked column (the source with
+  // the worst loss at that timestamp). When set, the HopsTable filters to
+  // that source so the path detail actually reflects what the user clicked
+  // on — without it a click on a slave's lossy bucket silently returns the
+  // master's clean cycle. Same callback as the main chart, plus the source.
+  onCyclePick?: (timeSec: number, source?: string) => void;
   // Highlighted cycle column (unix seconds) — rendered as a vertical marker.
   selectedSec?: number;
   height?: number;
@@ -41,7 +46,6 @@ export function MtrHeatmap({
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
     setErr(null);
     // The backend enforces a 7d cap for timeline queries — if the user
     // selected a wider range (30d, 1y) we just don't render the heatmap.
@@ -50,34 +54,47 @@ export function MtrHeatmap({
       setHops([]);
       return;
     }
+    // AbortController cancels the in-flight fetch when the effect re-runs
+    // (target/range/source change, refresh tick). The 7d view returns
+    // multi-MB JSON; without abort, a rapid 24h→7d→24h click sequence keeps
+    // all three responses in flight and pays for parsing each one.
+    const controller = new AbortController();
     const fromISO = new Date(fromSec * 1000).toISOString();
     const toISO = new Date(toSec * 1000).toISOString();
-    getHopsTimeline(targetId, fromISO, toISO, source)
-      .then((r) => {
-        if (!cancelled) setHops(r.hops ?? []);
-      })
+    getHopsTimeline(targetId, fromISO, toISO, source, controller.signal)
+      .then((r) => setHops(r.hops ?? []))
       .catch((e) => {
-        if (!cancelled) setErr(String(e));
+        // AbortError is the controller cleaning up — not a user-visible error.
+        if (e?.name !== "AbortError") setErr(String(e));
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [targetId, refreshTick, fromSec, toSec, source]);
 
   // Group hops by index (row), and collect distinct cycle timestamps (columns).
   // When hideZeroLoss is on, `visibleHops` skips rows that never lost a packet
   // in the window; rank in this array becomes the y-position so gaps collapse.
-  const { rows, cycles, visibleHops } = useMemo(() => {
+  //
+  // Multi-source disambiguation: when more than one origin probes the same
+  // target (cluster master + slave(s)), the bucketed timeline returns one row
+  // per (hop_index, time, source). We keep the worst-loss row per cell so the
+  // heatmap surfaces real loss instead of being non-deterministic, and we
+  // remember which source "won" each column so a click can drill into that
+  // source's actual path — see worstSourceByCycle below.
+  const { rows, cycles, visibleHops, worstSourceByCycle } = useMemo(() => {
     if (!hops) {
       return {
         rows: new Map<number, Map<number, HopPoint>>(),
         cycles: [] as number[],
         visibleHops: [] as number[],
+        worstSourceByCycle: new Map<number, string>(),
       };
     }
     const byHop = new Map<number, Map<number, HopPoint>>();
     const cycleSet = new Set<number>();
     const lossyHops = new Set<number>();
+    // Per-column tracker for "which source had the worst loss at time t,
+    // across any hop". Used to forward source on click.
+    const colWorst = new Map<number, { loss: number; source: string }>();
     let max = 0;
     for (const h of hops) {
       const t = Math.floor(new Date(h.Time).getTime() / 1000);
@@ -89,15 +106,31 @@ export function MtrHeatmap({
         row = new Map();
         byHop.set(h.Index, row);
       }
-      row.set(t, h);
+      const existing = row.get(t);
+      // Worst-loss-wins, with a stable tiebreak on source so identical-loss
+      // cells don't flicker between renders when input order changes.
+      if (
+        !existing ||
+        h.LossPct > existing.LossPct ||
+        (h.LossPct === existing.LossPct && (h.Source ?? "") < (existing.Source ?? ""))
+      ) {
+        row.set(t, h);
+      }
+      const colCur = colWorst.get(t);
+      if (!colCur || h.LossPct > colCur.loss) {
+        colWorst.set(t, { loss: h.LossPct, source: h.Source ?? "" });
+      }
     }
     const all: number[] = [];
     for (let i = 1; i <= max; i++) if (byHop.has(i)) all.push(i);
     const visible = hideZeroLoss ? all.filter((i) => lossyHops.has(i)) : all;
+    const sourceMap = new Map<number, string>();
+    for (const [t, v] of colWorst) sourceMap.set(t, v.source);
     return {
       rows: byHop,
       cycles: Array.from(cycleSet).sort((a, b) => a - b),
       visibleHops: visible,
+      worstSourceByCycle: sourceMap,
     };
   }, [hops, hideZeroLoss]);
 
@@ -233,7 +266,7 @@ export function MtrHeatmap({
       onClick={(e) => {
         if (!onCyclePick) return;
         const t = pickAtX(e.clientX);
-        if (t != null) onCyclePick(t);
+        if (t != null) onCyclePick(t, worstSourceByCycle.get(t) || undefined);
       }}
     >
       <canvas ref={canvasRef} style={{ display: "block" }} />
