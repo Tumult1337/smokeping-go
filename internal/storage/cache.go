@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -34,31 +35,64 @@ const (
 	liveBoundary = 60 * time.Second
 )
 
-// CachingReader wraps a Reader with a small LRU cache for QueryCycles.
-// Other read methods pass through unchanged — they're either cheap (status,
-// hops-at, latest-hops) or hit narrow raw-only windows where caching wins
-// little. The decorator is safe for concurrent use; concurrent identical
-// misses both query the inner Reader (no singleflight) — acceptable because
-// the 30s key quantum bounds the burst.
+// CachingReader wraps a Reader with two LRU+singleflight decorators: one for
+// QueryCycles, one for the three hops query paths. QueryRTTs and
+// QueryHTTPSamples pass through unchanged because they hit narrow raw-only
+// windows where caching wins little. The decorator is safe for concurrent
+// use; concurrent identical misses share one inner-reader call via
+// singleflight (see fetchCycles / fetchHops).
 type CachingReader struct {
 	inner Reader
 	max   int
 
-	mu    sync.Mutex
-	items map[cycleCacheKey]*list.Element
-	order *list.List // front = most recently used
+	mu       sync.Mutex
+	items    map[cycleCacheKey]*list.Element
+	order    *list.List // front = most recently used
+	inflight map[cycleCacheKey]*cycleInflight
 
 	// hopsMax bounds the hops LRU separately from cycles because each hops
 	// entry (a 7d timeline) can be hundreds of KB to a few MB — much bigger
-	// than a cycles entry. Default = max; override via direct field access.
+	// than a cycles entry. Set via NewCachingReader's hopsMax parameter.
 	hopsMax      int
 	hopsMu       sync.Mutex
 	hopsItems    map[hopsCacheKey]*list.Element
 	hopsOrder    *list.List
 	hopsInflight map[hopsCacheKey]*hopsInflight
 
+	// Hit/miss counters. Updated atomically; read via Stats(). A miss is
+	// counted on any path that reaches the inner reader (cold lookup, expired
+	// entry, error from inner). A hit is counted only when the cached slice
+	// is returned without consulting the inner reader.
+	cyclesHits, cyclesMisses atomic.Int64
+	hopsHits, hopsMisses     atomic.Int64
+
 	// nowFn lets tests freeze time without monkey-patching time.Now.
 	nowFn func() time.Time
+
+	// Test hooks fired between the initial cache lookup and the inflight lock
+	// acquisition. Production code never sets these. The race tests use them
+	// to deterministically simulate a leader completing in the gap between
+	// caller A's lookup and inflight check.
+	testHookAfterCyclesLookup func()
+	testHookAfterHopsLookup   func()
+}
+
+// CacheStats is a point-in-time snapshot of the LRU's hit/miss counters.
+// Counters are monotonic since process start and never reset.
+type CacheStats struct {
+	CyclesHits, CyclesMisses int64
+	HopsHits, HopsMisses     int64
+}
+
+// Stats returns a snapshot of cache hit/miss counters. Useful for exposing
+// cache effectiveness to operators (Prometheus, status page, etc.).
+func (c *CachingReader) Stats() CacheStats {
+	return CacheStats{
+		CyclesHits:   c.cyclesHits.Load(),
+		CyclesMisses: c.cyclesMisses.Load(),
+		HopsHits:     c.hopsHits.Load(),
+		HopsMisses:   c.hopsMisses.Load(),
+	}
 }
 
 type hopsCacheKey struct {
@@ -106,22 +140,39 @@ type cycleCacheEntry struct {
 	expires time.Time
 }
 
-// NewCachingReader wraps inner. max is the LRU capacity (entries, not bytes);
-// values ≤ 0 fall back to a sane default of 256.
-func NewCachingReader(inner Reader, max int) *CachingReader {
-	if max <= 0 {
-		max = 256
+// cycleInflight is the cycles analogue of hopsInflight. Same rationale:
+// concurrent identical cold-key requests (UI mount + range click + auto-refresh
+// tick) shouldn't fan out to N inner queries.
+type cycleInflight struct {
+	done   chan struct{}
+	points []CyclePoint
+	err    error
+}
+
+// NewCachingReader wraps inner with two LRUs sized independently: cyclesMax
+// bounds cached `QueryCycles` results, hopsMax bounds cached hops queries.
+// Caps are entry counts, not bytes — and the two are kept separate because
+// a cycles entry is ~hundreds of KB while a 7d hops timeline entry can be
+// ~100MB, so a unified cap that's safe for hops would starve cycles. Values
+// ≤ 0 fall back to sane defaults (256 cycles, 16 hops).
+func NewCachingReader(inner Reader, cyclesMax, hopsMax int) *CachingReader {
+	if cyclesMax <= 0 {
+		cyclesMax = 256
+	}
+	if hopsMax <= 0 {
+		hopsMax = 16
 	}
 	return &CachingReader{
-		inner:     inner,
-		max:       max,
-		items:     make(map[cycleCacheKey]*list.Element, max),
-		order:     list.New(),
-		hopsMax:      max,
-		hopsItems:    make(map[hopsCacheKey]*list.Element, max),
+		inner:        inner,
+		max:          cyclesMax,
+		items:        make(map[cycleCacheKey]*list.Element, cyclesMax),
+		order:        list.New(),
+		inflight:     make(map[cycleCacheKey]*cycleInflight),
+		hopsMax:      hopsMax,
+		hopsItems:    make(map[hopsCacheKey]*list.Element, hopsMax),
 		hopsOrder:    list.New(),
 		hopsInflight: make(map[hopsCacheKey]*hopsInflight),
-		nowFn:     time.Now,
+		nowFn:        time.Now,
 	}
 }
 
@@ -136,15 +187,88 @@ func (c *CachingReader) QueryCycles(ctx context.Context, ref config.TargetRef, f
 	}
 
 	if pts, ok := c.lookup(key); ok {
+		c.cyclesHits.Add(1)
 		return pts, nil
 	}
 
-	pts, err := c.inner.QueryCycles(ctx, ref, from, to, res, f)
-	if err != nil {
-		return nil, err
+	return c.fetchCycles(ctx, key, c.ttlFor(to), func(ctx context.Context) ([]CyclePoint, error) {
+		return c.inner.QueryCycles(ctx, ref, from, to, res, f)
+	})
+}
+
+// fetchCycles is the cycles analogue of fetchHops: cache-or-leader-or-wait
+// with context.WithoutCancel-decoupled execution so a cancelling caller can't
+// poison concurrent waiters or discard the in-flight result. See fetchHops
+// for the full rationale.
+func (c *CachingReader) fetchCycles(ctx context.Context, key cycleCacheKey, ttl time.Duration, run func(context.Context) ([]CyclePoint, error)) ([]CyclePoint, error) {
+	if c.testHookAfterCyclesLookup != nil {
+		c.testHookAfterCyclesLookup()
 	}
-	c.store(key, pts, c.ttlFor(to))
-	return pts, nil
+
+	c.mu.Lock()
+	// Re-check the cache under the same lock that protects inflight. A leader
+	// that completed between QueryCycles' initial lookup and now stored its
+	// result and removed its inflight slot atomically (see runCyclesLeader);
+	// without this re-check we'd see no inflight slot, no cache entry from
+	// the stale earlier lookup, and become a redundant leader.
+	if elem, ok := c.items[key]; ok {
+		e := elem.Value.(*cycleCacheEntry)
+		if !c.nowFn().After(e.expires) {
+			c.order.MoveToFront(elem)
+			out := make([]CyclePoint, len(e.points))
+			copy(out, e.points)
+			c.mu.Unlock()
+			c.cyclesHits.Add(1)
+			return out, nil
+		}
+	}
+	c.cyclesMisses.Add(1)
+
+	call, leader := c.inflight[key], false
+	if call == nil {
+		call = &cycleInflight{done: make(chan struct{})}
+		c.inflight[key] = call
+		leader = true
+	}
+	c.mu.Unlock()
+
+	if leader {
+		go c.runCyclesLeader(ctx, key, ttl, call, run)
+	}
+
+	select {
+	case <-call.done:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if call.err != nil {
+		return nil, call.err
+	}
+	out := make([]CyclePoint, len(call.points))
+	copy(out, call.points)
+	return out, nil
+}
+
+// runCyclesLeader is the cycles analogue of runHopsLeader. Detaches from the
+// caller's context so a 60s+ raw-window query survives a browser navigation.
+// Stores the result and removes the inflight slot under a single lock
+// acquisition so a concurrent caller's re-check observes either both
+// (cache hit) or neither (still inflight) — never the in-between state that
+// would leak a redundant leader.
+func (c *CachingReader) runCyclesLeader(ctx context.Context, key cycleCacheKey, ttl time.Duration, call *cycleInflight, run func(context.Context) ([]CyclePoint, error)) {
+	runCtx := context.WithoutCancel(ctx)
+	pts, err := run(runCtx)
+
+	c.mu.Lock()
+	if err == nil {
+		c.storeLocked(key, pts, ttl)
+	}
+	delete(c.inflight, key)
+	c.mu.Unlock()
+
+	call.points = pts
+	call.err = err
+	close(call.done)
 }
 
 func (c *CachingReader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]RTTPoint, error) {
@@ -229,10 +353,34 @@ func (c *CachingReader) QueryHopsTimeline(ctx context.Context, ref config.Target
 // shouldn't poison subsequent fetches.
 func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl time.Duration, run func(context.Context) ([]HopPoint, error)) ([]HopPoint, error) {
 	if hops, ok := c.hopsLookup(key); ok {
+		c.hopsHits.Add(1)
 		return hops, nil
 	}
 
+	if c.testHookAfterHopsLookup != nil {
+		c.testHookAfterHopsLookup()
+	}
+
 	c.hopsMu.Lock()
+	// Re-check the cache under the same lock that protects inflight. A leader
+	// that completed between this caller's hopsLookup and now stored its
+	// result and removed its inflight slot atomically (see runHopsLeader);
+	// without this re-check we'd see no inflight slot, no entry from the
+	// stale earlier lookup, and become a redundant leader — firing the same
+	// 30-60s/100MB Influx query that just completed.
+	if elem, ok := c.hopsItems[key]; ok {
+		e := elem.Value.(*hopsCacheEntry)
+		if !c.nowFn().After(e.expires) {
+			c.hopsOrder.MoveToFront(elem)
+			out := make([]HopPoint, len(e.points))
+			copy(out, e.points)
+			c.hopsMu.Unlock()
+			c.hopsHits.Add(1)
+			return out, nil
+		}
+	}
+	c.hopsMisses.Add(1)
+
 	call, leader := c.hopsInflight[key], false
 	if call == nil {
 		// No leader yet — register one and become it. Spawn the actual run
@@ -264,21 +412,20 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 
 // runHopsLeader executes the inner query under a context detached from any
 // single caller (see fetchHops doc), records the result on `call`, removes
-// the in-flight slot, and signals waiters. The cache store happens BEFORE
-// close(done) so the entry is guaranteed to be warm by the time any caller
-// returns — both for correctness (a follow-up request on the same goroutine
-// hits the cache immediately) and to give the close a happens-before edge
-// over the store, which keeps tests that mutate the fake clock after the
-// leader returns race-free.
+// the in-flight slot, and signals waiters. The cache store + inflight delete
+// happen under one lock acquisition so a concurrent caller's re-check
+// observes either both (cache hit) or neither (still inflight) — never the
+// in-between state that would let a redundant leader sneak through. The
+// store still happens BEFORE close(done) so a follow-up request on the same
+// goroutine hits the cache immediately.
 func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl time.Duration, call *hopsInflight, run func(context.Context) ([]HopPoint, error)) {
 	runCtx := context.WithoutCancel(ctx)
 	hops, err := run(runCtx)
 
-	if err == nil {
-		c.hopsStore(key, hops, ttl)
-	}
-
 	c.hopsMu.Lock()
+	if err == nil {
+		c.hopsStoreLocked(key, hops, ttl)
+	}
 	delete(c.hopsInflight, key)
 	c.hopsMu.Unlock()
 
@@ -309,6 +456,12 @@ func (c *CachingReader) hopsLookup(key hopsCacheKey) ([]HopPoint, bool) {
 func (c *CachingReader) hopsStore(key hopsCacheKey, hops []HopPoint, ttl time.Duration) {
 	c.hopsMu.Lock()
 	defer c.hopsMu.Unlock()
+	c.hopsStoreLocked(key, hops, ttl)
+}
+
+// hopsStoreLocked assumes c.hopsMu is held by the caller. Used by
+// runHopsLeader so it can store + delete-inflight under one lock acquisition.
+func (c *CachingReader) hopsStoreLocked(key hopsCacheKey, hops []HopPoint, ttl time.Duration) {
 	expires := c.nowFn().Add(ttl)
 	if elem, ok := c.hopsItems[key]; ok {
 		e := elem.Value.(*hopsCacheEntry)
@@ -359,6 +512,12 @@ func (c *CachingReader) lookup(key cycleCacheKey) ([]CyclePoint, bool) {
 func (c *CachingReader) store(key cycleCacheKey, pts []CyclePoint, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.storeLocked(key, pts, ttl)
+}
+
+// storeLocked assumes c.mu is held by the caller. Used by runCyclesLeader so
+// it can store + delete-inflight under one lock acquisition.
+func (c *CachingReader) storeLocked(key cycleCacheKey, pts []CyclePoint, ttl time.Duration) {
 	expires := c.nowFn().Add(ttl)
 	if elem, ok := c.items[key]; ok {
 		e := elem.Value.(*cycleCacheEntry)

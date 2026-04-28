@@ -61,15 +61,20 @@ func newRef(group, name string) config.TargetRef {
 
 // slowFakeReader blocks every call on `gate` until the test releases it,
 // letting a test fan multiple goroutines into the same in-flight slot before
-// any of them complete. Only used by the singleflight test.
+// any of them complete. Used by the singleflight tests for both cycles and
+// hops. The same `calls` counter covers either path; tests use one or the
+// other, not both.
 type slowFakeReader struct {
-	gate  chan struct{}
-	calls atomic.Int64
-	hops  []HopPoint
+	gate     chan struct{}
+	calls    atomic.Int64
+	hops     []HopPoint
+	cyclePts []CyclePoint
 }
 
 func (s *slowFakeReader) QueryCycles(context.Context, config.TargetRef, time.Time, time.Time, Resolution, QueryFilter) ([]CyclePoint, error) {
-	return nil, nil
+	s.calls.Add(1)
+	<-s.gate
+	return s.cyclePts, nil
 }
 func (s *slowFakeReader) QueryRTTs(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) ([]RTTPoint, error) {
 	return nil, nil
@@ -97,7 +102,7 @@ func TestCachingReader_HitsCacheWithinTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{out: []CyclePoint{{Time: now, Median: 1.5}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -119,7 +124,7 @@ func TestCachingReader_RefetchesAfterTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{out: []CyclePoint{{Time: now, Median: 1.5}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -142,7 +147,7 @@ func TestCachingReader_HistoricalGetsLongerTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{out: []CyclePoint{{Time: now}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -170,7 +175,7 @@ func TestCachingReader_QuantizesKey(t *testing.T) {
 	now2 := time.Date(2026, 4, 27, 12, 0, 14, 0, time.UTC)
 	clock := now1
 	inner := &fakeReader{out: []CyclePoint{{Time: now1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -189,7 +194,7 @@ func TestCachingReader_QuantizesKey(t *testing.T) {
 func TestCachingReader_DifferentSourcesAreSeparate(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	inner := &fakeReader{out: []CyclePoint{{Time: now}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return now }
 
 	ref := newRef("g", "t")
@@ -209,7 +214,7 @@ func TestCachingReader_DifferentSourcesAreSeparate(t *testing.T) {
 func TestCachingReader_LRUEvicts(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	inner := &fakeReader{out: []CyclePoint{{Time: now}}}
-	c := NewCachingReader(inner, 2)
+	c := NewCachingReader(inner, 2, 2)
 	c.nowFn = func() time.Time { return now }
 
 	from := now.Add(-7 * 24 * time.Hour)
@@ -231,7 +236,7 @@ func TestCachingReader_ErrorBypassesCache(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	wantErr := errors.New("boom")
 	inner := &fakeReader{err: wantErr}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return now }
 
 	ref := newRef("g", "t")
@@ -252,7 +257,7 @@ func TestCachingReader_HopsTimeline_HitsCacheWithinTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1, IP: "1.1.1.1"}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -274,7 +279,7 @@ func TestCachingReader_HopsTimeline_RefetchesAfterTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -296,7 +301,7 @@ func TestCachingReader_HopsTimeline_HistoricalGetsLongerTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -320,7 +325,7 @@ func TestCachingReader_HopsTimeline_QuantizesKey(t *testing.T) {
 	now2 := time.Date(2026, 4, 27, 12, 0, 14, 0, time.UTC)
 	clock := now1
 	inner := &fakeReader{hops: []HopPoint{{Time: now1, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -339,7 +344,7 @@ func TestCachingReader_HopsTimeline_QuantizesKey(t *testing.T) {
 func TestCachingReader_HopsTimeline_DifferentSourcesAreSeparate(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return now }
 
 	ref := newRef("g", "t")
@@ -360,8 +365,7 @@ func TestCachingReader_HopsTimeline_LRUEvicts(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1}}}
 	// Force a very small hops cap so eviction triggers after 2 inserts.
-	c := NewCachingReader(inner, 2)
-	c.hopsMax = 2
+	c := NewCachingReader(inner, 2, 2)
 	c.nowFn = func() time.Time { return now }
 
 	from := now.Add(-7 * 24 * time.Hour)
@@ -383,7 +387,7 @@ func TestCachingReader_HopsTimeline_ErrorBypassesCache(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	wantErr := errors.New("boom")
 	inner := &fakeReader{err: wantErr}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return now }
 
 	ref := newRef("g", "t")
@@ -404,7 +408,7 @@ func TestCachingReader_HopsAt_HitsCacheWithinTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -425,7 +429,7 @@ func TestCachingReader_LatestHops_HitsCacheWithinTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -441,6 +445,39 @@ func TestCachingReader_LatestHops_HitsCacheWithinTTL(t *testing.T) {
 	}
 }
 
+func TestCachingReader_Cycles_SingleflightsConcurrentMisses(t *testing.T) {
+	// Mirror of the hops singleflight test for cycles. A React mount + range
+	// click + auto-refresh tick can fire 3 identical cold-key cycles queries
+	// at once; the singleflight should collapse them into one inner call.
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	gate := make(chan struct{})
+	inner := &slowFakeReader{gate: gate, cyclePts: []CyclePoint{{Time: now, Median: 1}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	const N = 8
+	errs := make(chan error, N)
+	for range N {
+		go func() {
+			_, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+			errs <- err
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	for range N {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := inner.calls.Load(); got != 1 {
+		t.Fatalf("inner calls: got %d want 1 (singleflight should dedupe concurrent misses)", got)
+	}
+}
+
 func TestCachingReader_HopsTimeline_SingleflightsConcurrentMisses(t *testing.T) {
 	// 8 goroutines hit the same cold key in parallel. A naive cache fires 8
 	// inner queries; with singleflight, exactly one runs and the rest wait
@@ -449,7 +486,7 @@ func TestCachingReader_HopsTimeline_SingleflightsConcurrentMisses(t *testing.T) 
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	gate := make(chan struct{})
 	inner := &slowFakeReader{gate: gate, hops: []HopPoint{{Time: now, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return now }
 
 	ref := newRef("g", "t")
@@ -488,7 +525,7 @@ func TestCachingReader_HopsTimeline_LeaderCancellationDoesNotPoisonWaiters(t *te
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	gate := make(chan struct{})
 	inner := &slowFakeReader{gate: gate, hops: []HopPoint{{Time: now, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return now }
 
 	ref := newRef("g", "t")
@@ -536,7 +573,7 @@ func TestCachingReader_LatestHops_RefetchesAfterTTL(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	clock := now
 	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1}}}
-	c := NewCachingReader(inner, 8)
+	c := NewCachingReader(inner, 8, 8)
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
@@ -549,5 +586,193 @@ func TestCachingReader_LatestHops_RefetchesAfterTTL(t *testing.T) {
 	}
 	if got := inner.latestHops.Load(); got != 2 {
 		t.Fatalf("inner calls: got %d want 2 (TTL expired)", got)
+	}
+}
+
+func TestCachingReader_IndependentCapsForCyclesAndHops(t *testing.T) {
+	// hops timeline entries can be ~100MB each at 7d resolution while cycles
+	// entries are ~hundreds of KB. The constructor accepts independent caps
+	// so the operator can keep many cycle entries cached while bounding hops
+	// memory. This test pins the contract: cyclesMax=2 evicts cycles after
+	// 3 inserts; hopsMax=8 keeps all 3 hops timelines warm.
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &fakeReader{
+		out:  []CyclePoint{{Time: now}},
+		hops: []HopPoint{{Time: now, Index: 1}},
+	}
+	c := NewCachingReader(inner, 2, 8)
+	c.nowFn = func() time.Time { return now }
+
+	from := now.Add(-7 * 24 * time.Hour)
+	for _, name := range []string{"a", "b", "c"} {
+		ref := newRef("g", name)
+		if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// cyclesMax=2: re-querying "a" must miss (evicted by "c").
+	if _, err := c.QueryCycles(context.Background(), newRef("g", "a"), from, now, Resolution1h, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.cycles.Load(); got != 4 {
+		t.Fatalf("cycles inner calls: got %d want 4 (cap=2 evicted 'a')", got)
+	}
+
+	// hopsMax=8: re-querying "a" must hit (still warm).
+	if _, err := c.QueryHopsTimeline(context.Background(), newRef("g", "a"), from, now, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.hopsTimeline.Load(); got != 3 {
+		t.Fatalf("hops inner calls: got %d want 3 (cap=8 kept 'a' warm)", got)
+	}
+}
+
+func TestCachingReader_Stats_TracksCyclesHitsAndMisses(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &fakeReader{out: []CyclePoint{{Time: now, Median: 1.5}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	// First call: miss → fills the cache.
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	// Second call within TTL: hit.
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	stats := c.Stats()
+	if stats.CyclesHits != 1 || stats.CyclesMisses != 1 {
+		t.Fatalf("cycles stats: got hits=%d misses=%d, want hits=1 misses=1", stats.CyclesHits, stats.CyclesMisses)
+	}
+}
+
+func TestCachingReader_Stats_ErrorsCountAsMissNotHit(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &fakeReader{err: errors.New("boom")}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	for range 3 {
+		_, _ = c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+	}
+	stats := c.Stats()
+	if stats.CyclesHits != 0 || stats.CyclesMisses != 3 {
+		t.Fatalf("cycles stats on error: got hits=%d misses=%d, want hits=0 misses=3", stats.CyclesHits, stats.CyclesMisses)
+	}
+}
+
+func TestCachingReader_Cycles_NoRedundantLeaderAfterRace(t *testing.T) {
+	// Race: caller A's hopsLookup misses (leader B hasn't stored yet); leader
+	// B then stores its result and removes its inflight slot; caller A reaches
+	// the inflight check and finds no slot, so without re-checking the cache
+	// it becomes a redundant leader and fires a duplicate inner query.
+	//
+	// The test simulates the race deterministically by having a hook fire
+	// between lookup and the inflight check, where the hook stores the entry
+	// (the moral equivalent of a leader having just completed). With the fix,
+	// the re-check under the inflight lock returns the entry; without it,
+	// inner.cycles increments and we'd see >0.
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &fakeReader{out: []CyclePoint{{Time: now, Median: 99}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	key := cycleCacheKey{
+		group:    "g",
+		name:     "t",
+		res:      Resolution1h,
+		fromUnix: floorUnix(from, cacheKeyFromQuantum),
+		toUnix:   ceilUnix(now, cacheKeyToQuantum),
+	}
+	c.testHookAfterCyclesLookup = func() {
+		c.testHookAfterCyclesLookup = nil
+		c.store(key, []CyclePoint{{Time: now, Median: 42}}, time.Hour)
+	}
+
+	pts, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.cycles.Load(); got != 0 {
+		t.Fatalf("inner cycles calls: got %d want 0 (re-check under inflight lock should serve from cache)", got)
+	}
+	if len(pts) != 1 || pts[0].Median != 42 {
+		t.Fatalf("expected entry stored mid-flight, got %+v", pts)
+	}
+}
+
+func TestCachingReader_Hops_NoRedundantLeaderAfterRace(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 99}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	key := hopsCacheKey{
+		kind:     hopsKindTimeline,
+		group:    "g",
+		name:     "t",
+		fromUnix: floorUnix(from, cacheKeyFromQuantum),
+		toUnix:   ceilUnix(now, cacheKeyToQuantum),
+	}
+	c.testHookAfterHopsLookup = func() {
+		c.testHookAfterHopsLookup = nil
+		c.hopsStore(key, []HopPoint{{Time: now, Index: 42}}, time.Hour)
+	}
+
+	pts, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.hopsTimeline.Load(); got != 0 {
+		t.Fatalf("inner hops calls: got %d want 0 (re-check under inflight lock should serve from cache)", got)
+	}
+	if len(pts) != 1 || pts[0].Index != 42 {
+		t.Fatalf("expected entry stored mid-flight, got %+v", pts)
+	}
+}
+
+func TestCachingReader_Stats_TracksHopsHitsAndMisses(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	if _, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1 timeline miss + 1 timeline hit + 1 latest miss + 1 latest hit = 2 hits, 2 misses.
+	stats := c.Stats()
+	if stats.HopsHits != 2 || stats.HopsMisses != 2 {
+		t.Fatalf("hops stats: got hits=%d misses=%d, want hits=2 misses=2", stats.HopsHits, stats.HopsMisses)
 	}
 }

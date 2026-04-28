@@ -51,10 +51,14 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 	case err == nil:
 		defer backend.close()
 		sinks = append(sinks, backend.sink)
-		// Wrap the reader with a small LRU cache so live UI auto-refresh and
-		// historical browsing don't re-query Influx for identical windows. The
-		// inner reader's lifetime is still managed by backend.close.
-		reader = storage.NewCachingReader(backend.reader, 256)
+		// Wrap the reader with two LRU caches so live UI auto-refresh and
+		// historical browsing don't re-query Influx for identical windows.
+		// Cycles entries are tiny (~hundreds of KB) so 256 is fine; hops
+		// timeline entries can be ~100MB at 7d, so we cap hops at 16 to
+		// keep worst-case resident memory bounded (~1.5GB upper bound vs.
+		// ~25GB if both caps were 256). Inner reader lifetime is still
+		// managed by backend.close.
+		reader = storage.NewCachingReader(backend.reader, 256, 16)
 	case errors.Is(err, storage.ErrDisabled):
 		log.Warn("storage backend disabled, running without persistent storage",
 			"backend", cfg.Storage.Backend)
