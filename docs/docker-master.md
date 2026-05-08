@@ -37,17 +37,63 @@ front before exposing the master to anything you don't trust.
 
 ## 1. Layout
 
-Create a directory on the host to hold persistent config and the
-compose file:
+Pick one of two host layouts. The rest of this guide assumes **Pattern A**;
+where it matters, Pattern B is called out inline.
+
+**Pattern A — repo lives at `/opt/smokeping/` (simplest).** Clone the
+repo straight into the deploy directory and put `docker-compose.yml`,
+`config.json`, and `.env` next to the source. The compose `build.context`
+is just `.`.
 
 ```
-/opt/smokeping/
+/opt/smokeping/                  # the repo, with extras alongside
+├── Dockerfile                   # from the repo
+├── cmd/ internal/ ui/ ...       # from the repo
+├── docker-compose.yml           # you create
+├── config.json                  # you create (from config.example.json)
+└── .env                         # you create (from .env.example)
+```
+
+```bash
+sudo git clone https://github.com/<owner>/gosmokeping /opt/smokeping
+cd /opt/smokeping
+```
+
+**Pattern B — runtime dir separate from the source checkout.** Use this
+if you want to keep the deploy directory minimal and the repo elsewhere
+(e.g. `/srv/src/gosmokeping`). The compose file's `build.context` then
+needs to point at the repo by absolute path:
+
+```
+/opt/smokeping/                  # runtime only
 ├── docker-compose.yml
 ├── config.json
 └── .env
+
+/srv/src/gosmokeping/            # the repo, anywhere you like
+└── Dockerfile, cmd/, ...
+```
+
+```yaml
+    build:
+      context: /srv/src/gosmokeping
+      dockerfile: Dockerfile
 ```
 
 Everything below is run from `/opt/smokeping/`.
+
+> **Skip the build entirely.** The repo's GitHub Actions workflow
+> (`.github/workflows/build.yml`) builds and pushes a multi-tagged image
+> to `ghcr.io/<owner>/gosmokeping` on every push to `main` and on tagged
+> releases (`latest`, `main`, `<tag>`, `sha-<short>`). To use it, delete
+> the `build:` block in section 4 and replace it with:
+>
+> ```yaml
+>     image: ghcr.io/<owner>/gosmokeping:latest
+> ```
+>
+> No local `Dockerfile` or repo checkout needed in that case — only the
+> compose file, `config.json`, and `.env`.
 
 ---
 
@@ -196,8 +242,11 @@ services:
       retries: 12
 
   gosmokeping:
+    # Pattern A (repo at /opt/smokeping): context: .
+    # Pattern B (repo elsewhere):         context: /absolute/path/to/repo
+    # Or skip building and use:           image: ghcr.io/<owner>/gosmokeping:latest
     build:
-      context: ../..   # path back to the repo root from /opt/smokeping
+      context: .
       dockerfile: Dockerfile
     image: gosmokeping:latest
     restart: unless-stopped
@@ -220,9 +269,16 @@ volumes:
   influxdb-config:
 ```
 
-If you'd rather pin a pre-built image instead of `build:`, replace the
-`build:` block with `image: your-registry/gosmokeping:tag` after pushing
-the image you built from this repo.
+If you'd rather pin the prebuilt image published by this repo's CI,
+replace the entire `build:` block with:
+
+```yaml
+    image: ghcr.io/<owner>/gosmokeping:latest
+```
+
+…and `docker compose pull` instead of `docker compose build`. The
+`build.yml` workflow tags every `main` push as `latest` plus `sha-…`,
+and every `vX.Y.Z` git tag as that tag.
 
 ---
 
@@ -230,7 +286,8 @@ the image you built from this repo.
 
 ```bash
 cd /opt/smokeping
-docker compose build         # one-time: builds the gosmokeping image
+docker compose build         # building locally; skip if using ghcr.io/...
+# docker compose pull        # use this instead if you swapped build: → image: ghcr.io/...
 docker compose up -d
 docker compose logs -f gosmokeping
 ```
