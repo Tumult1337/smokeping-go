@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=gosmokeping
 Group=gosmokeping
-ExecStart=/usr/local/bin/gosmokeping -config /etc/gosmokeping/config.json
+ExecStart=/opt/smokeping/gosmokeping -config /opt/smokeping/config.json
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
@@ -31,7 +31,7 @@ RestrictNamespaces=true
 RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/var/lib/gosmokeping
+ReadWritePaths=/opt/smokeping/state
 
 [Install]
 WantedBy=multi-user.target

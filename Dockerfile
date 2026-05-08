@@ -19,9 +19,9 @@ FROM alpine:3.20
 RUN apk add --no-cache libcap ca-certificates tzdata \
     && addgroup -S gosmokeping \
     && adduser -S -G gosmokeping gosmokeping
-COPY --from=build /out/gosmokeping /usr/local/bin/gosmokeping
-RUN setcap cap_net_raw+ep /usr/local/bin/gosmokeping
+COPY --from=build /out/gosmokeping /opt/smokeping/gosmokeping
+RUN setcap cap_net_raw+ep /opt/smokeping/gosmokeping
 USER gosmokeping
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/gosmokeping"]
-CMD ["-config", "/etc/gosmokeping/config.json"]
+ENTRYPOINT ["/opt/smokeping/gosmokeping"]
+CMD ["-config", "/opt/smokeping/config.json"]

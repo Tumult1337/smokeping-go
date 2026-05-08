@@ -8,10 +8,11 @@
 #
 set -euo pipefail
 
+PREFIX="${PREFIX:-/opt/smokeping}"
 BIN_SRC="${BIN_SRC:-./gosmokeping}"
-BIN_DST="${BIN_DST:-/usr/local/bin/gosmokeping}"
-CONFIG_DIR="${CONFIG_DIR:-/etc/gosmokeping}"
-STATE_DIR="${STATE_DIR:-/var/lib/gosmokeping}"
+BIN_DST="${BIN_DST:-$PREFIX/gosmokeping}"
+CONFIG_DIR="${CONFIG_DIR:-$PREFIX}"
+STATE_DIR="${STATE_DIR:-$PREFIX/state}"
 UNIT_SRC="${UNIT_SRC:-./deploy/gosmokeping.service}"
 UNIT_DST="${UNIT_DST:-/etc/systemd/system/gosmokeping.service}"
 SVC_USER="${SVC_USER:-gosmokeping}"
@@ -49,7 +50,7 @@ if ! id -u "$SVC_USER" >/dev/null 2>&1; then
 fi
 
 echo "==> creating directories"
-install -d -m 0755                                "$CONFIG_DIR"
+install -d -m 0755 -o root       -g "$SVC_GROUP" "$PREFIX"
 install -d -m 0750 -o "$SVC_USER" -g "$SVC_GROUP" "$STATE_DIR"
 
 echo "==> installing binary to $BIN_DST"

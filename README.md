@@ -169,8 +169,9 @@ when running in master/slave mode.
 
 - **systemd:** run `sudo ./deploy/install.sh` after `make build`. The
   script creates a `gosmokeping` system user, installs the binary to
-  `/usr/local/bin`, the unit to `/etc/systemd/system`, and stages
-  `/etc/gosmokeping/` for your config + `.env`. The unit
+  `/opt/smokeping/gosmokeping`, the unit to `/etc/systemd/system`, and
+  stages `/opt/smokeping/` for your config + `.env` plus
+  `/opt/smokeping/state/` for runtime state. The unit
   ([`deploy/gosmokeping.service`](deploy/gosmokeping.service)) grants
   `CAP_NET_RAW` via systemd so you don't need `setcap`. Re-run the
   script to update the binary or unit — it's idempotent.
@@ -179,8 +180,8 @@ when running in master/slave mode.
 
   ```bash
   docker run -d --name gosmokeping -p 8080:8080 \
-    -v $(pwd)/config.json:/etc/gosmokeping/config.json:ro \
-    -v $(pwd)/.env:/etc/gosmokeping/.env:ro \
+    -v $(pwd)/config.json:/opt/smokeping/config.json:ro \
+    -v $(pwd)/.env:/opt/smokeping/.env:ro \
     gosmokeping
   ```
 - **Reverse proxy:** terminate TLS and authenticate at the proxy

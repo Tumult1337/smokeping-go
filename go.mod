@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	github.com/InfluxCommunity/influxdb3-go/v2 v2.14.0
+	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
@@ -12,7 +13,6 @@ require (
 )
 
 require (
-	github.com/apache/arrow-go/v18 v18.5.2 // indirect
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
