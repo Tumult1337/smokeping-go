@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
@@ -11,7 +10,6 @@ import (
 	"github.com/tumult/gosmokeping/internal/storage"
 	"github.com/tumult/gosmokeping/internal/storage/influxv2"
 	"github.com/tumult/gosmokeping/internal/storage/influxv3"
-	"github.com/tumult/gosmokeping/internal/storage/prom"
 )
 
 // storageBackend is the composition-root view of a persistence implementation:
@@ -28,9 +26,7 @@ type storageBackend struct {
 
 // openStorage builds the backend selected by cfg.Backend. Returns
 // storage.ErrDisabled when the selected backend has no credentials — the
-// caller logs a warning and runs without persistent storage. Returns
-// storage.ErrBackendNotImplemented when the backend is recognised but its
-// implementation is still a stub (influxv3, prometheus).
+// caller logs a warning and runs without persistent storage.
 func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage) (*storageBackend, error) {
 	switch cfg.Backend {
 	case "":
@@ -54,21 +50,30 @@ func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage) (*st
 			},
 		}, nil
 	case config.BackendInfluxV3:
-		if _, err := influxv3.Open(ctx, log, cfg.InfluxV3); err != nil {
-			if errors.Is(err, influxv3.ErrBackendNotImplemented) {
-				return nil, storage.ErrBackendNotImplemented
-			}
-			return nil, err
+		if cfg.InfluxV3.URL == "" || cfg.InfluxV3.Token == "" {
+			return nil, storage.ErrDisabled
 		}
-		return nil, storage.ErrBackendNotImplemented
-	case config.BackendPrometheus:
-		if _, err := prom.Open(ctx, log, cfg.Prometheus); err != nil {
-			if errors.Is(err, prom.ErrBackendNotImplemented) {
-				return nil, storage.ErrBackendNotImplemented
-			}
-			return nil, err
+		if err := influxv3.Bootstrap(ctx, log, cfg.InfluxV3); err != nil {
+			return nil, fmt.Errorf("bootstrap influxv3: %w", err)
 		}
-		return nil, storage.ErrBackendNotImplemented
+		w, err := influxv3.NewWriter(log, cfg.InfluxV3)
+		if err != nil {
+			return nil, fmt.Errorf("influxv3 writer: %w", err)
+		}
+		r, err := influxv3.NewReader(cfg.InfluxV3)
+		if err != nil {
+			w.Close()
+			return nil, fmt.Errorf("influxv3 reader: %w", err)
+		}
+		return &storageBackend{
+			sink:   w,
+			reader: r,
+			close: func() error {
+				w.Close()
+				r.Close()
+				return nil
+			},
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown storage backend %q", cfg.Backend)
 	}

@@ -16,11 +16,6 @@
       "url": "",
       "token": "",
       "database": ""
-    },
-    "prometheus": {
-      "remote_write_url": "",
-      "query_url": "",
-      "bearer_token": ""
     }
   },
   "probes": {

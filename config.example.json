@@ -13,8 +13,7 @@
       "bucket_1h": "smokeping_1h",
       "bucket_1d": "smokeping_1d"
     },
-    "influxv3":   { "url": "", "token": "", "database": "" },
-    "prometheus": { "remote_write_url": "", "query_url": "", "bearer_token": "" }
+    "influxv3": { "url": "", "token": "", "database": "", "retention_period": "" }
   },
 
   "probes": {

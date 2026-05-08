@@ -1,9 +1,9 @@
 // Package storage defines the data types and read surface that the API
 // and scheduler consume, independent of which concrete backend persists
-// results. Backends live in subpackages (influxv2, influxv3, prom) and
-// implement storage.Reader + scheduler.Sink; the Backend interface and
-// factory live at the composition root so this package stays a pure leaf
-// and can be imported by any backend without a cycle.
+// results. Backends live in subpackages (influxv2, influxv3) and implement
+// storage.Reader + scheduler.Sink; the Backend interface and factory live
+// at the composition root so this package stays a pure leaf and can be
+// imported by any backend without a cycle.
 package storage
 
 import (
@@ -162,11 +162,6 @@ type HopPoint struct {
 	LossCount int64
 	Sent      int64
 }
-
-// ErrBackendNotImplemented is returned by Open when the configured backend
-// name is recognised but no working implementation is compiled in (stubs
-// for influxv3/prometheus return this until they're built out).
-var ErrBackendNotImplemented = errors.New("storage: backend not yet implemented")
 
 // ErrDisabled is returned by Open when the config selects a backend but
 // leaves its credentials empty — the caller treats it as "run without

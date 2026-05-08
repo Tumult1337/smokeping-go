@@ -35,19 +35,17 @@ type Config struct {
 type BackendName string
 
 const (
-	BackendInfluxV2   BackendName = "influxv2"
-	BackendInfluxV3   BackendName = "influxv3"
-	BackendPrometheus BackendName = "prometheus"
+	BackendInfluxV2 BackendName = "influxv2"
+	BackendInfluxV3 BackendName = "influxv3"
 )
 
 // Storage holds the backend selection plus each backend's per-impl
 // configuration. Only the block referenced by Backend is consulted; the
-// others may be omitted.
+// other may be omitted.
 type Storage struct {
-	Backend    BackendName `json:"backend"`
-	InfluxV2   InfluxV2    `json:"influxv2"`
-	InfluxV3   InfluxV3    `json:"influxv3"`
-	Prometheus Prometheus  `json:"prometheus"`
+	Backend  BackendName `json:"backend"`
+	InfluxV2 InfluxV2    `json:"influxv2"`
+	InfluxV3 InfluxV3    `json:"influxv3"`
 }
 
 // InfluxV2 configures the InfluxDB v2 backend. BucketRaw is required;
@@ -62,20 +60,19 @@ type InfluxV2 struct {
 }
 
 // InfluxV3 configures the InfluxDB v3 backend. v3 uses databases instead
-// of buckets and the gRPC/flight SQL protocol; currently unimplemented.
+// of buckets and the gRPC/Flight SQL protocol for queries; downsampling
+// happens at query time via SQL date_bin() rather than pre-baked rollup
+// tasks, so a single database holds raw cycles and the reader translates
+// the requested Resolution into a bucket width.
 type InfluxV3 struct {
 	URL      string `json:"url"`
 	Token    string `json:"token"`
 	Database string `json:"database"`
-}
-
-// Prometheus configures a remote-write endpoint. Reads would go through
-// PromQL on the same host (or a federated Thanos/Mimir). Currently
-// unimplemented.
-type Prometheus struct {
-	RemoteWriteURL string `json:"remote_write_url"`
-	QueryURL       string `json:"query_url"`
-	BearerToken    string `json:"bearer_token"`
+	// RetentionPeriod is forwarded to the database create call on bootstrap
+	// (e.g. "30d", "1y"). Empty = infinite. v3 Core can only set retention
+	// at create time — changing it later requires creating a fresh database
+	// and migrating data, so operators picking this should pick generously.
+	RetentionPeriod string `json:"retention_period,omitempty"`
 }
 
 // Validate checks the Storage block is internally consistent. Empty
@@ -89,7 +86,7 @@ func (s *Storage) Validate() error {
 		// Unset backend is only valid when no credentials were supplied
 		// for any backend — otherwise the operator clearly intended to
 		// use one and we want to refuse to guess which.
-		if s.InfluxV2.URL != "" || s.InfluxV3.URL != "" || s.Prometheus.RemoteWriteURL != "" {
+		if s.InfluxV2.URL != "" || s.InfluxV3.URL != "" {
 			return fmt.Errorf("storage.backend must be set when any backend credentials are configured")
 		}
 		return nil
@@ -101,9 +98,16 @@ func (s *Storage) Validate() error {
 			return fmt.Errorf("storage.influxv2.bucket_raw is required")
 		}
 		return nil
-	case BackendInfluxV3, BackendPrometheus:
-		// Stubs — the factory will surface ErrBackendNotImplemented at
-		// open time with a clearer message than Validate can here.
+	case BackendInfluxV3:
+		if s.InfluxV3.URL == "" {
+			return fmt.Errorf("storage.influxv3.url is required")
+		}
+		if s.InfluxV3.Token == "" {
+			return fmt.Errorf("storage.influxv3.token is required")
+		}
+		if s.InfluxV3.Database == "" {
+			return fmt.Errorf("storage.influxv3.database is required")
+		}
 		return nil
 	default:
 		return fmt.Errorf("storage.backend %q is not recognised", s.Backend)

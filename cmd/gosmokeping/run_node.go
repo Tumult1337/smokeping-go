@@ -62,10 +62,6 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 	case errors.Is(err, storage.ErrDisabled):
 		log.Warn("storage backend disabled, running without persistent storage",
 			"backend", cfg.Storage.Backend)
-	case errors.Is(err, storage.ErrBackendNotImplemented):
-		log.Error("configured storage backend is not implemented",
-			"backend", cfg.Storage.Backend)
-		os.Exit(1)
 	default:
 		log.Error("open storage", "backend", cfg.Storage.Backend, "err", err)
 		os.Exit(1)

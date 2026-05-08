@@ -85,7 +85,7 @@ type CacheStats struct {
 }
 
 // Stats returns a snapshot of cache hit/miss counters. Useful for exposing
-// cache effectiveness to operators (Prometheus, status page, etc.).
+// cache effectiveness to operators (status page, metrics scrape, etc.).
 func (c *CachingReader) Stats() CacheStats {
 	return CacheStats{
 		CyclesHits:   c.cyclesHits.Load(),

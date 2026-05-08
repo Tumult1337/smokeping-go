@@ -56,12 +56,21 @@ Key points a reader can't derive from a single file:
   immediately without pointer-update races. When adding a consumer, do
   **not** cache the `*Config`.
 
-- **Storage tiering:** three InfluxDB buckets (`smokeping_raw`, `smokeping_1h`,
-  `smokeping_1d`) populated by Flux tasks that `storage.Bootstrap` installs on
-  startup. The Writer only writes the raw bucket; rollups are InfluxDB's job.
-  `storage.PickResolution` maps a requested time span to a bucket so the UI
-  can query cheaply at wide zoom levels. Per-ping samples (`probe_rtt`
-  measurement) only live in the raw bucket — rollups keep aggregates only.
+- **Storage tiering (v2 vs v3):** the `Resolution` abstraction is shared
+  but the two backends realise it differently:
+  - **influxv2** (default): three buckets (`smokeping_raw`, `smokeping_1h`,
+    `smokeping_1d`) populated by Flux tasks that `influxv2.Bootstrap`
+    installs at startup. The Writer only writes the raw bucket; rollups
+    are InfluxDB's job. Per-ping samples (`probe_rtt` measurement) only
+    live in the raw bucket.
+  - **influxv3**: a single database. `influxv3.Reader` translates the
+    requested `Resolution` into a SQL `date_bin()` width at query time —
+    v3 has no Flux task equivalent and its columnar Parquet storage
+    makes wide aggregations cheap, so query-time bucketing is the right
+    trade. Pre-baked rollups via the Processing Engine downsampler plugin
+    are an operator-side option (not shipped from Go).
+  Either way `storage.PickResolution` is the single decision point — only
+  the realisation downstream changes.
 
 - **UI embed:** `internal/ui/ui.go` uses `//go:embed all:dist` against
   `internal/ui/dist/`. That directory must exist at build time, so the
@@ -161,6 +170,23 @@ raw bytes before JSON parse (`${NAME}` form), so tokens can live in env vars.
 `main.go` loads `.env` from `filepath.Dir(--config)` first, then from cwd —
 this is load-bearing under systemd where cwd is `/`. Real shell env always
 wins over `.env` (godotenv default); a missing `.env` is a silent no-op.
+
+`storage.backend` selects the persistence layer: `"influxv2"` (default;
+three-bucket rollup tasks, Flux queries) or `"influxv3"` (single database,
+SQL/Flight queries, query-time `date_bin` aggregation). The UI and alert
+evaluator are backend-agnostic — they only see `storage.Reader` and
+`scheduler.Sink`. Pick v3 when slave fan-out is producing more write load
+than v2's TSM ingestion can keep up with; v2 is the right default for
+single-node and small-cluster deployments.
+
+The v3 backend's bootstrap creates the configured database via
+`POST /api/v3/configure/database` if missing, which **requires a token
+with admin scope**. A write-only token will fail bootstrap with a 401/403;
+either grant admin to the configured token or pre-create the database
+externally (e.g. via `influxdb3 create database`). The v3 writer wraps
+the official `influxdb3/batching.Batcher` with a 1s ticker so writes
+flush either at 1000 points or every second — sync per-cycle writes
+would defeat the point of picking v3 for write throughput.
 
 ## Integration tests
 
