@@ -50,6 +50,9 @@ func TestBucketForResolution(t *testing.T) {
 	if got := bucketForResolution(storage.ResolutionRaw); got != 0 {
 		t.Errorf("raw bucket = %v, want 0", got)
 	}
+	if got := bucketForResolution(storage.Resolution5m); got != 5*time.Minute {
+		t.Errorf("5m bucket = %v, want 5m", got)
+	}
 	if got := bucketForResolution(storage.Resolution1h); got != time.Hour {
 		t.Errorf("1h bucket = %v, want 1h", got)
 	}

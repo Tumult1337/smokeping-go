@@ -19,3 +19,15 @@ export function paletteForSorted(sortedSources: string[]): Map<string, { stroke:
   });
   return out;
 }
+
+// lossColor maps a per-cycle loss percentage to a status colour. The three
+// thresholds (5 / 20%) match the bar chart's median-tick coloring so band
+// mode and bars mode tell the same story for the same data. okColor lets the
+// caller fall back to a source-specific stroke at zero loss; that way a
+// per-source colored line/tick stays uniform when there's nothing to flag.
+export function lossColor(pct: number, okColor: string): string {
+  if (pct <= 0) return okColor;
+  if (pct < 5) return "#eab308";
+  if (pct < 20) return "#f97316";
+  return "#ef4444";
+}

@@ -16,9 +16,12 @@ import (
 	"github.com/tumult/gosmokeping/internal/stats"
 )
 
-// Retention periods for the three tiers (seconds).
+// Retention periods for the four tiers (seconds). The 5m tier matches raw
+// at 7d because it only serves ≤24h chart queries; longer spans hop to
+// the 1h tier whose 180d window is the actual archive horizon.
 const (
 	retRaw = int64(7 * 24 * 3600)       // 7d
+	ret5m  = int64(7 * 24 * 3600)       // 7d
 	ret1h  = int64(180 * 24 * 3600)     // 180d
 	ret1d  = int64(2 * 365 * 24 * 3600) // 2y
 )
@@ -49,6 +52,12 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV2) error
 		retention int64
 	}{
 		{cfg.BucketRaw, retRaw},
+	}
+	if cfg.Bucket5m != "" {
+		buckets = append(buckets, struct {
+			name      string
+			retention int64
+		}{cfg.Bucket5m, ret5m})
 	}
 	if cfg.Bucket1h != "" {
 		buckets = append(buckets, struct {
@@ -90,6 +99,11 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV2) error
 		return err
 	}
 
+	if cfg.Bucket5m != "" {
+		if err := ensureTask(ctx, log, client, orgID, "gosmokeping-5m-v1", fluxRollup(cfg.BucketRaw, cfg.Bucket5m, 5*time.Minute), "5m"); err != nil {
+			return err
+		}
+	}
 	if cfg.Bucket1h != "" {
 		if err := ensureTask(ctx, log, client, orgID, "gosmokeping-1h-v4", fluxRollup(cfg.BucketRaw, cfg.Bucket1h, time.Hour), "1h"); err != nil {
 			return err
@@ -204,6 +218,9 @@ func formatEvery(d time.Duration) string {
 	}
 	if d >= time.Hour && d%time.Hour == 0 {
 		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
 	}
 	return fmt.Sprintf("%ds", int(d/time.Second))
 }

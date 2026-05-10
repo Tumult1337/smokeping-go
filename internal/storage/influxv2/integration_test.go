@@ -32,6 +32,7 @@ func testConfig(t *testing.T) config.InfluxV2 {
 		Token:     token,
 		Org:       org,
 		BucketRaw: "gosmokeping_test_raw",
+		Bucket5m:  "gosmokeping_test_5m",
 		Bucket1h:  "gosmokeping_test_1h",
 		Bucket1d:  "gosmokeping_test_1d",
 	}

@@ -386,6 +386,8 @@ func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, fr
 // raw tier returns 0 to signal "no bucketing — return per-cycle rows".
 func bucketForResolution(res storage.Resolution) time.Duration {
 	switch res {
+	case storage.Resolution5m:
+		return 5 * time.Minute
 	case storage.Resolution1h:
 		return time.Hour
 	case storage.Resolution1d:

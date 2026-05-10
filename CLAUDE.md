@@ -58,11 +58,12 @@ Key points a reader can't derive from a single file:
 
 - **Storage tiering (v2 vs v3):** the `Resolution` abstraction is shared
   but the two backends realise it differently:
-  - **influxv2** (default): three buckets (`smokeping_raw`, `smokeping_1h`,
-    `smokeping_1d`) populated by Flux tasks that `influxv2.Bootstrap`
-    installs at startup. The Writer only writes the raw bucket; rollups
-    are InfluxDB's job. Per-ping samples (`probe_rtt` measurement) only
-    live in the raw bucket.
+  - **influxv2** (default): four buckets (`smokeping_raw`, `smokeping_5m`,
+    `smokeping_1h`, `smokeping_1d`) populated by Flux tasks that
+    `influxv2.Bootstrap` installs at startup. The Writer only writes the
+    raw bucket; rollups are InfluxDB's job. Per-ping samples
+    (`probe_rtt` measurement) and MTR hops (`probe_hop`) only live in
+    the raw bucket — rollups cover `probe_cycle` only.
   - **influxv3**: a single database. `influxv3.Reader` translates the
     requested `Resolution` into a SQL `date_bin()` width at query time —
     v3 has no Flux task equivalent and its columnar Parquet storage
@@ -70,7 +71,11 @@ Key points a reader can't derive from a single file:
     trade. Pre-baked rollups via the Processing Engine downsampler plugin
     are an operator-side option (not shipped from Go).
   Either way `storage.PickResolution` is the single decision point — only
-  the realisation downstream changes.
+  the realisation downstream changes. Tier breakpoints are picked so each
+  range button keeps its point count near the chart canvas width (~666
+  px): ≤6h → raw, ≤24h → 5m, ≤180d → 1h, >180d → 1d. The 5m tier is
+  optional in `InfluxV2.Bucket5m`; when unset the v2 reader's
+  `fallbackChain` walks down to raw automatically (slower, but correct).
 
 - **UI embed:** `internal/ui/ui.go` uses `//go:embed all:dist` against
   `internal/ui/dist/`. That directory must exist at build time, so the

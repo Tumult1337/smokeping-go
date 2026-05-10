@@ -50,6 +50,7 @@ func Convert(r io.Reader, baseDir, path string) (*config.Config, []Note, error) 
 				Token:     "${INFLUX_TOKEN}",
 				Org:       "${INFLUX_ORG}",
 				BucketRaw: "smokeping_raw",
+				Bucket5m:  "smokeping_5m",
 				Bucket1h:  "smokeping_1h",
 				Bucket1d:  "smokeping_1d",
 			},

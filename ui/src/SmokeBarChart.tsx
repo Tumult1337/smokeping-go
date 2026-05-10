@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
-import { PALETTE } from "./palette";
+import { PALETTE, lossColor } from "./palette";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
@@ -67,7 +67,11 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   const hiddenRef = useRef<Set<string>>(new Set());
 
   const built = useMemo(() => buildSources(points), [points]);
-  const sourcesKey = built.sources.join("|");
+  // Prefix with count so the zero-source initial state ("0|") doesn't collide
+  // with a single-source-named-"" steady state ("1|"). Without the prefix both
+  // join to "" and the rebuild effect skips when a target whose Source field
+  // is empty replaces empty initial data — uPlot stays at 1 series.
+  const sourcesKey = `${built.sources.length}|${built.sources.join("|")}`;
 
   // Cursor idx drives the custom legend below the chart. See SmokeChart for
   // the same pattern — we disable uPlot's built-in legend and render one row
@@ -269,6 +273,16 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
         internalScaleRef.current = false;
       }
       u.setData(built.data, false);
+      // Force y to track the freshly-built range. uPlot only re-invokes the
+      // `range: () => yRangeRef.current` callback when pendScales[y] gets set
+      // to AUTOSCALE, which requires either sc.min==null (init only) or
+      // sc.auto returning true. With auto:false, neither fires after the
+      // first setScales, so without this explicit setScale the y axis stays
+      // frozen at whatever yRangeRef was when uPlot was constructed —
+      // [0, 1] when the first mount happened with empty data.
+      if (!empty) {
+        u.setScale("y", { min: yRangeRef.current[0], max: yRangeRef.current[1] });
+      }
     });
     if (!empty) {
       // setData already triggers a redraw, but hooks.draw closes over refs we
@@ -558,9 +572,3 @@ function drawStack(
   }
 }
 
-function lossColor(pct: number, okColor: string): string {
-  if (pct <= 0) return okColor;
-  if (pct < 5) return "#eab308";
-  if (pct < 20) return "#f97316";
-  return "#ef4444";
-}

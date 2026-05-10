@@ -522,6 +522,8 @@ func pickResolution(override string, from, to time.Time) storage.Resolution {
 	switch override {
 	case "raw":
 		return storage.ResolutionRaw
+	case "5m":
+		return storage.Resolution5m
 	case "1h":
 		return storage.Resolution1h
 	case "1d":

@@ -64,6 +64,11 @@ func (r *Reader) bucketFor(res storage.Resolution) (string, error) {
 	switch res {
 	case storage.ResolutionRaw:
 		return r.cfg.BucketRaw, nil
+	case storage.Resolution5m:
+		if r.cfg.Bucket5m == "" {
+			return r.cfg.BucketRaw, nil
+		}
+		return r.cfg.Bucket5m, nil
 	case storage.Resolution1h:
 		if r.cfg.Bucket1h == "" {
 			return r.cfg.BucketRaw, nil
@@ -108,9 +113,11 @@ func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to
 func fallbackChain(res storage.Resolution) []storage.Resolution {
 	switch res {
 	case storage.Resolution1d:
-		return []storage.Resolution{storage.Resolution1d, storage.Resolution1h, storage.ResolutionRaw}
+		return []storage.Resolution{storage.Resolution1d, storage.Resolution1h, storage.Resolution5m, storage.ResolutionRaw}
 	case storage.Resolution1h:
-		return []storage.Resolution{storage.Resolution1h, storage.ResolutionRaw}
+		return []storage.Resolution{storage.Resolution1h, storage.Resolution5m, storage.ResolutionRaw}
+	case storage.Resolution5m:
+		return []storage.Resolution{storage.Resolution5m, storage.ResolutionRaw}
 	default:
 		return []storage.Resolution{storage.ResolutionRaw}
 	}

@@ -40,23 +40,29 @@ type Resolution string
 
 const (
 	ResolutionRaw Resolution = "raw"
+	Resolution5m  Resolution = "5m"
 	Resolution1h  Resolution = "1h"
 	Resolution1d  Resolution = "1d"
 )
 
-// PickResolution chooses a tier by requested span. Raw is reserved for
-// day-or-narrower windows so weekly+ views render cheaply from the 1h
-// rollup; the chart trades sub-hour fidelity for far fewer points (and
-// hence faster Influx queries and smoother hover). Operators can still
-// force raw via the `?resolution=raw` API override. The `?resolution=raw`
-// override and the queryCyclesFrom fallback chain together protect fresh
-// installs where the 1h task hasn't ticked yet — an empty rollup tier
-// transparently falls back to raw.
+// PickResolution chooses a tier by requested span. Tiers are picked so the
+// per-tier point count tracks what the chart canvas can actually render
+// (~666 px wide); raw stays the default for narrow windows where per-cycle
+// detail is meaningful, the 5m tier covers the 24h overview, and the 1h /
+// 1d tiers handle multi-day spans. Operators can still force raw via
+// `?resolution=raw`, and the queryCyclesFrom fallback chain protects fresh
+// installs where a rollup task hasn't ticked yet — an empty tier
+// transparently falls back to a finer one. Loss is preserved across tiers
+// (the rollup sums loss_count + pings_sent, so the 5m bucket of a
+// 100%-loss cycle reads as ~8% loss, still visible in the median tick
+// color).
 func PickResolution(from, to time.Time) Resolution {
 	span := to.Sub(from)
 	switch {
-	case span <= 24*time.Hour:
+	case span <= 6*time.Hour:
 		return ResolutionRaw
+	case span <= 24*time.Hour:
+		return Resolution5m
 	case span <= 180*24*time.Hour:
 		return Resolution1h
 	default:

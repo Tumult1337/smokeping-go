@@ -9,6 +9,7 @@
       "token": "${INFLUX_TOKEN}",
       "org": "${INFLUX_ORG}",
       "bucket_raw": "smokeping_raw",
+      "bucket_5m": "smokeping_5m",
       "bucket_1h": "smokeping_1h",
       "bucket_1d": "smokeping_1d"
     },

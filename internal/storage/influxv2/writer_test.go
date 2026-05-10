@@ -11,7 +11,9 @@ func TestFormatEvery(t *testing.T) {
 		6 * time.Hour:    "6h",
 		24 * time.Hour:   "1d",
 		48 * time.Hour:   "2d",
-		30 * time.Minute: "1800s",
+		5 * time.Minute:  "5m",
+		30 * time.Minute: "30m",
+		45 * time.Second: "45s",
 	}
 	for d, want := range cases {
 		if got := formatEvery(d); got != want {

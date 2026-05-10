@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series, type Band } from "uplot";
 import type { CyclePoint } from "./api";
-import { PALETTE } from "./palette";
+import { PALETTE, lossColor } from "./palette";
+
+// Height (px) of the per-source loss strip drawn at the bottom of the plot.
+// One row per source, stacked from the bottom up. Only painted for cycles
+// where loss > 0 so a clean target leaves the strip area transparent and the
+// smoke fills the full plot height as before.
+const LOSS_STRIP_H = 6;
 
 interface Props {
   points: CyclePoint[];
@@ -34,6 +40,12 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   const requestedWindowRef = useRef<{ from?: number; to?: number }>({});
   requestedWindowRef.current = { from: fromSec, to: toSec };
 
+  // Loss strip state read by the draw hook. The hook is registered at uPlot
+  // construction and closes over these refs, so subsequent data refreshes
+  // can update what gets painted without rebuilding the chart.
+  const lossSeriesRef = useRef<LossSeries[]>([]);
+  const anyLossRef = useRef(false);
+
   const built = useMemo(() => buildAligned(points), [points]);
   // Stable signature of the source set. Only when this changes do we have to
   // tear down uPlot — series/bands topology depends on the source count, but
@@ -59,7 +71,16 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       height,
       scales: {
         x: { time: true },
-        y: { auto: true },
+        // Pad the y-axis asymmetrically: 25% below data_min, 10% above
+        // data_max. The extra bottom padding pushes the smoke band up so
+        // it doesn't crowd the loss strip drawn at the plot bottom, and
+        // generally gives the chart more breathing room beneath the
+        // median. Top stays at uPlot's default so taller spikes still get
+        // their usual headroom.
+        y: {
+          auto: true,
+          range: { min: { pad: 0.25 }, max: { pad: 0.1 } },
+        },
       },
       axes: [
         { stroke: "#8a93a6", grid: { stroke: "#1f2430" } },
@@ -81,6 +102,14 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       // clear it.
       cursor: { bind: { dblclick: () => null } },
       hooks: {
+        draw: [
+          (u) => {
+            if (!anyLossRef.current) return;
+            const all = lossSeriesRef.current;
+            if (all.length === 0) return;
+            drawLossStrip(u, all);
+          },
+        ],
         setCursor: [
           (u) => {
             const next = u.cursor.idx ?? null;
@@ -186,6 +215,11 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
     pinRef.current = { from: fromSec, to: toSec };
     const pin = pinChanged && fromSec != null && toSec != null;
+    // Refresh the loss-strip inputs read by the draw hook. setData below
+    // triggers a redraw, which will then read the fresh values from these
+    // refs — no separate redraw call needed.
+    lossSeriesRef.current = built.lossSeries;
+    anyLossRef.current = built.anyLoss;
     u.batch(() => {
       if (pin) {
         internalScaleRef.current = true;
@@ -265,11 +299,30 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   );
 }
 
+// LossSeries carries the per-cycle (timestamp, loss%) tuples one source
+// contributed. The draw hook walks these directly to paint the bottom
+// loss strip — it doesn't go through uPlot series because uPlot's series
+// machinery insists on linking each scalar to a single y-scale point,
+// but a loss "cell" wants to span its own slot independent of the y axis.
+type LossSeries = {
+  ts: number[];
+  losses: number[];
+  // hasLoss is precomputed so the draw hook can early-out per source when
+  // nothing in this source's window is lossy — keeps the common (clean
+  // target) case to a single comparison.
+  hasLoss: boolean;
+};
+
 type Built = {
   sources: string[];
   data: AlignedData;
   series: Series[];
   bands: Band[];
+  lossSeries: LossSeries[];
+  // anyLoss lets the draw hook skip the whole strip computation when no
+  // source is lossy across the requested window — a clean target renders
+  // exactly like before this change.
+  anyLoss: boolean;
 };
 
 const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
@@ -286,6 +339,8 @@ function buildAligned(points: CyclePoint[]): Built {
       data: [[], [], [], [], [], [], [], []],
       series: [xSeries, ...seriesFor("", palette)],
       bands: bandsFor(1),
+      lossSeries: [],
+      anyLoss: false,
     };
   }
 
@@ -315,11 +370,16 @@ function buildAligned(points: CyclePoint[]): Built {
   const data: (number | null)[][] = [xs];
   const series: Series[] = [xSeries];
   const bands: Band[] = [];
+  const lossSeries: LossSeries[] = [];
+  let anyLoss = false;
 
   sources.forEach((name, srcIdx) => {
     const palette = PALETTE[srcIdx % PALETTE.length];
     const cols: (number | null)[][] = PCT_KEYS.map(() => xs.map(() => null));
-    for (const p of bySource.get(name)!) {
+    const sorted = bySource.get(name)!.slice().sort(
+      (a, b) => new Date(a.Time).getTime() - new Date(b.Time).getTime(),
+    );
+    for (const p of sorted) {
       const i = xIdx.get(Math.floor(new Date(p.Time).getTime() / 1000));
       if (i == null) continue;
       PCT_KEYS.forEach((k, c) => {
@@ -328,6 +388,12 @@ function buildAligned(points: CyclePoint[]): Built {
     }
     cols.forEach((c) => data.push(c));
     series.push(...seriesFor(prefixed ? name : "", palette));
+
+    const ts = sorted.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
+    const losses = sorted.map((p) => p.LossPct);
+    const hasLoss = losses.some((l) => l > 0);
+    if (hasLoss) anyLoss = true;
+    lossSeries.push({ ts, losses, hasLoss });
   });
 
   bands.push(...bandsFor(sources.length));
@@ -337,6 +403,8 @@ function buildAligned(points: CyclePoint[]): Built {
     data: data as AlignedData,
     series,
     bands,
+    lossSeries,
+    anyLoss,
   };
 }
 
@@ -375,4 +443,63 @@ function bandsFor(sourceCount: number): Band[] {
     out.push({ series: [base + 2, base + 4], fill: palette.fill(0.28) });
   }
   return out;
+}
+
+// drawLossStrip paints one row per source along the bottom of the plot, with
+// each lossy cycle filling its own time slot in the colour bars mode uses
+// for the median tick (yellow / orange / red on the same thresholds). Clean
+// cycles leave the cell transparent so a quiet target still has the full
+// plot height for smoke; only sources with at least one lossy cycle take a
+// row. Rows stack from the bottom up.
+//
+// Cell widths are computed per source from neighbour midpoints — the same
+// rule SmokeBarChart uses for bar widths — so sparse sources still produce
+// cells that touch without overlap, and a multi-source chart paints each
+// source against its own cadence.
+function drawLossStrip(u: uPlot, all: LossSeries[]): void {
+  const lossy = all.filter((ls) => ls.hasLoss);
+  if (lossy.length === 0) return;
+  const ctx = u.ctx;
+  ctx.save();
+  // Clip so the strip never spills into the axis gutter when the user
+  // drag-zooms into a narrow window — matches the bar chart's clip.
+  ctx.beginPath();
+  ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
+  ctx.clip();
+  const bottom = u.bbox.top + u.bbox.height;
+  lossy.forEach((ls, row) => {
+    const { ts, losses } = ls;
+    const n = ts.length;
+    if (n === 0) return;
+    const cxs = ts.map((t) => u.valToPos(t, "x", true));
+    const rowTop = bottom - LOSS_STRIP_H * (row + 1);
+    for (let i = 0; i < n; i++) {
+      if (losses[i] <= 0) continue;
+      const cx = cxs[i];
+      let leftEdge: number;
+      let rightEdge: number;
+      if (n === 1) {
+        leftEdge = cx - 3;
+        rightEdge = cx + 3;
+      } else if (i === 0) {
+        rightEdge = (cx + cxs[i + 1]) / 2;
+        leftEdge = cx - (rightEdge - cx);
+      } else if (i === n - 1) {
+        leftEdge = (cxs[i - 1] + cx) / 2;
+        rightEdge = cx + (cx - leftEdge);
+      } else {
+        leftEdge = (cxs[i - 1] + cx) / 2;
+        rightEdge = (cx + cxs[i + 1]) / 2;
+      }
+      const x = Math.floor(leftEdge);
+      const w = Math.max(1, Math.ceil(rightEdge) - x);
+      // Pass an empty okColor so the helper is only ever used for lossy
+      // cycles here — we skip the loss<=0 case explicitly above. Keeps the
+      // strip exclusively about loss without bleeding palette stroke into
+      // a clean cell that we wouldn't paint anyway.
+      ctx.fillStyle = lossColor(losses[i], "transparent");
+      ctx.fillRect(x, rowTop, w, LOSS_STRIP_H);
+    }
+  });
+  ctx.restore();
 }

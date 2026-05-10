@@ -49,12 +49,16 @@ type Storage struct {
 }
 
 // InfluxV2 configures the InfluxDB v2 backend. BucketRaw is required;
-// Bucket1h / Bucket1d are optional and only used if rollup tiers are wanted.
+// Bucket5m / Bucket1h / Bucket1d are optional and only used if rollup tiers
+// are wanted. The 5m tier is what serves the 24h chart view — without it
+// the reader falls back to raw, which is fine but ~6-10x slower at that
+// span on a busy InfluxDB.
 type InfluxV2 struct {
 	URL       string `json:"url"`
 	Token     string `json:"token"`
 	Org       string `json:"org"`
 	BucketRaw string `json:"bucket_raw"`
+	Bucket5m  string `json:"bucket_5m"`
 	Bucket1h  string `json:"bucket_1h"`
 	Bucket1d  string `json:"bucket_1d"`
 }
