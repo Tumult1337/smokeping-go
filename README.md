@@ -30,8 +30,8 @@ and a per-hop loss heatmap over the same window.
 
 - **Probes:** ICMP (unprivileged ping sockets with raw fallback), TCP connect,
   HTTP(S) TTFB, DNS lookup, MTR-style path discovery.
-- **Storage:** InfluxDB v2 with tiered rollups (raw samples 7d, 1h 180d,
-  1d 2y) created automatically on startup via Flux tasks.
+- **Storage:** InfluxDB v2 with tiered rollups (raw samples 7d, 5m 7d,
+  1h 180d, 1d 2y) created automatically on startup via Flux tasks.
 - **UI:** React + Vite + uPlot, embedded in the binary. Smoke band and
   classic-bars chart modes, MTR table, per-hop loss heatmap.
 - **Alerting:** threshold conditions with sustained-cycles debounce.
@@ -60,9 +60,9 @@ docker run -d --name influxdb -p 8086:8086 \
   influxdb:2
 ```
 
-gosmokeping creates the `smokeping_1h` and `smokeping_1d` rollup buckets
-and their Flux tasks automatically on first start — you only need to
-provide a valid token and org.
+gosmokeping creates the `smokeping_5m`, `smokeping_1h`, and `smokeping_1d`
+rollup buckets and their Flux tasks automatically on first start — you
+only need to provide a valid token and org.
 
 ### 2. Configure
 
@@ -161,7 +161,7 @@ so you can see where a cycle broke without opening the UI.
 | GET    | `/api/v1/targets/{group}/{name}/hops/timeline?from&to` | Per-hop history |
 
 `from` / `to` accept RFC3339, unix seconds, or durations like `-24h`.
-`resolution` is `auto` (default), `raw`, `1h`, or `1d`. All endpoints
+`resolution` is `auto` (default), `raw`, `5m`, `1h`, or `1d`. All endpoints
 accept a `source=<name>` query parameter to filter by probe origin
 when running in master/slave mode.
 

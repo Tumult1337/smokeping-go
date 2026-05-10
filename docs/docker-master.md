@@ -157,6 +157,7 @@ Everything else (targets, probes, alerts) is identical to standalone.
       "token":      "${INFLUX_TOKEN}",
       "org":        "${INFLUX_ORG}",
       "bucket_raw": "smokeping_raw",
+      "bucket_5m":  "smokeping_5m",
       "bucket_1h":  "smokeping_1h",
       "bucket_1d":  "smokeping_1d"
     }
@@ -206,10 +207,11 @@ To restrict a target to specific slaves only, add `"slaves":
 the master skips it locally, and other slaves never see it. Omit the
 field to let everyone (master + every registered slave) probe it.
 
-The rollup buckets (`smokeping_1h`, `smokeping_1d`) and their Flux tasks
-are created automatically by the master at startup; you only need
-`smokeping_raw` to exist on the InfluxDB side, which the init env vars
-below take care of.
+The rollup buckets (`smokeping_5m`, `smokeping_1h`, `smokeping_1d`) and
+their Flux tasks are created automatically by the master at startup; you
+only need `smokeping_raw` to exist on the InfluxDB side, which the init
+env vars below take care of. `bucket_5m` is optional — omit it and the
+v2 reader falls back to raw for ≤24h queries (slower, still correct).
 
 ---
 
@@ -293,8 +295,9 @@ docker compose logs -f gosmokeping
 ```
 
 You should see the master:
-1. Connect to InfluxDB and create the `smokeping_1h` / `smokeping_1d`
-   buckets + rollup tasks (logged as `bucket created` / `task created`).
+1. Connect to InfluxDB and create the `smokeping_5m` / `smokeping_1h` /
+   `smokeping_1d` buckets + rollup tasks (logged as `bucket created` /
+   `task created`).
 2. Start the scheduler and probe its first cycle within `interval`
    seconds.
 3. Open the cluster ingest endpoints on `:8080`.
