@@ -4,9 +4,11 @@ import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
 
 // Height (px) of the per-source loss strip drawn at the bottom of the plot.
-// One row per source, stacked from the bottom up. Only painted for cycles
-// where loss > 0 so a clean target leaves the strip area transparent and the
-// smoke fills the full plot height as before.
+// One row per source, stacked from the bottom up. The strip area is always
+// drawn as a faint track once any source has loss in-window so the coloured
+// cells inside read as a deliberate "loss" lane rather than stray pixels
+// hovering below the smoke. A clean target (no loss anywhere) skips the
+// whole section so the smoke fills the full plot height as before.
 const LOSS_STRIP_H = 6;
 
 interface Props {
@@ -445,12 +447,16 @@ function bandsFor(sourceCount: number): Band[] {
   return out;
 }
 
-// drawLossStrip paints one row per source along the bottom of the plot, with
-// each lossy cycle filling its own time slot in the colour bars mode uses
-// for the median tick (yellow / orange / red on the same thresholds). Clean
-// cycles leave the cell transparent so a quiet target still has the full
-// plot height for smoke; only sources with at least one lossy cycle take a
-// row. Rows stack from the bottom up.
+// drawLossStrip paints a labelled "loss" lane along the bottom of the plot:
+// a faint track per source (so the lane is visible as a defined zone even
+// where the cycle wasn't lossy), coloured cells per lossy cycle inside the
+// track (yellow / orange / red on the same thresholds bars mode uses for
+// the median tick), a thin separator above to split the lane from the
+// smoke, and a small "loss" label so it's self-explanatory. Without the
+// track + label, lossy cycles read as floating coloured pixels below the
+// chart, which looks like a UI glitch on first glance. Only sources with
+// at least one lossy cycle take a row, and a clean target skips the whole
+// section so smoke fills the full plot height.
 //
 // Cell widths are computed per source from neighbour midpoints — the same
 // rule SmokeBarChart uses for bar widths — so sparse sources still produce
@@ -466,7 +472,32 @@ function drawLossStrip(u: uPlot, all: LossSeries[]): void {
   ctx.beginPath();
   ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
   ctx.clip();
+  const left = u.bbox.left;
+  const width = u.bbox.width;
   const bottom = u.bbox.top + u.bbox.height;
+  const stripTop = bottom - LOSS_STRIP_H * lossy.length;
+
+  // Track: faint neutral overlay so the lane is visible as its own zone.
+  // Neutral (not palette-tinted) on purpose — palette yellow against the
+  // yellow loss threshold would muddy the signal in multi-source views.
+  ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+  ctx.fillRect(left, stripTop, width, LOSS_STRIP_H * lossy.length);
+
+  // Separator rule above the strip — same darkness family as the axis
+  // grid, slightly lighter so it reads as a divider, not a grid line.
+  ctx.fillStyle = "#2a3142";
+  ctx.fillRect(left, stripTop - 1, width, 1);
+
+  // "loss" label, sitting in the y-axis bottom padding just above the
+  // strip. The 25% bottom pad on the y-scale guarantees this lands clear
+  // of any smoke fill.
+  ctx.font = "10px ui-sans-serif, -apple-system, system-ui, sans-serif";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#8a93a6";
+  ctx.fillText("loss", left + 4, stripTop - 4);
+
+  // Loss cells painted on top of the track. Cells with loss<=0 are skipped
+  // so the track shows through and the colour stays exclusive to outages.
   lossy.forEach((ls, row) => {
     const { ts, losses } = ls;
     const n = ts.length;
@@ -493,10 +524,9 @@ function drawLossStrip(u: uPlot, all: LossSeries[]): void {
       }
       const x = Math.floor(leftEdge);
       const w = Math.max(1, Math.ceil(rightEdge) - x);
-      // Pass an empty okColor so the helper is only ever used for lossy
-      // cycles here — we skip the loss<=0 case explicitly above. Keeps the
-      // strip exclusively about loss without bleeding palette stroke into
-      // a clean cell that we wouldn't paint anyway.
+      // Pass "transparent" as the ok-colour for defence in depth — we
+      // already skip loss<=0 above, so this branch is only ever hit with
+      // a real loss value and gets yellow / orange / red.
       ctx.fillStyle = lossColor(losses[i], "transparent");
       ctx.fillRect(x, rowTop, w, LOSS_STRIP_H);
     }
