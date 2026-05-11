@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getHops, type HopPoint } from "./api";
 import { lossColor } from "./palette";
 
@@ -23,9 +23,14 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [cycleTime, setCycleTime] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const prevKeyRef = useRef<string>("");
 
   useEffect(() => {
+    const k = `${targetId}|${atSec ?? ""}|${source ?? ""}`;
+    const keyChanged = prevKeyRef.current !== k;
+    prevKeyRef.current = k;
     setErr(null);
+    if (keyChanged) setHops(null);
     const controller = new AbortController();
     getHops(targetId, atSec, source, controller.signal)
       .then((r) => {

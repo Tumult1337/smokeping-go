@@ -505,7 +505,9 @@ export default function App() {
                 <div className="chart-title">
                   Latency — {cycles?.resolution ?? "…"} resolution
                 </div>
-                {chartStyle === "band" ? (
+                {cycles === null ? (
+                  <div className="empty">Fetching data…</div>
+                ) : chartStyle === "band" ? (
                   <SmokeChart
                     points={points}
                     fromSec={fromSec}
