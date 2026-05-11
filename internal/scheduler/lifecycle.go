@@ -14,11 +14,17 @@ import (
 // Build-first, cancel-on-success: a rebuild error leaves the previous
 // scheduler running instead of going dark — the slave used to cancel
 // first and briefly lose coverage on a transient rebuild failure.
+//
+// Reloads carries a struct{} signal (not the config itself). On each signal
+// the lifecycle calls Current() to get the authoritative latest config —
+// this avoids a race where rapid reloads drop the second channel send, leaving
+// the scheduler on a stale config while the store holds the newer one.
 type LifecycleOptions struct {
 	Log      *slog.Logger
 	Initial  *config.Config
+	Current  func() *config.Config
 	Build    func(cfg *config.Config) (*Scheduler, error)
-	Reloads  <-chan *config.Config
+	Reloads  <-chan struct{}
 	OnReload func(cfg *config.Config)
 }
 
@@ -57,7 +63,11 @@ func RunLifecycle(ctx context.Context, opts LifecycleOptions) error {
 			<-schedDone
 			return nil
 
-		case newCfg := <-opts.Reloads:
+		case <-opts.Reloads:
+			// Always fetch the authoritative latest config from the store so
+			// rapid back-to-back reloads (burst SIGHUP) don't leave us on a
+			// stale snapshot that was dropped from the channel.
+			newCfg := opts.Current()
 			if opts.OnReload != nil {
 				opts.OnReload(newCfg)
 			}

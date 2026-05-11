@@ -1,2 +1,2 @@
-MTR history — per-hop loss
-Error: 502: <!DOCTYPE html> 
+first load = all read
+add fetching data while loading

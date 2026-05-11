@@ -110,6 +110,8 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		result.Hops = hops
 	} else if errors.Is(terr, errRawUnavailable) {
 		logRawUnavailableOnce(terr)
+	} else {
+		slog.Debug("icmp trace error", "probe", i.name, "host", t.Host, "err", terr)
 	}
 	return result, nil
 }

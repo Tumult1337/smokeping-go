@@ -1,16 +1,18 @@
 package cluster
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
 	"strings"
 )
 
 // BearerAuth returns middleware that requires Authorization: Bearer <token>
-// on every request. 401 with an empty body on mismatch — no token echo, no
-// timing-sensitive comparison.
+// on every request. Both sides are SHA-256 hashed before comparison so the
+// compare is constant-time regardless of token length (subtle.ConstantTimeCompare
+// returns 0 immediately on a length mismatch, leaking token length via timing).
 func BearerAuth(token string) func(http.Handler) http.Handler {
-	expected := []byte(token)
+	expectedHash := sha256.Sum256([]byte(token))
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			h := r.Header.Get("Authorization")
@@ -19,8 +21,8 @@ func BearerAuth(token string) func(http.Handler) http.Handler {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			got := []byte(h[len(prefix):])
-			if len(got) == 0 || subtle.ConstantTimeCompare(got, expected) != 1 {
+			gotHash := sha256.Sum256([]byte(h[len(prefix):]))
+			if subtle.ConstantTimeCompare(gotHash[:], expectedHash[:]) != 1 {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}

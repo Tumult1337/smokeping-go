@@ -25,12 +25,13 @@ type Supervisor struct {
 // Run blocks until ctx is cancelled. Returns non-nil only if the initial
 // Build fails.
 func (s *Supervisor) Run(ctx context.Context) error {
-	reloads := make(chan *config.Config, 1)
+	reloads := make(chan struct{}, 1)
 	s.Store.Subscribe(reloads)
 
 	return RunLifecycle(ctx, LifecycleOptions{
 		Log:      s.Log,
 		Initial:  s.Store.Current(),
+		Current:  s.Store.Current,
 		Build:    s.Build,
 		Reloads:  reloads,
 		OnReload: s.OnReload,

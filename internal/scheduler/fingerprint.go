@@ -12,13 +12,16 @@ import (
 // reload needs a goroutine restart, and by the slave runner for the same
 // decision after a /cluster/config pull.
 //
-// Included: interval, pings, target shape (group + name + probe + host + url),
-// probe shape (name + type + timeout + insecure). Deliberately excluded:
-// alert definitions (re-read per cycle by the evaluator), action URLs
-// (re-read per dispatch), listen/cluster/storage blocks (not scheduler-
-// visible), and the slave assignment list (applied by master.LocalTargets
-// before Fingerprint is called, so the filtered view already reflects any
-// reassignment).
+// Included: interval, pings, target shape (group + name + probe + host + url +
+// family + slave assignments), probe shape (name + type + timeout + insecure).
+// Deliberately excluded: alert definitions (re-read per cycle by the evaluator),
+// action URLs (re-read per dispatch), listen/cluster/storage blocks (not
+// scheduler-visible).
+//
+// Family is included because it changes how a host is resolved — a family
+// change must trigger a scheduler rebuild. Slaves is included because
+// master.LocalTargets filters based on it; a change to the assignment list
+// changes which targets the local scheduler probes.
 func Fingerprint(cfg *config.Config) string {
 	var out []byte
 	out = append(out, cfg.Interval.String()...)
@@ -55,6 +58,13 @@ func Fingerprint(cfg *config.Config) string {
 			out = append(out, t.Host...)
 			out = append(out, '\x1f')
 			out = append(out, t.URL...)
+			out = append(out, '\x1f')
+			out = append(out, t.Family...)
+			out = append(out, '\x1f')
+			for _, s := range t.Slaves {
+				out = append(out, s...)
+				out = append(out, '\x1f')
+			}
 			out = append(out, '\x1e')
 		}
 		out = append(out, '\x1d')

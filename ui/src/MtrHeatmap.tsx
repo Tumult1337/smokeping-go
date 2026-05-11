@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getHopsTimeline, type HopPoint } from "./api";
+import { lossColor } from "./palette";
 
 interface Props {
   targetId: string;
@@ -42,6 +43,7 @@ export function MtrHeatmap({
 }: Props) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [repaintCount, setRepaintCount] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -190,7 +192,7 @@ export function MtrHeatmap({
           const p = row.get(t);
           if (!p) continue;
           const x = xForSec(t) - colW / 2;
-          ctx.fillStyle = lossColor(p.LossPct);
+          ctx.fillStyle = lossColor(p.LossPct, "#5eead4");
           ctx.fillRect(x, y, Math.max(1, colW), rowH - 1);
         }
       }
@@ -213,7 +215,7 @@ export function MtrHeatmap({
       ctx.fillStyle = "rgba(94, 234, 212, 0.55)";
       ctx.fillRect(Math.round(x), 2, 2, cssH - 4);
     }
-  }, [rows, cycles, visibleHops, height, fromSec, toSec, selectedSec]);
+  }, [rows, cycles, visibleHops, height, fromSec, toSec, selectedSec, repaintCount]);
 
   // Translate a pointer x position to the nearest cycle's unix seconds.
   function pickAtX(clientX: number): number | null {
@@ -242,14 +244,13 @@ export function MtrHeatmap({
 
   useEffect(() => {
     const wrap = wrapRef.current;
-    if (!wrap || !hops) return;
+    if (!wrap) return;
     const ro = new ResizeObserver(() => {
-      // Trigger repaint by forcing a state nudge via setHops(same).
-      setHops((h) => (h ? [...h] : h));
+      setRepaintCount((n) => n + 1);
     });
     ro.observe(wrap);
     return () => ro.disconnect();
-  }, [hops]);
+  }, []);
 
   if (err) return <div className="error">{err}</div>;
   if (hops === null) return <div className="empty">Loading MTR history…</div>;
@@ -274,9 +275,3 @@ export function MtrHeatmap({
   );
 }
 
-function lossColor(pct: number): string {
-  if (pct <= 0) return "#5eead4";
-  if (pct < 5) return "#eab308";
-  if (pct < 20) return "#f97316";
-  return "#ef4444";
-}

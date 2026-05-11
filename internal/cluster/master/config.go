@@ -66,11 +66,12 @@ func targetVisibleToSlave(t config.Target, slaveName string) bool {
 // mis-dispatch alerts or leak the assignment topology.
 func sanitizeTarget(t config.Target) config.Target {
 	return config.Target{
-		Name:  t.Name,
-		Title: t.Title,
-		Host:  t.Host,
-		URL:   t.URL,
-		Probe: t.Probe,
+		Name:   t.Name,
+		Title:  t.Title,
+		Host:   t.Host,
+		URL:    t.URL,
+		Probe:  t.Probe,
+		Family: t.Family,
 	}
 }
 
@@ -78,6 +79,9 @@ func sanitizeTarget(t config.Target) config.Target {
 // Slaves list removed. This is what the master's own scheduler sees: the
 // stored cfg remains authoritative for the UI and /cluster/config, but the
 // local probe loop skips anything that's been assigned elsewhere.
+//
+// The returned *Config is a shallow copy: Probes, Alerts, Actions, and Cluster
+// alias the original maps. Treat it as read-only.
 func LocalTargets(cfg *config.Config) *config.Config {
 	out := *cfg
 	groups := make([]config.Group, 0, len(cfg.Targets))

@@ -205,7 +205,7 @@ func TestStoreReload(t *testing.T) {
 	}
 	s := NewStore(p, cfg)
 
-	ch := make(chan *Config, 1)
+	ch := make(chan struct{}, 1)
 	s.Subscribe(ch)
 
 	modified := strings.Replace(minimalConfig, `"pings": 10`, `"pings": 42`, 1)
@@ -219,9 +219,9 @@ func TestStoreReload(t *testing.T) {
 		t.Errorf("after reload pings = %d, want 42", got)
 	}
 	select {
-	case got := <-ch:
-		if got.Pings != 42 {
-			t.Errorf("subscriber got pings = %d", got.Pings)
+	case <-ch:
+		if got := s.Current().Pings; got != 42 {
+			t.Errorf("subscriber notified but current pings = %d, want 42", got)
 		}
 	default:
 		t.Error("subscriber not notified")

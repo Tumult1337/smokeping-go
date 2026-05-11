@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getHops, type HopPoint } from "./api";
+import { lossColor } from "./palette";
 
 interface Props {
   targetId: string;
@@ -103,7 +104,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
                 <span className="hop-none">???</span>
               )}
             </td>
-            <td className="num" style={{ color: lossColor(h.LossPct) }}>
+            <td className="num" style={{ color: lossColor(h.LossPct, "#cfd3dd") }}>
               {h.LossPct.toFixed(1)}
             </td>
             <td className="num">{h.Sent}</td>
@@ -194,9 +195,3 @@ function HopBar({
   );
 }
 
-function lossColor(pct: number): string {
-  if (pct <= 0) return "#cfd3dd";
-  if (pct < 5) return "#eab308";
-  if (pct < 20) return "#f97316";
-  return "#ef4444";
-}

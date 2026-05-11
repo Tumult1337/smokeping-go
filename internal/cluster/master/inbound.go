@@ -1,7 +1,9 @@
 package master
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
@@ -12,12 +14,17 @@ import (
 // cycles; silently drops any whose group/name no longer resolves (stale slave
 // config vs. fresh master config). That's acceptable — the slave will refresh
 // and stop sending within 60s.
-func (s *Server) ingestBatch(r *http.Request, batch cluster.CycleBatch) int {
+func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) int {
 	cfg := s.store.Current()
 	targets := make(map[string]config.Target, len(cfg.AllTargets()))
 	for _, t := range cfg.AllTargets() {
 		targets[t.ID()] = t.Target
 	}
+
+	// Use a detached context for sink delivery so a slave TCP disconnect
+	// mid-POST doesn't cancel cycles that are already being processed.
+	sinkCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	accepted := 0
 	for _, p := range batch.Cycles {
@@ -33,7 +40,7 @@ func (s *Server) ingestBatch(r *http.Request, batch cluster.CycleBatch) int {
 			p.Source = batch.Source
 		}
 		cycle := p.ToCycle(target)
-		s.sink.OnCycle(r.Context(), cycle)
+		s.sink.OnCycle(sinkCtx, cycle)
 		accepted++
 	}
 	return accepted

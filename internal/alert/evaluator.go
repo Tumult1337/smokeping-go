@@ -108,9 +108,9 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		return
 	}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	var toDispatch []Event
 
+	e.mu.Lock()
 	for _, name := range alerts {
 		alertCfg, ok := cfg.Alerts[name]
 		if !ok {
@@ -135,7 +135,12 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			st.consecHits++
 			switch st.state {
 			case StateOK:
-				st.state = StatePending
+				// Check threshold immediately so sustained=1 fires on the first bad cycle.
+				if st.consecHits >= alertCfg.Sustained {
+					st.state = StateFiring
+				} else {
+					st.state = StatePending
+				}
 			case StatePending:
 				if st.consecHits >= alertCfg.Sustained {
 					st.state = StateFiring
@@ -147,10 +152,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		}
 
 		if prev != st.state {
-			e.log.Info("alert state change",
-				"target", cy.Target.ID(), "alert", name, "source", cy.Source,
-				"prev", prev, "next", st.state, "hits", st.consecHits)
-			e.dispatcher.Dispatch(ctx, Event{
+			toDispatch = append(toDispatch, Event{
 				Time:      cy.Time,
 				Target:    cy.Target,
 				AlertName: name,
@@ -160,5 +162,15 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 				Cycle:     cy,
 			})
 		}
+	}
+	e.mu.Unlock()
+
+	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
+	// for other targets running concurrently.
+	for _, ev := range toDispatch {
+		e.log.Info("alert state change",
+			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
+			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent)
+		e.dispatcher.Dispatch(ctx, ev)
 	}
 }

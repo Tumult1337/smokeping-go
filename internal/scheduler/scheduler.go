@@ -133,9 +133,9 @@ func (s *Scheduler) runCycle(ctx context.Context, ref config.TargetRef, pr probe
 	res, err := pr.Probe(cycleCtx, target, s.cfg.Pings)
 	if err != nil {
 		s.log.Warn("probe error", "target", ref.ID(), "err", err)
-		if res == nil {
-			res = &probe.Result{Sent: s.cfg.Pings, LossCount: s.cfg.Pings}
-		}
+	}
+	if res == nil {
+		res = &probe.Result{Sent: s.cfg.Pings, LossCount: s.cfg.Pings}
 	}
 
 	c := Cycle{

@@ -19,11 +19,16 @@ import (
 // The "one subscriber" shape matches actual use — only the scheduler
 // Supervisor listens — and keeps the Reload → Subscriber handoff ordered
 // on a single channel instead of fanning across a slice.
+//
+// The channel carries struct{} (signal-only) so the subscriber always calls
+// Current() for the latest config. Sending the config object on the channel
+// was unsafe: a rapid double-SIGHUP could drop the second send (channel full),
+// leaving the scheduler on a stale config while the store held the new one.
 type Store struct {
 	path string
 	cur  atomic.Pointer[Config]
 	mu   sync.Mutex
-	sub  chan<- *Config
+	sub  chan<- struct{}
 }
 
 func NewStore(path string, initial *Config) *Store {
@@ -38,7 +43,7 @@ func (s *Store) Current() *Config {
 
 // Subscribe registers the single reload listener. Panics if called twice;
 // the store is intentionally 1:1 with the lifecycle helper.
-func (s *Store) Subscribe(ch chan<- *Config) {
+func (s *Store) Subscribe(ch chan<- struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sub != nil {
@@ -58,7 +63,7 @@ func (s *Store) Reload() error {
 	s.mu.Unlock()
 	if sub != nil {
 		select {
-		case sub <- cfg:
+		case sub <- struct{}{}:
 		default:
 		}
 	}
@@ -114,6 +119,9 @@ func (s *Store) WatchFile(ctx context.Context, log *slog.Logger) error {
 		const debounce = 200 * time.Millisecond
 		var timer *time.Timer
 		fire := func() {
+			if ctx.Err() != nil {
+				return
+			}
 			if err := s.Reload(); err != nil {
 				log.Warn("config file reload failed, keeping previous config", "err", err)
 				return

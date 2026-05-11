@@ -59,6 +59,8 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
+const maxSlaveNameLen = 128
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRegisterBody)
 	var req cluster.RegisterReq
@@ -66,8 +68,12 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if req.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	if req.Name == "" || len(req.Name) > maxSlaveNameLen {
+		http.Error(w, "name required and must be ≤128 bytes", http.StatusBadRequest)
+		return
+	}
+	if req.Name == "master" {
+		http.Error(w, `slave name "master" is reserved`, http.StatusBadRequest)
 		return
 	}
 	s.registry.Touch(req.Name, req.Version, r.RemoteAddr)
@@ -106,7 +112,15 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if batch.Source != "" {
+	// Prefer the authenticated X-Slave-Name header over the wire-provided
+	// batch.Source — a valid token does not bind a slave identity, so any
+	// slave could otherwise forge another's source label and corrupt alert
+	// state or registry entries. Fall back to batch.Source for older slaves
+	// that don't send the header.
+	if name := r.Header.Get("X-Slave-Name"); name != "" {
+		s.registry.Touch(name, r.Header.Get("X-Slave-Version"), r.RemoteAddr)
+		batch.Source = name
+	} else if batch.Source != "" {
 		s.registry.Touch(batch.Source, "", r.RemoteAddr)
 	}
 	n := s.ingestBatch(r, batch)

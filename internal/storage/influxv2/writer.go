@@ -60,14 +60,16 @@ const (
 // make room for the new one, so monitoring keeps producing fresh data
 // instead of freezing every probing goroutine in lockstep.
 type Writer struct {
-	log     *slog.Logger
-	client  influxdb2.Client
-	write   api.WriteAPI
-	cfg     config.InfluxV2
-	queue   chan scheduler.Cycle
-	stop    chan struct{}
-	wg      sync.WaitGroup
-	dropped atomic.Int64
+	log      *slog.Logger
+	client   influxdb2.Client
+	write    api.WriteAPI
+	cfg      config.InfluxV2
+	queue    chan scheduler.Cycle
+	stop     chan struct{}
+	flushWg  sync.WaitGroup // tracks only flushLoop
+	errsDone chan struct{}   // closed when the errors goroutine exits
+	once     sync.Once
+	dropped  atomic.Int64
 }
 
 // NewWriter constructs a Writer backed by a new v2 client. The caller must
@@ -83,29 +85,39 @@ func NewWriter(log *slog.Logger, cfg config.InfluxV2) *Writer {
 		queue:  make(chan scheduler.Cycle, cycleQueueCap),
 		stop:   make(chan struct{}),
 	}
-	// Log async write errors instead of silently dropping them.
+	// Log async write errors. errsDone is closed when this goroutine exits
+	// so Close can wait for it after client.Close() drains the channel.
+	w.errsDone = make(chan struct{})
 	go func() {
+		defer close(w.errsDone)
 		for err := range wa.Errors() {
 			log.Warn("influx async write", "err", err)
 		}
 	}()
-	w.wg.Add(1)
+	w.flushWg.Add(1)
 	go w.flushLoop()
 	return w
 }
 
-// Close flushes pending writes and releases the client. Best-effort: the
-// flush goroutine drains whatever's still in the queue before we tell the
-// underlying client to flush its own buffers and shut down.
+// Close flushes pending writes and releases the client. Safe to call more
+// than once (additional calls are no-ops). Shutdown order:
+//  1. Signal flushLoop to drain the queue and exit.
+//  2. Wait for flushLoop (ensures no concurrent WritePoint after Flush).
+//  3. Flush the write API's internal buffer.
+//  4. Close the client (this closes the Errors() channel).
+//  5. Wait for the errors goroutine to drain and exit.
 func (w *Writer) Close() {
-	close(w.stop)
-	w.wg.Wait()
-	if w.write != nil {
-		w.write.Flush()
-	}
-	if w.client != nil {
-		w.client.Close()
-	}
+	w.once.Do(func() {
+		close(w.stop)
+		w.flushWg.Wait() // wait for flushLoop to finish all WritePoint calls
+		if w.write != nil {
+			w.write.Flush()
+		}
+		if w.client != nil {
+			w.client.Close() // closes Errors() channel
+		}
+		<-w.errsDone // wait for the errors goroutine to drain and exit
+	})
 }
 
 // OnCycle satisfies scheduler.Sink. MUST NOT block — the per-target
@@ -136,7 +148,7 @@ func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
 // goroutine so that a slow or stalled v2 write pipeline can't propagate
 // back-pressure to the probing goroutines via OnCycle.
 func (w *Writer) flushLoop() {
-	defer w.wg.Done()
+	defer w.flushWg.Done()
 	report := time.NewTicker(droppedReportInterval)
 	defer report.Stop()
 	var lastReported int64

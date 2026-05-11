@@ -67,6 +67,19 @@ func (r *Registry) Has(name string) bool {
 	return ok
 }
 
+// Sweep removes slaves whose LastSeen is older than `age`. Call periodically
+// to prevent unbounded growth from ephemeral or renamed slaves.
+func (r *Registry) Sweep(age time.Duration) {
+	cutoff := time.Now().Add(-age)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, info := range r.slaves {
+		if info.LastSeen.Before(cutoff) {
+			delete(r.slaves, name)
+		}
+	}
+}
+
 // Snapshot returns a copy of the current registry for debugging / UI.
 func (r *Registry) Snapshot() []SlaveInfo {
 	r.mu.RLock()

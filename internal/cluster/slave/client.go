@@ -124,7 +124,8 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 		return 0, httpResult{}, err
 	}
 	defer resp.Body.Close()
-	buf, err := io.ReadAll(resp.Body)
+	const maxResponseBody = 64 << 20 // 64 MiB — generous cap against a rogue/MitM master
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return resp.StatusCode, httpResult{}, err
 	}

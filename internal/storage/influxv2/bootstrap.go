@@ -37,7 +37,7 @@ const (
 // Existing rollup tasks keep their Flux body.
 func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV2) error {
 	if cfg.Bucket1h == "" || cfg.Bucket1d == "" {
-		log.Info("rollup buckets not configured, skipping task bootstrap",
+		log.Info("rollup buckets partially unconfigured — task bootstrap may be partial",
 			"bucket_1h", cfg.Bucket1h, "bucket_1d", cfg.Bucket1d)
 	}
 

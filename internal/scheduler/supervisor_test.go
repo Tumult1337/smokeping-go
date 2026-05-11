@@ -76,7 +76,7 @@ func TestFingerprintChangesOnTargetEdits(t *testing.T) {
 	}
 }
 
-func TestFingerprintIgnoresAlertsAndSlaves(t *testing.T) {
+func TestFingerprintIgnoresAlerts(t *testing.T) {
 	a := &config.Config{
 		Interval: time.Second,
 		Pings:    3,
@@ -89,11 +89,30 @@ func TestFingerprintIgnoresAlertsAndSlaves(t *testing.T) {
 	}
 	b := *a
 	b.Targets = []config.Group{{Group: "g", Targets: []config.Target{
-		{Name: "a", Host: "1.1.1.1", Probe: "icmp",
-			Alerts: []string{"x"}, Slaves: []string{"s1"}},
+		{Name: "a", Host: "1.1.1.1", Probe: "icmp", Alerts: []string{"x"}},
 	}}}
 	if Fingerprint(a) != Fingerprint(&b) {
-		t.Error("alerts/slaves edits must not change fingerprint (they're not scheduler-visible)")
+		t.Error("alert edits must not change fingerprint (re-read per cycle by the evaluator)")
+	}
+}
+
+func TestFingerprintSlavesChange(t *testing.T) {
+	a := &config.Config{
+		Interval: time.Second,
+		Pings:    3,
+		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+		Targets: []config.Group{{
+			Group: "g", Targets: []config.Target{
+				{Name: "a", Host: "1.1.1.1", Probe: "icmp"},
+			},
+		}},
+	}
+	b := *a
+	b.Targets = []config.Group{{Group: "g", Targets: []config.Target{
+		{Name: "a", Host: "1.1.1.1", Probe: "icmp", Slaves: []string{"s1"}},
+	}}}
+	if Fingerprint(a) == Fingerprint(&b) {
+		t.Error("slave assignment changes must change fingerprint (affects master.LocalTargets filtering)")
 	}
 }
 

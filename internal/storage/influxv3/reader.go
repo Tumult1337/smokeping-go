@@ -79,9 +79,10 @@ func (r *Reader) queryCyclesRaw(ctx context.Context, ref config.TargetRef, from,
 // queryCyclesAggregated rolls raw cycles up into fixed-width buckets at query
 // time. Aggregation choices mirror the v2 fluxRollup task to keep the smoke
 // band visually identical across backends: min-of-mins, max-of-maxes,
-// mean-of-means/medians/stddevs/percentiles, sum-of-loss-counts/sent, and
-// mean-of-loss-pct (rather than recomputed-from-sums) for parity with v2's
-// rollup output.
+// mean-of-means/medians/stddevs/percentiles, sum-of-loss-counts/sent.
+// loss_pct is omitted from the aggregate SELECT — runCycleQuery recomputes
+// LossPct from the summed loss_count/pings_sent so partial cycles
+// (context-cancelled mid-probe) don't skew the displayed value.
 func (r *Reader) queryCyclesAggregated(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, bucket time.Duration) ([]storage.CyclePoint, error) {
 	interval := dateBinInterval(bucket)
 	cols := buildCycleColumns(true, interval)
@@ -118,7 +119,9 @@ func buildCycleColumns(aggregate bool, interval string) string {
 	for _, acc := range storage.CyclePointPercentileAccessors {
 		add("rtt_"+acc.Name, "AVG")
 	}
-	add("loss_pct", "AVG")
+	if !aggregate {
+		add("loss_pct", "")
+	}
 	add("loss_count", "SUM")
 	add("pings_sent", "SUM")
 	return b.String()
@@ -132,6 +135,12 @@ func (r *Reader) runCycleQuery(ctx context.Context, sql string, params influxdb3
 	var out []storage.CyclePoint
 	for iter.Next() {
 		v := iter.Value()
+		sent := intOf(v["pings_sent"])
+		lost := intOf(v["loss_count"])
+		lossPct := 0.0
+		if sent > 0 {
+			lossPct = 100 * float64(lost) / float64(sent)
+		}
 		cp := storage.CyclePoint{
 			Time:      timeOf(v["time"]),
 			Source:    stringOf(v["source"]),
@@ -140,9 +149,9 @@ func (r *Reader) runCycleQuery(ctx context.Context, sql string, params influxdb3
 			Mean:      floatOf(v["rtt_mean"]),
 			Median:    floatOf(v["rtt_median"]),
 			StdDev:    floatOf(v["rtt_stddev"]),
-			LossPct:   floatOf(v["loss_pct"]),
-			LossCount: intOf(v["loss_count"]),
-			Sent:      intOf(v["pings_sent"]),
+			LossPct:   lossPct,
+			LossCount: lost,
+			Sent:      sent,
 		}
 		for _, acc := range storage.CyclePointPercentileAccessors {
 			acc.Set(&cp, floatOf(v["rtt_"+acc.Name]))

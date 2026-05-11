@@ -276,11 +276,14 @@ export default function App() {
 
   // If the picked source doesn't probe this target, fall back to "all".
   // Otherwise the chart silently filters to a source that has no data here.
+  // Guard on targets being loaded: on initial mount targetSources is [] while
+  // the fetch is in flight, which would incorrectly clear a ?source= URL param.
   useEffect(() => {
+    if (targets.length === 0) return;
     if (selectedSource && !targetSources.includes(selectedSource)) {
       setSelectedSource(null);
     }
-  }, [selectedSource, targetSources]);
+  }, [selectedSource, targetSources, targets.length]);
   const points = cycles?.points ?? [];
   const latest = points.length ? points[points.length - 1] : null;
   // Pin the chart x-axis to the server's echoed window so clicking 1y vs

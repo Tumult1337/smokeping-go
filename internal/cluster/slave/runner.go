@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/cluster"
@@ -21,6 +22,10 @@ type Runner struct {
 	local  *config.Config
 	client *Client
 	sink   *PushSink
+
+	// currentShim holds the latest config pulled from the master. Updated
+	// atomically by refreshLoop; read by the lifecycle via the Current closure.
+	currentShim atomic.Pointer[config.Config]
 
 	pushEvery  time.Duration
 	pullEvery  time.Duration // 0 = poll once on startup only
@@ -93,7 +98,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
 
-	reloads := make(chan *config.Config, 1)
+	reloads := make(chan struct{}, 1)
 
 	pushDone := make(chan struct{})
 	go func() {
@@ -103,16 +108,19 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}()
 
+	initial := buildShim(resp, r.local.Cluster)
+	r.currentShim.Store(initial)
+
 	refreshDone := make(chan struct{})
 	go func() {
 		defer close(refreshDone)
 		r.refreshLoop(runCtx, cancelRun, etag, reloads)
 	}()
 
-	initial := buildShim(resp, r.local.Cluster)
 	lifecycleErr := scheduler.RunLifecycle(runCtx, scheduler.LifecycleOptions{
 		Log:     r.log,
 		Initial: initial,
+		Current: r.currentShim.Load,
 		Build:   func(c *config.Config) (*scheduler.Scheduler, error) { return r.buildScheduler(c) },
 		Reloads: reloads,
 	})
@@ -141,7 +149,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // slave's lifetime and the operator must restart the process — or rotate
 // the target list on the master and trigger a slave restart — to pick up
 // changes. No goroutine is kept alive in that mode.
-func (r *Runner) refreshLoop(ctx context.Context, cancelRun context.CancelCauseFunc, etag string, reloads chan<- *config.Config) {
+func (r *Runner) refreshLoop(ctx context.Context, cancelRun context.CancelCauseFunc, etag string, reloads chan<- struct{}) {
 	if r.pullEvery == 0 {
 		return
 	}
@@ -167,8 +175,11 @@ func (r *Runner) refreshLoop(ctx context.Context, cancelRun context.CancelCauseF
 			}
 			etag = newEtag
 			shim := buildShim(newResp, r.local.Cluster)
+			// Store the new shim before signalling so the lifecycle's
+			// Current() call always sees the latest config.
+			r.currentShim.Store(shim)
 			select {
-			case reloads <- shim:
+			case reloads <- struct{}{}:
 			case <-ctx.Done():
 				return
 			}

@@ -92,7 +92,7 @@ func (r *Reader) bucketFor(res storage.Resolution) (string, error) {
 // falls back to successively finer tiers so fresh installs still show data.
 // See QueryFilter for Source semantics.
 func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution, f storage.QueryFilter) ([]storage.CyclePoint, error) {
-	for _, try := range fallbackChain(res) {
+	for _, try := range r.fallbackChain(res) {
 		bucket, err := r.bucketFor(try)
 		if err != nil {
 			return nil, err
@@ -109,15 +109,28 @@ func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to
 }
 
 // fallbackChain lists tiers to try, finest-last, so an empty rollup degrades
-// gracefully to raw. Raw is always the final fallback.
-func fallbackChain(res storage.Resolution) []storage.Resolution {
+// gracefully to raw. Raw is always the final fallback. The 5m tier is skipped
+// when Bucket5m is unconfigured to avoid querying the raw bucket twice.
+func (r *Reader) fallbackChain(res storage.Resolution) []storage.Resolution {
+	has5m := r.cfg.Bucket5m != ""
 	switch res {
 	case storage.Resolution1d:
-		return []storage.Resolution{storage.Resolution1d, storage.Resolution1h, storage.Resolution5m, storage.ResolutionRaw}
+		chain := []storage.Resolution{storage.Resolution1d, storage.Resolution1h}
+		if has5m {
+			chain = append(chain, storage.Resolution5m)
+		}
+		return append(chain, storage.ResolutionRaw)
 	case storage.Resolution1h:
-		return []storage.Resolution{storage.Resolution1h, storage.Resolution5m, storage.ResolutionRaw}
+		chain := []storage.Resolution{storage.Resolution1h}
+		if has5m {
+			chain = append(chain, storage.Resolution5m)
+		}
+		return append(chain, storage.ResolutionRaw)
 	case storage.Resolution5m:
-		return []storage.Resolution{storage.Resolution5m, storage.ResolutionRaw}
+		if has5m {
+			return []storage.Resolution{storage.Resolution5m, storage.ResolutionRaw}
+		}
+		return []storage.Resolution{storage.ResolutionRaw}
 	default:
 		return []storage.Resolution{storage.ResolutionRaw}
 	}
@@ -144,6 +157,12 @@ from(bucket: "%s")
 	for res2.Next() {
 		rec := res2.Record()
 		vals := rec.Values()
+		sent := intOf(vals["pings_sent"])
+		lost := intOf(vals["loss_count"])
+		lossPct := 0.0
+		if sent > 0 {
+			lossPct = 100 * float64(lost) / float64(sent)
+		}
 		cp := storage.CyclePoint{
 			Time:      rec.Time(),
 			Source:    stringOf(vals["source"]),
@@ -152,9 +171,9 @@ from(bucket: "%s")
 			Mean:      floatOf(vals["rtt_mean"]),
 			Median:    floatOf(vals["rtt_median"]),
 			StdDev:    floatOf(vals["rtt_stddev"]),
-			LossPct:   floatOf(vals["loss_pct"]),
-			LossCount: intOf(vals["loss_count"]),
-			Sent:      intOf(vals["pings_sent"]),
+			LossPct:   lossPct,
+			LossCount: lost,
+			Sent:      sent,
 		}
 		for _, acc := range storage.CyclePointPercentileAccessors {
 			acc.Set(&cp, floatOf(vals["rtt_"+acc.Name]))

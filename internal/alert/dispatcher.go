@@ -12,6 +12,7 @@ import (
 	"strings"
 	"text/template"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
@@ -79,7 +80,11 @@ func (d *ActionDispatcher) webhook(ctx context.Context, a config.Action, body st
 		"message": body,
 		"time":    e.Time.Format(time.RFC3339),
 	}
-	buf, _ := json.Marshal(payload)
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		d.log.Warn("webhook marshal payload", "err", err)
+		return
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.URL, bytes.NewReader(buf))
 	if err != nil {
 		d.log.Warn("webhook request", "err", err)
@@ -149,7 +154,11 @@ func (d *ActionDispatcher) discord(ctx context.Context, a config.Action, body st
 	}
 
 	payload := map[string]any{"embeds": []any{embed}}
-	buf, _ := json.Marshal(payload)
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		d.log.Warn("discord marshal payload", "err", err)
+		return
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.URL, bytes.NewReader(buf))
 	if err != nil {
 		d.log.Warn("discord request", "err", err)
@@ -180,12 +189,18 @@ func discordDescription(tmpl, body string, e Event) string {
 		buf.WriteString(formatHops(e.Cycle.Hops))
 		buf.WriteString("```")
 	}
-	// Discord embed descriptions are capped at 4096 chars.
+	// Discord embed descriptions are capped at 4096 chars; truncate on a valid
+	// UTF-8 boundary to avoid sending a malformed string.
 	const maxDesc = 4096
-	if buf.Len() > maxDesc {
-		return buf.String()[:maxDesc]
+	s := buf.String()
+	if len(s) > maxDesc {
+		n := maxDesc
+		for n > 0 && !utf8.RuneStart(s[n]) {
+			n--
+		}
+		return s[:n]
 	}
-	return buf.String()
+	return s
 }
 
 func discordColor(s State) int {

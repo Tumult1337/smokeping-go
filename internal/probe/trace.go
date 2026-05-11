@@ -69,7 +69,7 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 				break
 			}
 			seq := ((round * (maxTTL + 1)) + ttl) & 0xffff
-			srcIP, rtt, reached, err := sendTTL(conn, ip, isV6, id, seq, ttl, timeout)
+			srcIP, rtt, reached, err := sendTTL(ctx, conn, ip, isV6, id, seq, ttl, timeout)
 			agg[ttl].sent++
 			if err != nil || srcIP == "" {
 				agg[ttl].lost++
@@ -116,7 +116,7 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 // (we reached the target) or a TimeExceeded whose embedded packet matches our
 // seq (an intermediate router). Replies for other sequences are ignored and
 // reading continues until the per-probe deadline.
-func sendTTL(conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int, timeout time.Duration) (string, time.Duration, bool, error) {
+func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int, timeout time.Duration) (string, time.Duration, bool, error) {
 	var msg icmp.Message
 	if isV6 {
 		msg = icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq, Data: payload()}}
@@ -138,8 +138,11 @@ func sendTTL(conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int
 		}
 	}
 
-	deadline := time.Now().Add(timeout)
-	if err := conn.SetReadDeadline(deadline); err != nil {
+	dl := time.Now().Add(timeout)
+	if ctxDL, ok := ctx.Deadline(); ok && ctxDL.Before(dl) {
+		dl = ctxDL
+	}
+	if err := conn.SetReadDeadline(dl); err != nil {
 		return "", 0, false, err
 	}
 

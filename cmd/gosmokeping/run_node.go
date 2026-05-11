@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/tumult/gosmokeping/internal/alert"
 	"github.com/tumult/gosmokeping/internal/api"
@@ -89,6 +90,20 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token).Handler()
 		slaveLister = clusterRegistry
 		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
+		// Evict slaves that haven't checked in for 24 hours to prevent unbounded
+		// registry growth in environments with ephemeral or renamed slaves.
+		go func() {
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					clusterRegistry.Sweep(24 * time.Hour)
+				}
+			}
+		}()
 	}
 
 	server := api.New(api.Options{
@@ -99,11 +114,9 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		ClusterHandler: clusterHandler,
 		Slaves:         slaveLister,
 	})
+	serverDone := make(chan error, 1)
 	go func() {
-		if err := api.Serve(ctx, log, cfg.Listen, server.Router()); err != nil {
-			log.Error("http server", "err", err)
-			cancel()
-		}
+		serverDone <- api.Serve(ctx, log, cfg.Listen, server.Router())
 	}()
 
 	// The Supervisor owns the scheduler goroutine across config reloads. Build
@@ -137,5 +150,11 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		os.Exit(1)
 	}
 
+	// Wait for the HTTP server to finish draining in-flight requests before
+	// closing the backend — otherwise handlers still running after the scheduler
+	// stops could call a closed reader.
+	if err := <-serverDone; err != nil {
+		log.Error("http server", "err", err)
+	}
 	log.Info("gosmokeping shutting down")
 }
