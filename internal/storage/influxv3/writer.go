@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/InfluxCommunity/influxdb3-go/v2/influxdb3"
@@ -37,6 +38,18 @@ import (
 const (
 	batchSize     = 1000
 	batchInterval = 1 * time.Second
+
+	// cycleQueueCap matches v2: OnCycle is called synchronously by every
+	// per-target scheduler goroutine, and the batcher's Add path emits
+	// synchronously under its own lock when the batch fills — so a slow
+	// v3 write would otherwise freeze every probing goroutine. With a
+	// queue here OnCycle stays non-blocking and the freshest cycle wins
+	// when storage is sick.
+	cycleQueueCap = 1024
+
+	// droppedReportInterval limits how often we log accumulated drops so
+	// a long outage doesn't fill the log.
+	droppedReportInterval = time.Minute
 )
 
 const (
@@ -52,20 +65,24 @@ const (
 // OnCycle), plus one row per MTR hop. The point shape mirrors the v2 backend
 // verbatim so a v2→v3 migration is a config flip, not a schema rewrite.
 //
-// Writes flow through the official batching.Batcher: OnCycle stages points
-// in the batcher and a background goroutine flushes either when a batch
-// fills (default 1000 points) or once per batchInterval. This is the
-// recommended pattern for InfluxDB v3 high-write workloads — sync writes
-// would force one HTTP roundtrip per cycle, which is the bottleneck a
-// many-slave master is trying to avoid.
+// Writes flow through an internal cycle queue → a single drainLoop goroutine
+// → the official batching.Batcher → the v3 client. OnCycle is non-blocking:
+// it enqueues a cycle and returns. The drainLoop owns all batcher access
+// (Add and Flush both happen on this one goroutine, so the batcher's own
+// lock-free Flush never races against Add), and is the only goroutine that
+// can be stalled by a slow v3 write — the scheduler stays on cadence.
+// When the queue saturates because Influx is sick, OnCycle drops the
+// oldest queued cycle so the freshest data wins.
 type Writer struct {
 	log     *slog.Logger
 	client  *influxdb3.Client
 	batcher *batching.Batcher
 
-	stop   chan struct{}
-	done   chan struct{}
-	closed sync.Once
+	queue   chan scheduler.Cycle
+	stop    chan struct{}
+	done    chan struct{}
+	closed  sync.Once
+	dropped atomic.Int64
 }
 
 // NewWriter constructs a Writer backed by a v3 client. The auth scheme is
@@ -86,6 +103,7 @@ func NewWriter(log *slog.Logger, cfg config.InfluxV3) (*Writer, error) {
 	w := &Writer{
 		log:    log,
 		client: c,
+		queue:  make(chan scheduler.Cycle, cycleQueueCap),
 		stop:   make(chan struct{}),
 		done:   make(chan struct{}),
 	}
@@ -93,25 +111,49 @@ func NewWriter(log *slog.Logger, cfg config.InfluxV3) (*Writer, error) {
 		batching.WithSize(batchSize),
 		batching.WithEmitCallback(w.flush),
 	)
-	go w.tick()
+	go w.drainLoop()
 	return w, nil
 }
 
-// tick periodically drains anything sitting in the batcher so a quiet
-// install isn't holding the most recent cycle indefinitely waiting for
-// the next size-trigger. A separate goroutine is the simplest way to add
-// time-based flushing on top of the size-only batching package.
-func (w *Writer) tick() {
+// drainLoop is the single owner of batcher access. It pulls cycles off the
+// queue (calls Add, which may block when the batch fills and triggers a
+// synchronous emit) and periodically Flushes so a quiet install doesn't
+// hold the last cycle in RAM forever. Doing both on one goroutine is what
+// makes the lock-free batching.Flush safe in our usage.
+func (w *Writer) drainLoop() {
 	defer close(w.done)
-	t := time.NewTicker(batchInterval)
-	defer t.Stop()
+	tick := time.NewTicker(batchInterval)
+	defer tick.Stop()
+	report := time.NewTicker(droppedReportInterval)
+	defer report.Stop()
+	var lastReported int64
 	for {
 		select {
-		case <-w.stop:
-			return
-		case <-t.C:
+		case c := <-w.queue:
+			w.addToBatcher(c)
+		case <-tick.C:
 			if pts := w.batcher.Flush(); len(pts) > 0 {
 				w.flush(pts)
+			}
+		case <-report.C:
+			if cur := w.dropped.Load(); cur > lastReported {
+				w.log.Warn("dropped cycles under storage backpressure",
+					"since_last_report", cur-lastReported,
+					"total", cur)
+				lastReported = cur
+			}
+		case <-w.stop:
+			// Best-effort drain: stage everything still queued, then flush.
+			for {
+				select {
+				case c := <-w.queue:
+					w.addToBatcher(c)
+				default:
+					if pts := w.batcher.Flush(); len(pts) > 0 {
+						w.flush(pts)
+					}
+					return
+				}
 			}
 		}
 	}
@@ -146,11 +188,31 @@ func (w *Writer) Close() {
 	})
 }
 
-// OnCycle satisfies scheduler.Sink. Stages points in the batcher and returns
-// quickly; the actual HTTP write happens on the next batch fill or tick.
-// ctx is unused — the batcher fires its emit callback async (see flush) and
-// callers shouldn't block the scheduler waiting for a network roundtrip.
+// OnCycle satisfies scheduler.Sink. MUST NOT block — the per-target
+// scheduler goroutine calls this synchronously. We enqueue and let the
+// drainLoop do the (potentially slow) batcher Add and HTTP write. If the
+// queue is full because storage is stuck, drop the oldest cycle so
+// monitoring keeps producing fresh data instead of freezing every target.
 func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
+	for {
+		select {
+		case w.queue <- c:
+			return
+		default:
+		}
+		select {
+		case <-w.queue:
+			w.dropped.Add(1)
+		default:
+			// Drained by a concurrent producer; loop and retry the send.
+		}
+	}
+}
+
+// addToBatcher turns a cycle into points and stages them. Called only from
+// drainLoop, so a slow batcher.Add (which may trigger a synchronous emit
+// when the batch fills) stalls the drainLoop, never the scheduler.
+func (w *Writer) addToBatcher(c scheduler.Cycle) {
 	tags := map[string]string{
 		"target": c.Target.Target.Name,
 		"group":  c.Target.Group,
