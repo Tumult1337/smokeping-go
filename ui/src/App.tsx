@@ -560,7 +560,7 @@ export default function App() {
                       setPickedSource(null);
                     }}
                     source={pickedSource ?? sourceParam}
-                    hideZeroLoss={hideZeroLossHops && pickedSec == null}
+                    hideZeroLoss={false}
                   />
                 </div>
                 {fromSec != null && toSec != null && (
