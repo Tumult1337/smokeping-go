@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,15 @@ type HTTP struct {
 	spacing  time.Duration
 	insecure bool
 	client   *http.Client
+
+	// famClients caches family-pinned http.Client instances ("v4" / "v6")
+	// so each cycle reuses an existing connection pool instead of building
+	// a fresh http.Transport. Without this cache, every probe call for a
+	// family-pinned target allocates a new transport whose idle TCP
+	// connections survive until GC + finalizer reclaim them — a slow leak
+	// over weeks of uptime. Bounded to two entries in practice.
+	famMu      sync.RWMutex
+	famClients map[string]*http.Client
 }
 
 // NewHTTP builds an HTTP probe. If insecure is true, TLS verification is
@@ -50,6 +60,7 @@ func NewHTTP(name string, timeout time.Duration, insecure bool) *HTTP {
 				return http.ErrUseLastResponse
 			},
 		},
+		famClients: make(map[string]*http.Client),
 	}
 }
 
@@ -58,10 +69,34 @@ func NewHTTP(name string, timeout time.Duration, insecure bool) *HTTP {
 // transport and overrides its DialContext with a net.Dialer tied to tcp4/tcp6,
 // so connection reuse stays per-family rather than global; with maxHTTPRequests
 // == 2 that's fine.
+//
+// Results are cached per family for the life of the probe — building a fresh
+// http.Transport on every cycle would leak its connection pool until GC.
 func (p *HTTP) clientFor(family string) *http.Client {
 	if family == "" {
 		return p.client
 	}
+	p.famMu.RLock()
+	c, ok := p.famClients[family]
+	p.famMu.RUnlock()
+	if ok {
+		return c
+	}
+
+	p.famMu.Lock()
+	defer p.famMu.Unlock()
+	// Re-check under the write lock so two readers racing past the fast
+	// path don't both construct a client and then disagree on which one
+	// the cache holds.
+	if c, ok := p.famClients[family]; ok {
+		return c
+	}
+	c = p.buildFamilyClient(family)
+	p.famClients[family] = c
+	return c
+}
+
+func (p *HTTP) buildFamilyClient(family string) *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	if p.insecure {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
