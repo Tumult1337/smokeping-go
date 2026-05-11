@@ -11,3 +11,4 @@ internal/ui/dist/*
 .playwright-mcp/
 .claude/
 .worktrees/
+todo.md
