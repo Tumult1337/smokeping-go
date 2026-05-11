@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
@@ -30,6 +32,20 @@ const (
 	// tag) to avoid series cardinality exploding on pages that cycle through
 	// error codes.
 	measurementHTTP = "probe_http"
+
+	// cycleQueueCap bounds memory if Influx becomes unhealthy. OnCycle is
+	// called synchronously by every per-target scheduler goroutine, and the
+	// underlying WriteAPI.WritePoint blocks on its own bounded channel when
+	// the influx-client-go background flusher can't keep up — which is
+	// exactly what froze the whole scheduler when the disk filled. With a
+	// queue here, OnCycle stays non-blocking and the freshest cycle wins
+	// over the oldest when storage is sick.
+	cycleQueueCap = 1024
+
+	// droppedReportInterval limits how often we log accumulated drops so a
+	// long outage doesn't fill the log; one summary per minute is enough to
+	// see the problem in the logs without being noisy.
+	droppedReportInterval = time.Minute
 )
 
 // Writer writes completed cycles to InfluxDB. Implements scheduler.Sink.
@@ -37,11 +53,21 @@ const (
 // point per individual RTT (also in the raw bucket) so the UI can render
 // the full smoke band at close range. The 1h/1d buckets are populated by
 // rollup tasks installed in Bootstrap.
+//
+// OnCycle is non-blocking: cycles land on an internal bounded queue and a
+// single goroutine drains it into the v2 write API. When Influx is sick the
+// write side stalls and our queue fills; we then drop the oldest cycle to
+// make room for the new one, so monitoring keeps producing fresh data
+// instead of freezing every probing goroutine in lockstep.
 type Writer struct {
-	log    *slog.Logger
-	client influxdb2.Client
-	write  api.WriteAPI
-	cfg    config.InfluxV2
+	log     *slog.Logger
+	client  influxdb2.Client
+	write   api.WriteAPI
+	cfg     config.InfluxV2
+	queue   chan scheduler.Cycle
+	stop    chan struct{}
+	wg      sync.WaitGroup
+	dropped atomic.Int64
 }
 
 // NewWriter constructs a Writer backed by a new v2 client. The caller must
@@ -49,17 +75,31 @@ type Writer struct {
 func NewWriter(log *slog.Logger, cfg config.InfluxV2) *Writer {
 	client := influxdb2.NewClient(cfg.URL, cfg.Token)
 	wa := client.WriteAPI(cfg.Org, cfg.BucketRaw)
+	w := &Writer{
+		log:    log,
+		client: client,
+		write:  wa,
+		cfg:    cfg,
+		queue:  make(chan scheduler.Cycle, cycleQueueCap),
+		stop:   make(chan struct{}),
+	}
 	// Log async write errors instead of silently dropping them.
 	go func() {
 		for err := range wa.Errors() {
 			log.Warn("influx async write", "err", err)
 		}
 	}()
-	return &Writer{log: log, client: client, write: wa, cfg: cfg}
+	w.wg.Add(1)
+	go w.flushLoop()
+	return w
 }
 
-// Close flushes pending writes and releases the client.
+// Close flushes pending writes and releases the client. Best-effort: the
+// flush goroutine drains whatever's still in the queue before we tell the
+// underlying client to flush its own buffers and shut down.
 func (w *Writer) Close() {
+	close(w.stop)
+	w.wg.Wait()
 	if w.write != nil {
 		w.write.Flush()
 	}
@@ -68,10 +108,67 @@ func (w *Writer) Close() {
 	}
 }
 
-// OnCycle satisfies scheduler.Sink. Writes a cycle-level aggregate point
-// plus either per-ping RTT rows or per-request HTTP rows (mutually
-// exclusive — see comment below), plus one row per MTR hop when present.
+// OnCycle satisfies scheduler.Sink. MUST NOT block — the per-target
+// goroutines in scheduler.loopTarget call this synchronously and the next
+// tick on that target can't fire until we return. We enqueue and let the
+// flushLoop do the (potentially slow) WritePoint calls; if the queue is
+// full because storage is stuck, drop the oldest cycle to make room.
 func (w *Writer) OnCycle(_ context.Context, c scheduler.Cycle) {
+	for {
+		select {
+		case w.queue <- c:
+			return
+		default:
+		}
+		// Queue full. Drain one oldest cycle to make room and retry.
+		// Concurrent enqueuers may race; the loop converges because each
+		// iteration either lands the cycle or frees a slot for someone.
+		select {
+		case <-w.queue:
+			w.dropped.Add(1)
+		default:
+			// Drained by a concurrent producer; loop and try the send again.
+		}
+	}
+}
+
+// flushLoop is the single drainer of w.queue. It runs in a dedicated
+// goroutine so that a slow or stalled v2 write pipeline can't propagate
+// back-pressure to the probing goroutines via OnCycle.
+func (w *Writer) flushLoop() {
+	defer w.wg.Done()
+	report := time.NewTicker(droppedReportInterval)
+	defer report.Stop()
+	var lastReported int64
+	for {
+		select {
+		case c := <-w.queue:
+			w.writeCycle(c)
+		case <-report.C:
+			if cur := w.dropped.Load(); cur > lastReported {
+				w.log.Warn("dropped cycles under storage backpressure",
+					"since_last_report", cur-lastReported,
+					"total", cur)
+				lastReported = cur
+			}
+		case <-w.stop:
+			// Best-effort drain: write what's already queued, then exit.
+			for {
+				select {
+				case c := <-w.queue:
+					w.writeCycle(c)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// writeCycle is the body that used to be OnCycle: the actual WritePoint
+// calls into the v2 write API. Split out so OnCycle is the cheap enqueue
+// and the slow path runs only from the flush goroutine.
+func (w *Writer) writeCycle(c scheduler.Cycle) {
 	tags := map[string]string{
 		"target": c.Target.Target.Name,
 		"group":  c.Target.Group,
