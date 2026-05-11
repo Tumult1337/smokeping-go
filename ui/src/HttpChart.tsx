@@ -215,14 +215,9 @@ export function HttpChart({
   // Pin the x scale only when the requested window changes. On a plain data
   // refresh (same fromSec/toSec) we skip the pin and pass resetScales=false
   // so any drag-zoom survives the tick.
-  const pinRef = useRef<{ from?: number; to?: number }>({});
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
-    const pinChanged =
-      pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
-    pinRef.current = { from: fromSec, to: toSec };
-    const pin = pinChanged && fromSec != null && toSec != null;
     let data: AlignedData;
     if (points.length === 0) {
       data = [[], [], []];
@@ -238,8 +233,13 @@ export function HttpChart({
       const statuses = points.map((p) => p.Status);
       data = [ts, rtts, statuses];
     }
+    // Always call setScale("x") when the window is known — not just on change.
+    // setScale("x") is what triggers uPlot's y auto-range; without it, if the
+    // http data arrives after the x-scale was already pinned on empty data, y
+    // stays at the empty-data default [0,1] and every bar renders off-scale,
+    // filling the whole canvas with a solid source colour.
     u.batch(() => {
-      if (pin) {
+      if (fromSec != null && toSec != null) {
         internalScaleRef.current = true;
         u.setScale("x", { min: fromSec, max: toSec });
         internalScaleRef.current = false;
