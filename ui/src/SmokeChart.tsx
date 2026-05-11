@@ -52,7 +52,13 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   // Stable signature of the source set. Only when this changes do we have to
   // tear down uPlot — series/bands topology depends on the source count, but
   // in-place setData handles value updates.
-  const sourcesKey = built.sources.join("|");
+  //
+  // Prefix with count so the zero-source initial state ("0|") doesn't collide
+  // with a single-source-named-"" steady state ("1|"). Without the prefix
+  // both join to "" and the rebuild effect skips when a target whose Source
+  // field is empty replaces the initial empty data — same trap that the
+  // bars chart hit and 319a399 fixed there.
+  const sourcesKey = `${built.sources.length}|${built.sources.join("|")}`;
 
   // Cursor idx drives the custom legend below the chart. null = cursor off the
   // plot; the legend falls back to the last data index (uPlot-default "live"
