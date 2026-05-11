@@ -26,13 +26,15 @@ const (
 	ret1d  = int64(2 * 365 * 24 * 3600) // 2y
 )
 
-// Bootstrap ensures buckets and rollup tasks exist. Safe to call repeatedly.
-// If a bucket already exists its retention is not modified (operators may have
-// intentionally tuned it). If a task with the same name exists, its Flux is
-// left as-is for the same reason.
 // Bootstrap ensures buckets and rollup tasks exist for the v2 backend.
-// Safe to call repeatedly; existing buckets keep their retention and
-// existing tasks keep their Flux body.
+// Safe to call repeatedly. Existing buckets keep their retention with one
+// exception: a managed bucket whose current retention is infinite gets
+// corrected to the managed default (e.g. 7d for raw). Infinite retention
+// on a managed bucket is almost always a holdover from earlier releases
+// that left raw uncapped, and leaving it uncapped is what fills the disk
+// and wedges the writer. Operators who want a *different* finite retention
+// can set it after bootstrap; we won't second-guess any non-zero value.
+// Existing rollup tasks keep their Flux body.
 func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV2) error {
 	if cfg.Bucket1h == "" || cfg.Bucket1d == "" {
 		log.Info("rollup buckets not configured, skipping task bootstrap",
@@ -74,16 +76,29 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV2) error
 
 	bAPI := client.BucketsAPI()
 	for _, b := range buckets {
-		if _, err := bAPI.FindBucketByName(ctx, b.name); err == nil {
+		existing, err := bAPI.FindBucketByName(ctx, b.name)
+		if err == nil {
+			if isInfiniteRetention(existing) {
+				rrType := domain.RetentionRuleTypeExpire
+				existing.RetentionRules = domain.RetentionRules{{
+					EverySeconds: b.retention,
+					Type:         &rrType,
+				}}
+				if _, err := bAPI.UpdateBucket(ctx, existing); err != nil {
+					return fmt.Errorf("update bucket %q retention: %w", b.name, err)
+				}
+				log.Warn("corrected infinite retention on managed bucket",
+					"name", b.name, "retention_s", b.retention)
+				continue
+			}
 			log.Info("bucket exists", "name", b.name)
 			continue
 		}
 		rrType := domain.RetentionRuleTypeExpire
-		_, err := bAPI.CreateBucketWithNameWithID(ctx, orgID, b.name, domain.RetentionRule{
+		if _, err := bAPI.CreateBucketWithNameWithID(ctx, orgID, b.name, domain.RetentionRule{
 			EverySeconds: b.retention,
 			Type:         &rrType,
-		})
-		if err != nil {
+		}); err != nil {
 			return fmt.Errorf("create bucket %q: %w", b.name, err)
 		}
 		log.Info("bucket created", "name", b.name, "retention_s", b.retention)
@@ -115,6 +130,21 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV2) error
 		}
 	}
 	return nil
+}
+
+// isInfiniteRetention reports whether a managed bucket currently has no
+// expire policy — either zero rules at all, or any rule with EverySeconds == 0
+// (which the v2 API documents as infinite retention).
+func isInfiniteRetention(b *domain.Bucket) bool {
+	if len(b.RetentionRules) == 0 {
+		return true
+	}
+	for _, r := range b.RetentionRules {
+		if r.EverySeconds == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // deleteObsoleteTasks removes task revisions older than `keep`. Safe to call
