@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Fuse from "fuse.js";
 import {
   listTargets,
   getCycles,
@@ -133,6 +134,8 @@ export default function App() {
   // Tracks which source is currently soloed in the chart (set by onSoloChange
   // callback). Used to filter the window stats block below the chart.
   const [chartSoloSource, setChartSoloSource] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -251,6 +254,19 @@ export default function App() {
     setRefreshTick((n) => n + 1);
   }, []);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (e.key === "/" || (e.key === "k" && (e.ctrlKey || e.metaKey))) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
   const groups = useMemo(() => {
     // Preserve first-seen group_title so the sidebar label honours the config
     // even if only the first target in a group sets it (they all should, but
@@ -266,6 +282,22 @@ export default function App() {
     }
     return Array.from(byGroup.entries());
   }, [targets]);
+
+  const fuse = useMemo(
+    () =>
+      new Fuse(targets, {
+        keys: ["title", "name", "host", "id"],
+        threshold: 0.4,
+        includeScore: true,
+      }),
+    [targets],
+  );
+
+  const searchResults = useMemo(() => {
+    const q = searchQuery.trim();
+    if (!q) return null;
+    return fuse.search(q).map((r) => r.item);
+  }, [fuse, searchQuery]);
 
   const selected = targets.find((t) => t.id === selectedId) ?? null;
   const selectedProbeType = selected?.probe_type;
@@ -346,34 +378,69 @@ export default function App() {
       )}
       <aside className="sidebar">
         <h1>gosmokeping</h1>
-        {groups.length === 0 && <div className="empty">No targets</div>}
-        {groups.map(([group, entry]) => {
-          const collapsed = collapsedGroups.has(group);
-          return (
-            <div key={group}>
+        <div className="search-wrap">
+          <input
+            ref={searchInputRef}
+            className="search-input"
+            type="search"
+            placeholder="Search targets… ( / )"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setSearchQuery("");
+                searchInputRef.current?.blur();
+              }
+            }}
+            aria-label="Search targets"
+          />
+        </div>
+        {searchResults !== null ? (
+          searchResults.length === 0 ? (
+            <div className="empty" style={{ padding: "16px 0" }}>No matches</div>
+          ) : (
+            searchResults.map((t) => (
               <button
-                type="button"
-                className="group-title"
-                aria-expanded={!collapsed}
-                onClick={() => toggleGroup(group)}
+                key={t.id}
+                className={`target-item ${t.id === selectedId ? "active" : ""}`}
+                onClick={() => pickTarget(t.id)}
               >
-                <span className="group-caret">{collapsed ? "▸" : "▾"}</span>
-                {entry.title}
-                <span className="group-count">{entry.targets.length}</span>
+                {t.title || t.name}
               </button>
-              {!collapsed &&
-                entry.targets.map((t) => (
+            ))
+          )
+        ) : (
+          <>
+            {groups.length === 0 && <div className="empty">No targets</div>}
+            {groups.map(([group, entry]) => {
+              const collapsed = collapsedGroups.has(group);
+              return (
+                <div key={group}>
                   <button
-                    key={t.id}
-                    className={`target-item ${t.id === selectedId ? "active" : ""}`}
-                    onClick={() => pickTarget(t.id)}
+                    type="button"
+                    className="group-title"
+                    aria-expanded={!collapsed}
+                    onClick={() => toggleGroup(group)}
                   >
-                    {t.title || t.name}
+                    <span className="group-caret">{collapsed ? "▸" : "▾"}</span>
+                    {entry.title}
+                    <span className="group-count">{entry.targets.length}</span>
                   </button>
-                ))}
-            </div>
-          );
-        })}
+                  {!collapsed &&
+                    entry.targets.map((t) => (
+                      <button
+                        key={t.id}
+                        className={`target-item ${t.id === selectedId ? "active" : ""}`}
+                        onClick={() => pickTarget(t.id)}
+                      >
+                        {t.title || t.name}
+                      </button>
+                    ))}
+                </div>
+              );
+            })}
+          </>
+        )}
       </aside>
 
       <main className="main">

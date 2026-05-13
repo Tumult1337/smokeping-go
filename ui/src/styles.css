@@ -32,8 +32,31 @@ body {
 
 .sidebar h1 {
   font-size: 18px;
-  margin: 0 0 16px;
+  margin: 0 0 12px;
 }
+
+.search-wrap {
+  position: relative;
+  margin-bottom: 12px;
+}
+
+.search-input {
+  width: 100%;
+  background: #141822;
+  color: #e6e6e6;
+  border: 1px solid #2a3142;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.search-input::placeholder { color: #4a5160; }
+.search-input:focus { border-color: #5eead4; }
+/* suppress browser-native clear button (we use the native type=search clear) */
+.search-input::-webkit-search-cancel-button { opacity: 0.4; cursor: pointer; }
 
 .group-title {
   display: flex;
