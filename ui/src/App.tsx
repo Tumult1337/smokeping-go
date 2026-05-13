@@ -11,7 +11,7 @@ import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
 import { HopsTable } from "./HopsTable";
 import { MtrHeatmap } from "./MtrHeatmap";
-import { paletteForSorted } from "./palette";
+import { paletteForSorted, lossColor } from "./palette";
 
 type Range = "-1h" | "-6h" | "-24h" | "-7d" | "-30d" | "-180d" | "-365d";
 type ChartStyle = "band" | "bars";
@@ -293,7 +293,8 @@ export default function App() {
     if (points.length === 0) return null;
     const valid = points.filter((p) => p.LossPct < 100);
     const loss = points.reduce((s, p) => s + p.LossPct, 0) / points.length;
-    if (valid.length === 0) return { median: null, p95: null, min: null, max: null, loss };
+    const maxLoss = points.reduce((m, p) => (p.LossPct > m ? p.LossPct : m), 0);
+    if (valid.length === 0) return { median: null, p95: null, min: null, max: null, loss, maxLoss };
     const median = valid.reduce((s, p) => s + p.Median, 0) / valid.length;
     const p95 = valid.reduce((s, p) => s + p.P95, 0) / valid.length;
     // Skip Min=0 rollup artifacts (Flux min() poisoned by 100%-loss sub-cycles).
@@ -302,7 +303,7 @@ export default function App() {
       return floor > 0 && floor < m ? floor : m;
     }, Infinity);
     const max = valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity);
-    return { median, p95, min: isFinite(min) ? min : null, max: isFinite(max) ? max : null, loss };
+    return { median, p95, min: isFinite(min) ? min : null, max: isFinite(max) ? max : null, loss, maxLoss };
   }, [points]);
   // Pin the chart x-axis to the server's echoed window so clicking 1y vs
   // 30d visibly changes the span even when only a slice has data. Falls back
@@ -565,7 +566,17 @@ export default function App() {
                       </strong>
                     </span>
                     <span>
-                      loss: <strong>{windowStats.loss.toFixed(1)}%</strong>
+                      loss:{" "}
+                      <strong style={{ color: lossColor(windowStats.loss, "#8a93a6") }}>
+                        {windowStats.loss.toFixed(1)}%
+                      </strong>{" "}
+                      <span style={{ color: "#8a93a6" }}>
+                        (max{" "}
+                        <strong style={{ color: lossColor(windowStats.maxLoss, "#8a93a6") }}>
+                          {windowStats.maxLoss.toFixed(1)}%
+                        </strong>
+                        )
+                      </span>
                     </span>
                   </div>
                 )}
