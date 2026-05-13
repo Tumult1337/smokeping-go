@@ -776,3 +776,36 @@ func TestCachingReader_Stats_TracksHopsHitsAndMisses(t *testing.T) {
 		t.Fatalf("hops stats: got hits=%d misses=%d, want hits=2 misses=2", stats.HopsHits, stats.HopsMisses)
 	}
 }
+
+func TestCachingReader_HopsTimeline_ServesStaleCacheOnError(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	clock := now
+	inner := &fakeReader{hops: []HopPoint{{Time: now, Index: 1, IP: "1.1.1.1"}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return clock }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	// Warm the cache with a successful query.
+	if _, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	// Advance past the TTL so the entry is stale.
+	clock = now.Add(cacheTTLLive + time.Second)
+	// Inject a failure into the inner reader.
+	inner.err = errors.New("influx down")
+
+	// Stale data must be served silently — no error, correct index.
+	hops, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{})
+	if err != nil {
+		t.Fatalf("got error %v; want stale data served silently", err)
+	}
+	if len(hops) != 1 || hops[0].Index != 1 {
+		t.Fatalf("got %+v; want stale hop with Index=1", hops)
+	}
+	// Inner was called twice: once to warm, once on the stale miss.
+	if got := inner.hopsTimeline.Load(); got != 2 {
+		t.Fatalf("inner calls: got %d want 2", got)
+	}
+}

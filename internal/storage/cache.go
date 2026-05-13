@@ -422,15 +422,24 @@ func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl
 	runCtx := context.WithoutCancel(ctx)
 	hops, err := run(runCtx)
 
+	var stale []HopPoint
 	c.hopsMu.Lock()
 	if err == nil {
 		c.hopsStoreLocked(key, hops, ttl)
+	} else if elem, ok := c.hopsItems[key]; ok {
+		e := elem.Value.(*hopsCacheEntry)
+		stale = make([]HopPoint, len(e.points))
+		copy(stale, e.points)
 	}
 	delete(c.hopsInflight, key)
 	c.hopsMu.Unlock()
 
-	call.points = hops
-	call.err = err
+	if err != nil && stale != nil {
+		call.points = stale // call.err stays nil: stale served silently
+	} else {
+		call.points = hops
+		call.err = err
+	}
 	close(call.done)
 }
 
@@ -443,8 +452,7 @@ func (c *CachingReader) hopsLookup(key hopsCacheKey) ([]HopPoint, bool) {
 	}
 	e := elem.Value.(*hopsCacheEntry)
 	if c.nowFn().After(e.expires) {
-		c.hopsOrder.Remove(elem)
-		delete(c.hopsItems, key)
+		// Leave stale entry in LRU; runHopsLeader serves it on inner failure.
 		return nil, false
 	}
 	c.hopsOrder.MoveToFront(elem)
