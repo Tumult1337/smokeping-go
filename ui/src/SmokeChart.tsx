@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series, type Band } from "uplot";
 import type { CyclePoint } from "./api";
-import { PALETTE } from "./palette";
+import { PALETTE, lossColor } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
 
 interface Props {
@@ -34,6 +34,8 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   // data extent (sparse data would collapse the zoom check to a false reset).
   const requestedWindowRef = useRef<{ from?: number; to?: number }>({});
   requestedWindowRef.current = { from: fromSec, to: toSec };
+
+  const lossMarkersRef = useRef<LossMarker[]>([]);
 
   const built = useMemo(() => buildAligned(points), [points]);
   // Stable signature of the source set. Only when this changes do we have to
@@ -91,6 +93,39 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       // clear it.
       cursor: { bind: { dblclick: () => null } },
       hooks: {
+        draw: [
+          (u) => {
+            const markers = lossMarkersRef.current;
+            if (markers.length === 0) return;
+            const ctx = u.ctx;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
+            ctx.clip();
+            for (const { ts, medians, losses, stroke } of markers) {
+              const n = ts.length;
+              if (n === 0) continue;
+              const cxs = ts.map((t) => u.valToPos(t, "x", true));
+              for (let i = 0; i < n; i++) {
+                if (losses[i] <= 0) continue;
+                const med = medians[i];
+                if (med == null) continue;
+                const cx = cxs[i];
+                let lo: number, hi: number;
+                if (n === 1) { lo = cx - 3; hi = cx + 3; }
+                else if (i === 0) { hi = (cx + cxs[i + 1]) / 2; lo = cx - (hi - cx); }
+                else if (i === n - 1) { lo = (cxs[i - 1] + cx) / 2; hi = cx + (cx - lo); }
+                else { lo = (cxs[i - 1] + cx) / 2; hi = (cx + cxs[i + 1]) / 2; }
+                const x = Math.floor(lo);
+                const w = Math.max(1, Math.ceil(hi) - x);
+                const yMed = Math.round(u.valToPos(med, "y", true));
+                ctx.fillStyle = lossColor(losses[i], stroke);
+                ctx.fillRect(x, yMed - 1, w, 2);
+              }
+            }
+            ctx.restore();
+          },
+        ],
         setCursor: [
           (u) => {
             const next = u.cursor.idx ?? null;
@@ -196,6 +231,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
     pinRef.current = { from: fromSec, to: toSec };
     const pin = pinChanged && fromSec != null && toSec != null;
+    lossMarkersRef.current = built.lossMarkers;
     u.batch(() => {
       if (pin) {
         internalScaleRef.current = true;
@@ -284,16 +320,23 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
 }
 
 
+// Per-source data for the in-chart loss tick draw hook. Kept separate from
+// LossSeries (which LossStripCanvas uses) so the shared type stays lean.
+type LossMarker = {
+  ts: number[];
+  medians: (number | null)[];
+  losses: number[];
+  stroke: string;
+};
+
 type Built = {
   sources: string[];
   data: AlignedData;
   series: Series[];
   bands: Band[];
   lossSeries: LossSeries[];
-  // anyLoss lets the draw hook skip the whole strip computation when no
-  // source is lossy across the requested window — a clean target renders
-  // exactly like before this change.
   anyLoss: boolean;
+  lossMarkers: LossMarker[];
 };
 
 const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
@@ -312,6 +355,7 @@ function buildAligned(points: CyclePoint[]): Built {
       bands: bandsFor(1),
       lossSeries: [],
       anyLoss: false,
+      lossMarkers: [],
     };
   }
 
@@ -342,6 +386,7 @@ function buildAligned(points: CyclePoint[]): Built {
   const series: Series[] = [xSeries];
   const bands: Band[] = [];
   const lossSeries: LossSeries[] = [];
+  const lossMarkers: LossMarker[] = [];
   let anyLoss = false;
 
   sources.forEach((name, srcIdx) => {
@@ -372,9 +417,11 @@ function buildAligned(points: CyclePoint[]): Built {
 
     const ts = sorted.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
     const losses = sorted.map((p) => p.LossPct);
+    const medians = sorted.map((p) => p.LossPct >= 100 ? null : p.Median);
     const hasLoss = losses.some((l) => l > 0);
     if (hasLoss) anyLoss = true;
     lossSeries.push({ ts, losses, hasLoss });
+    lossMarkers.push({ ts, medians, losses, stroke: palette.stroke });
   });
 
   bands.push(...bandsFor(sources.length));
@@ -386,6 +433,7 @@ function buildAligned(points: CyclePoint[]): Built {
     bands,
     lossSeries,
     anyLoss,
+    lossMarkers,
   };
 }
 
