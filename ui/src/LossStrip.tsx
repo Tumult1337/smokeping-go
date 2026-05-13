@@ -37,12 +37,14 @@ export function LossStripCanvas({
   toSec,
   onCyclePick,
   plotLeft,
+  plotRight,
 }: {
   lossSeries: LossSeries[];
   fromSec: number | undefined;
   toSec: number | undefined;
   onCyclePick?: (timeSec: number) => void;
   plotLeft?: number;
+  plotRight?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -157,7 +159,14 @@ export function LossStripCanvas({
       </span>
       <canvas
         ref={canvasRef}
-        style={{ flex: 1, height: effectiveSeries.length * LOSS_STRIP_H, cursor: "pointer", display: "block" }}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          height: effectiveSeries.length * LOSS_STRIP_H,
+          cursor: "pointer",
+          display: "block",
+          ...(plotRight != null && plotRight > 0 ? { marginRight: plotRight } : {}),
+        }}
         onClick={handleClick}
       />
     </div>
