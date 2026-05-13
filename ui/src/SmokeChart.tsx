@@ -11,6 +11,7 @@ interface Props {
   toSec?: number;
   onCyclePick?: (timeSec: number) => void;
   onZoomChange?: (window: { from: number; to: number } | null) => void;
+  onSoloChange?: (source: string | null) => void;
 }
 
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
@@ -21,13 +22,15 @@ interface Props {
 // sharing a single x-axis. Each source gets its own colour from the palette
 // and its own set of 7 series; nulls at timestamps where that source didn't
 // probe are bridged with spanGaps so fills don't break across the interleave.
-export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange }: Props) {
+export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSoloChange }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const onCyclePickRef = useRef(onCyclePick);
   onCyclePickRef.current = onCyclePick;
   const onZoomChangeRef = useRef(onZoomChange);
   onZoomChangeRef.current = onZoomChange;
+  const onSoloChangeRef = useRef(onSoloChange);
+  onSoloChangeRef.current = onSoloChange;
   const internalScaleRef = useRef(false);
   // Track the requested window so the setScale hook can tell "drag-zoom inside
   // the pinned range" from "scale already matches the pin" without relying on
@@ -49,10 +52,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   // bars chart hit and 319a399 fixed there.
   const sourcesKey = `${built.sources.length}|${built.sources.join("|")}`;
 
-  // Cursor idx drives the custom legend below the chart. null = cursor off the
-  // plot; the legend falls back to the last data index (uPlot-default "live"
-  // behaviour) so a static chart still reads meaningful numbers.
-  const [cursorIdx, setCursorIdx] = useState<number | null>(null);
   // Flat series indices the user toggled off in the legend. Reset whenever
   // the source set changes so the mapping stays sane after rebuild.
   const [hidden, setHidden] = useState<Set<number>>(new Set());
@@ -61,6 +60,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   useEffect(() => {
     setHidden(new Set());
     setSoloSource(null);
+    onSoloChangeRef.current?.(null);
   }, [sourcesKey]);
 
   useEffect(() => {
@@ -127,12 +127,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
               }
             }
             ctx.restore();
-          },
-        ],
-        setCursor: [
-          (u) => {
-            const next = u.cursor.idx ?? null;
-            setCursorIdx((prev) => (prev === next ? prev : next));
           },
         ],
         setScale: [
@@ -260,12 +254,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
     });
   }, [hidden, soloSource, sourcesKey]);
 
-  // Resolve the index the legend should show. Cursor-hover wins; otherwise
-  // fall back to the last column so idle state reads the latest values.
-  const xCol = built.data[0] as number[] | undefined;
-  const lastIdx = xCol && xCol.length > 0 ? xCol.length - 1 : null;
-  const legendIdx = cursorIdx != null ? cursorIdx : lastIdx;
-
   return (
     <div className="chart-host" style={{ minHeight: height }}>
       <div ref={divRef} style={{ width: "100%" }} />
@@ -287,6 +275,10 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
             const base = 1 + srcIdx * PCT_LABELS.length;
             const multi = built.sources.length > 1;
             const dimmed = soloSource != null && src !== soloSource;
+            const agg = built.aggregates[srcIdx];
+            const aggVals = agg
+              ? [agg.min, agg.p5, agg.p25, agg.median, agg.p75, agg.p95, agg.max]
+              : PCT_LABELS.map(() => null);
             return (
               <div className={`smoke-legend-row${dimmed ? " dimmed" : ""}`} key={src || `src-${srcIdx}`}>
                 {multi ? (
@@ -294,7 +286,11 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
                     type="button"
                     className="smoke-legend-name smoke-legend-name-btn"
                     style={{ color: palette.stroke }}
-                    onClick={() => setSoloSource((prev) => prev === src ? null : src)}
+                    onClick={() => {
+                      const next = soloSource === src ? null : src;
+                      setSoloSource(next);
+                      onSoloChangeRef.current?.(next);
+                    }}
                     title={soloSource === src ? "Show all sources" : `Show only ${src || "—"}`}
                   >
                     {src || "—"}
@@ -308,8 +304,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
                   </span>
                 )}
                 {PCT_LABELS.map((label, j) => {
-                  const col = built.data[base + j] as (number | null)[] | undefined;
-                  const v = legendIdx != null && col ? col[legendIdx] : null;
+                  const v = aggVals[j];
                   const seriesIdx = base + j;
                   const off = hidden.has(seriesIdx);
                   return (
@@ -350,6 +345,16 @@ type LossMarker = {
   stroke: string;
 };
 
+type SourceAgg = {
+  min: number | null;
+  p5: number | null;
+  p25: number | null;
+  median: number | null;
+  p75: number | null;
+  p95: number | null;
+  max: number | null;
+};
+
 type Built = {
   sources: string[];
   data: AlignedData;
@@ -358,6 +363,7 @@ type Built = {
   lossSeries: LossSeries[];
   anyLoss: boolean;
   lossMarkers: LossMarker[];
+  aggregates: SourceAgg[];
 };
 
 const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
@@ -377,6 +383,7 @@ function buildAligned(points: CyclePoint[]): Built {
       lossSeries: [],
       anyLoss: false,
       lossMarkers: [],
+      aggregates: [{ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null }],
     };
   }
 
@@ -408,6 +415,7 @@ function buildAligned(points: CyclePoint[]): Built {
   const bands: Band[] = [];
   const lossSeries: LossSeries[] = [];
   const lossMarkers: LossMarker[] = [];
+  const aggregates: SourceAgg[] = [];
   let anyLoss = false;
 
   sources.forEach((name, srcIdx) => {
@@ -443,6 +451,28 @@ function buildAligned(points: CyclePoint[]): Built {
     if (hasLoss) anyLoss = true;
     lossSeries.push({ ts, losses, hasLoss });
     lossMarkers.push({ ts, medians, losses, stroke: palette.stroke });
+
+    // Per-source window aggregate for the legend (mean of each percentile
+    // across all non-100%-loss cycles in the window).
+    const valid = sorted.filter((p) => p.LossPct < 100);
+    if (valid.length > 0) {
+      const avg = (fn: (p: CyclePoint) => number) =>
+        valid.reduce((s, p) => s + fn(p), 0) / valid.length;
+      const mins = valid
+        .map((p) => (p.Min === 0 && p.LossPct > 0 ? (p.P5 > 0 ? p.P5 : p.Median) : p.Min))
+        .filter((v) => v > 0);
+      aggregates.push({
+        min: mins.length > 0 ? Math.min(...mins) : null,
+        p5: avg((p) => p.P5),
+        p25: avg((p) => p.P25),
+        median: avg((p) => p.Median),
+        p75: avg((p) => p.P75),
+        p95: avg((p) => p.P95),
+        max: valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity),
+      });
+    } else {
+      aggregates.push({ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null });
+    }
   });
 
   bands.push(...bandsFor(sources.length));
@@ -455,6 +485,7 @@ function buildAligned(points: CyclePoint[]): Built {
     lossSeries,
     anyLoss,
     lossMarkers,
+    aggregates,
   };
 }
 

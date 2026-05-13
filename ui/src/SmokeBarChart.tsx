@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
@@ -18,6 +18,7 @@ interface Props {
   // Used by the MTR cycle-picker to swap the HopsTable to that moment.
   onCyclePick?: (timeSec: number) => void;
   onZoomChange?: (window: { from: number; to: number } | null) => void;
+  onSoloChange?: (source: string | null) => void;
 }
 
 type Band = { lo: number; hi: number; alpha: number };
@@ -41,7 +42,7 @@ type SourceStack = {
 // smooth smoke gradient that darkens around the median. The median tick on
 // top is colour-coded by per-cycle loss percentage. In multi-source "all"
 // view, each source gets its own palette entry and is drawn independently.
-export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange }: Props) {
+export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSoloChange }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   // Keep onCyclePick in a ref so swapping the callback doesn't force a full
@@ -50,6 +51,8 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   onCyclePickRef.current = onCyclePick;
   const onZoomChangeRef = useRef(onZoomChange);
   onZoomChangeRef.current = onZoomChange;
+  const onSoloChangeRef = useRef(onSoloChange);
+  onSoloChangeRef.current = onSoloChange;
   const internalScaleRef = useRef(false);
   // Track the requested window so the setScale hook can distinguish a user
   // zoom gesture from uPlot re-applying the pinned range after data refresh.
@@ -79,12 +82,12 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   // Cursor idx drives the custom legend below the chart. See SmokeChart for
   // the same pattern — we disable uPlot's built-in legend and render one row
   // per source with NAME first and the 8 readouts inline.
-  const [cursorIdx, setCursorIdx] = useState<number | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [soloSource, setSoloSource] = useState<string | null>(null);
   useEffect(() => {
     setHidden(new Set());
     setSoloSource(null);
+    onSoloChangeRef.current?.(null);
   }, [sourcesKey]);
   useEffect(() => {
     hiddenRef.current = hidden;
@@ -156,12 +159,6 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
               drawStack(u, ctx, stacks[si], hiddenRef.current);
             }
             ctx.restore();
-          },
-        ],
-        setCursor: [
-          (u) => {
-            const next = u.cursor.idx ?? null;
-            setCursorIdx((prev) => (prev === next ? prev : next));
           },
         ],
         setScale: [
@@ -319,11 +316,11 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       {points.length > 0 && (
         <BarChartLegend
           built={built}
-          cursorIdx={cursorIdx}
           hidden={hidden}
           setHidden={setHidden}
           soloSource={soloSource}
           setSoloSource={setSoloSource}
+          onSoloChangeRef={onSoloChangeRef}
         />
       )}
     </div>
@@ -332,23 +329,19 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
 
 function BarChartLegend({
   built,
-  cursorIdx,
   hidden,
   setHidden,
   soloSource,
   setSoloSource,
+  onSoloChangeRef,
 }: {
   built: Built;
-  cursorIdx: number | null;
   hidden: Set<string>;
   setHidden: (updater: (prev: Set<string>) => Set<string>) => void;
   soloSource: string | null;
   setSoloSource: (updater: (prev: string | null) => string | null) => void;
+  onSoloChangeRef: React.MutableRefObject<((src: string | null) => void) | undefined>;
 }) {
-  const xCol = built.data[0] as number[] | undefined;
-  const lastIdx = xCol && xCol.length > 0 ? xCol.length - 1 : null;
-  const legendIdx = cursorIdx != null ? cursorIdx : lastIdx;
-
   const toggle = (label: string) =>
     setHidden((prev) => {
       const next = new Set(prev);
@@ -361,9 +354,12 @@ function BarChartLegend({
     <div className="smoke-legend">
       {built.sources.map((src, srcIdx) => {
         const palette = PALETTE[srcIdx % PALETTE.length];
-        const base = 1 + srcIdx * BAR_PCT_LABELS.length;
         const multi = built.sources.length > 1;
         const dimmed = soloSource != null && src !== soloSource;
+        const agg = built.aggregates[srcIdx];
+        const aggVals: (number | null)[] = agg
+          ? [agg.min, agg.p5, agg.p25, agg.median, agg.p75, agg.p95, agg.max, agg.loss]
+          : BAR_PCT_LABELS.map(() => null);
         return (
           <div className={`smoke-legend-row${dimmed ? " dimmed" : ""}`} key={src || `src-${srcIdx}`}>
             {multi ? (
@@ -371,7 +367,11 @@ function BarChartLegend({
                 type="button"
                 className="smoke-legend-name smoke-legend-name-btn"
                 style={{ color: palette.stroke }}
-                onClick={() => setSoloSource((prev) => prev === src ? null : src)}
+                onClick={() => {
+                  const next = soloSource === src ? null : src;
+                  setSoloSource(() => next);
+                  onSoloChangeRef.current?.(next);
+                }}
                 title={soloSource === src ? "Show all sources" : `Show only ${src || "—"}`}
               >
                 {src || "—"}
@@ -385,8 +385,7 @@ function BarChartLegend({
               </span>
             )}
             {BAR_PCT_LABELS.map((label, j) => {
-              const col = built.data[base + j] as (number | null)[] | undefined;
-              const v = legendIdx != null && col ? col[legendIdx] : null;
+              const v = aggVals[j];
               const txt =
                 v == null
                   ? "—"
@@ -412,6 +411,17 @@ function BarChartLegend({
   );
 }
 
+type SourceAgg = {
+  min: number | null;
+  p5: number | null;
+  p25: number | null;
+  median: number | null;
+  p75: number | null;
+  p95: number | null;
+  max: number | null;
+  loss: number | null;
+};
+
 type Built = {
   sources: string[];
   data: AlignedData;
@@ -419,6 +429,7 @@ type Built = {
   yRange: [number, number];
   lossSeries: LossSeries[];
   anyLoss: boolean;
+  aggregates: SourceAgg[];
 };
 
 function buildSources(points: CyclePoint[]): Built {
@@ -430,6 +441,7 @@ function buildSources(points: CyclePoint[]): Built {
       yRange: [0, 1],
       lossSeries: [],
       anyLoss: false,
+      aggregates: [],
     };
   }
 
@@ -459,6 +471,7 @@ function buildSources(points: CyclePoint[]): Built {
   const data: (number | null)[][] = [xs];
   const stacks: SourceStack[] = [];
   const lossSeries: LossSeries[] = [];
+  const aggregates: SourceAgg[] = [];
   let anyLoss = false;
   let yLo = Infinity;
   let yHi = -Infinity;
@@ -539,6 +552,27 @@ function buildSources(points: CyclePoint[]): Built {
     const hasLoss = losses.some((l) => l > 0);
     if (hasLoss) anyLoss = true;
     lossSeries.push({ ts, losses, hasLoss });
+
+    const valid = pts.filter((p) => p.LossPct < 100);
+    if (valid.length > 0) {
+      const avg = (fn: (p: CyclePoint) => number) =>
+        valid.reduce((s, p) => s + fn(p), 0) / valid.length;
+      const mins = valid
+        .map((p) => (p.Min === 0 && p.LossPct > 0 ? (p.P5 > 0 ? p.P5 : p.Median) : p.Min))
+        .filter((v) => v > 0);
+      aggregates.push({
+        min: mins.length > 0 ? Math.min(...mins) : null,
+        p5: avg((p) => p.P5),
+        p25: avg((p) => p.P25),
+        median: avg((p) => p.Median),
+        p75: avg((p) => p.P75),
+        p95: avg((p) => p.P95),
+        max: valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity),
+        loss: pts.reduce((s, p) => s + p.LossPct, 0) / pts.length,
+      });
+    } else {
+      aggregates.push({ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null, loss: pts.reduce((s, p) => s + p.LossPct, 0) / pts.length });
+    }
   });
 
   if (!isFinite(yLo) || !isFinite(yHi)) {
@@ -554,6 +588,7 @@ function buildSources(points: CyclePoint[]): Built {
     yRange: [Math.max(0, yLo - yPad), yHi + yPad],
     lossSeries,
     anyLoss,
+    aggregates,
   };
 }
 

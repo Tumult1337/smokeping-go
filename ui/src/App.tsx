@@ -130,6 +130,9 @@ export default function App() {
   }, []);
   const [zoom, setZoom] = useState<{ from: number; to: number } | null>(initialUrl.zoom);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Tracks which source is currently soloed in the chart (set by onSoloChange
+  // callback). Used to filter the window stats block below the chart.
+  const [chartSoloSource, setChartSoloSource] = useState<string | null>(null);
 
   useEffect(() => {
     try {
@@ -285,15 +288,16 @@ export default function App() {
     }
   }, [selectedSource, targetSources, targets.length]);
   const points = cycles?.points ?? [];
-  // Aggregate stats across the full window and all sources. Mean is used for
-  // median/p95 (representative typical value); true min/max; mean loss so
-  // partial-window outages show as a fraction rather than hiding behind the
-  // last cycle's value.
+  // Aggregate stats across the window. When a source is soloed in the chart,
+  // filter to that source so the numbers match what's visible.
   const windowStats = useMemo(() => {
-    if (points.length === 0) return null;
-    const valid = points.filter((p) => p.LossPct < 100);
-    const loss = points.reduce((s, p) => s + p.LossPct, 0) / points.length;
-    const maxLoss = points.reduce((m, p) => (p.LossPct > m ? p.LossPct : m), 0);
+    const filtered = chartSoloSource != null
+      ? points.filter((p) => (p.Source ?? "") === chartSoloSource)
+      : points;
+    if (filtered.length === 0) return null;
+    const valid = filtered.filter((p) => p.LossPct < 100);
+    const loss = filtered.reduce((s, p) => s + p.LossPct, 0) / filtered.length;
+    const maxLoss = filtered.reduce((m, p) => (p.LossPct > m ? p.LossPct : m), 0);
     if (valid.length === 0) return { median: null, p95: null, min: null, max: null, loss, maxLoss };
     const median = valid.reduce((s, p) => s + p.Median, 0) / valid.length;
     const p95 = valid.reduce((s, p) => s + p.P95, 0) / valid.length;
@@ -304,7 +308,7 @@ export default function App() {
     }, Infinity);
     const max = valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity);
     return { median, p95, min: isFinite(min) ? min : null, max: isFinite(max) ? max : null, loss, maxLoss };
-  }, [points]);
+  }, [points, chartSoloSource]);
   // Pin the chart x-axis to the server's echoed window so clicking 1y vs
   // 30d visibly changes the span even when only a slice has data. Falls back
   // to undefined (uPlot auto-fit) before the first response arrives.
@@ -533,6 +537,7 @@ export default function App() {
                     toSec={toSec}
                     onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
+                    onSoloChange={setChartSoloSource}
                   />
                 ) : (
                   <SmokeBarChart
@@ -541,6 +546,7 @@ export default function App() {
                     toSec={toSec}
                     onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
+                    onSoloChange={setChartSoloSource}
                   />
                 )}
                 {windowStats && (
