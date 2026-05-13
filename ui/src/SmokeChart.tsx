@@ -52,6 +52,8 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   // bars chart hit and 319a399 fixed there.
   const sourcesKey = `${built.sources.length}|${built.sources.join("|")}`;
 
+  // Cursor idx drives hover readouts in the legend. null = cursor off chart.
+  const [cursorIdx, setCursorIdx] = useState<number | null>(null);
   // Flat series indices the user toggled off in the legend. Reset whenever
   // the source set changes so the mapping stays sane after rebuild.
   const [hidden, setHidden] = useState<Set<number>>(new Set());
@@ -127,6 +129,12 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
               }
             }
             ctx.restore();
+          },
+        ],
+        setCursor: [
+          (u) => {
+            const next = u.cursor.idx ?? null;
+            setCursorIdx((prev) => (prev === next ? prev : next));
           },
         ],
         setScale: [
@@ -304,7 +312,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
                   </span>
                 )}
                 {PCT_LABELS.map((label, j) => {
-                  const v = aggVals[j];
+                  const col = built.data[base + j] as (number | null)[] | undefined;
+                  const cursorVal = cursorIdx != null && col ? col[cursorIdx] : null;
+                  const v = cursorVal != null ? cursorVal : aggVals[j];
                   const seriesIdx = base + j;
                   const off = hidden.has(seriesIdx);
                   return (

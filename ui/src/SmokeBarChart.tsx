@@ -79,9 +79,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   // is empty replaces empty initial data — uPlot stays at 1 series.
   const sourcesKey = `${built.sources.length}|${built.sources.join("|")}`;
 
-  // Cursor idx drives the custom legend below the chart. See SmokeChart for
-  // the same pattern — we disable uPlot's built-in legend and render one row
-  // per source with NAME first and the 8 readouts inline.
+  const [cursorIdx, setCursorIdx] = useState<number | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [soloSource, setSoloSource] = useState<string | null>(null);
   useEffect(() => {
@@ -159,6 +157,12 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
               drawStack(u, ctx, stacks[si], hiddenRef.current);
             }
             ctx.restore();
+          },
+        ],
+        setCursor: [
+          (u) => {
+            const next = u.cursor.idx ?? null;
+            setCursorIdx((prev) => (prev === next ? prev : next));
           },
         ],
         setScale: [
@@ -316,6 +320,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       {points.length > 0 && (
         <BarChartLegend
           built={built}
+          cursorIdx={cursorIdx}
           hidden={hidden}
           setHidden={setHidden}
           soloSource={soloSource}
@@ -329,6 +334,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
 
 function BarChartLegend({
   built,
+  cursorIdx,
   hidden,
   setHidden,
   soloSource,
@@ -336,6 +342,7 @@ function BarChartLegend({
   onSoloChangeRef,
 }: {
   built: Built;
+  cursorIdx: number | null;
   hidden: Set<string>;
   setHidden: (updater: (prev: Set<string>) => Set<string>) => void;
   soloSource: string | null;
@@ -360,6 +367,8 @@ function BarChartLegend({
         const aggVals: (number | null)[] = agg
           ? [agg.min, agg.p5, agg.p25, agg.median, agg.p75, agg.p95, agg.max, agg.loss]
           : BAR_PCT_LABELS.map(() => null);
+        // Union x-axis offset for this source at the cursor position.
+        const base = 1 + srcIdx * BAR_PCT_LABELS.length;
         return (
           <div className={`smoke-legend-row${dimmed ? " dimmed" : ""}`} key={src || `src-${srcIdx}`}>
             {multi ? (
@@ -385,7 +394,9 @@ function BarChartLegend({
               </span>
             )}
             {BAR_PCT_LABELS.map((label, j) => {
-              const v = aggVals[j];
+              const col = built.data[base + j] as (number | null)[] | undefined;
+              const cursorVal = cursorIdx != null && col ? col[cursorIdx] : null;
+              const v = cursorVal != null ? cursorVal : aggVals[j];
               const txt =
                 v == null
                   ? "—"
