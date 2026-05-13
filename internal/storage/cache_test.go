@@ -809,3 +809,33 @@ func TestCachingReader_HopsTimeline_ServesStaleCacheOnError(t *testing.T) {
 		t.Fatalf("inner calls: got %d want 2", got)
 	}
 }
+
+func TestCachingReader_Cycles_ServesStaleCacheOnError(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	clock := now
+	inner := &fakeReader{out: []CyclePoint{{Time: now, Median: 1.5}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return clock }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	// Warm the cache.
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	// Expire the entry.
+	clock = now.Add(cacheTTLLive + time.Second)
+	inner.err = errors.New("influx down")
+
+	pts, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+	if err != nil {
+		t.Fatalf("got error %v; want stale data served silently", err)
+	}
+	if len(pts) != 1 || pts[0].Median != 1.5 {
+		t.Fatalf("got %+v; want stale cycle with Median=1.5", pts)
+	}
+	if got := inner.cycles.Load(); got != 2 {
+		t.Fatalf("inner calls: got %d want 2", got)
+	}
+}

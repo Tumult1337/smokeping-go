@@ -259,15 +259,24 @@ func (c *CachingReader) runCyclesLeader(ctx context.Context, key cycleCacheKey, 
 	runCtx := context.WithoutCancel(ctx)
 	pts, err := run(runCtx)
 
+	var stale []CyclePoint
 	c.mu.Lock()
 	if err == nil {
 		c.storeLocked(key, pts, ttl)
+	} else if elem, ok := c.items[key]; ok {
+		e := elem.Value.(*cycleCacheEntry)
+		stale = make([]CyclePoint, len(e.points))
+		copy(stale, e.points)
 	}
 	delete(c.inflight, key)
 	c.mu.Unlock()
 
-	call.points = pts
-	call.err = err
+	if err != nil && stale != nil {
+		call.points = stale // call.err stays nil: stale served silently
+	} else {
+		call.points = pts
+		call.err = err
+	}
 	close(call.done)
 }
 
@@ -507,8 +516,7 @@ func (c *CachingReader) lookup(key cycleCacheKey) ([]CyclePoint, bool) {
 	}
 	e := elem.Value.(*cycleCacheEntry)
 	if c.nowFn().After(e.expires) {
-		c.order.Remove(elem)
-		delete(c.items, key)
+		// Leave stale entry in LRU; runCyclesLeader serves it on inner failure.
 		return nil, false
 	}
 	c.order.MoveToFront(elem)
