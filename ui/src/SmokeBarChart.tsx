@@ -73,6 +73,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   const soloIdxRef = useRef<number | null>(null);
 
   const built = useMemo(() => buildSources(points), [points]);
+  // Left gutter of the uPlot plot area in CSS px, tracked so LossStripCanvas
+  // starts its canvas at the same x as the chart's plot area.
+  const [plotLeft, setPlotLeft] = useState(34);
   // Prefix with count so the zero-source initial state ("0|") doesn't collide
   // with a single-source-named-"" steady state ("1|"). Without the prefix both
   // join to "" and the rebuild effect skips when a target whose Source field
@@ -142,6 +145,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       hooks: {
         draw: [
           (u) => {
+            const dpr = devicePixelRatio || 1;
+            const left = Math.round(u.bbox.left / dpr);
+            setPlotLeft((prev) => (prev === left ? prev : left));
             const stacks = stacksRef.current;
             if (stacks.length === 0) return;
             const soloIdx = soloIdxRef.current;
@@ -315,6 +321,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
           fromSec={fromSec}
           toSec={toSec}
           onCyclePick={onCyclePick}
+          plotLeft={plotLeft}
         />
       )}
       {points.length > 0 && (

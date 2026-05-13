@@ -39,6 +39,10 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   requestedWindowRef.current = { from: fromSec, to: toSec };
 
   const lossMarkersRef = useRef<LossMarker[]>([]);
+  // Left gutter width of the uPlot plot area in CSS px. Tracked so the
+  // LossStripCanvas canvas can start at the same x position as the chart's
+  // plot area — otherwise the y-axis ticks/label shift the two out of sync.
+  const [plotLeft, setPlotLeft] = useState(34);
 
   const built = useMemo(() => buildAligned(points), [points]);
   // Stable signature of the source set. Only when this changes do we have to
@@ -100,6 +104,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       hooks: {
         draw: [
           (u) => {
+            const dpr = devicePixelRatio || 1;
+            const left = Math.round(u.bbox.left / dpr);
+            setPlotLeft((prev) => (prev === left ? prev : left));
             const markers = lossMarkersRef.current;
             if (markers.length === 0) return;
             const ctx = u.ctx;
@@ -274,6 +281,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
           fromSec={fromSec}
           toSec={toSec}
           onCyclePick={onCyclePick}
+          plotLeft={plotLeft}
         />
       )}
       {points.length > 0 && (
