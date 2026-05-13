@@ -252,7 +252,8 @@ export function MtrHeatmap({
     return () => ro.disconnect();
   }, []);
 
-  if (err) return <div className="error">{err}</div>;
+  // Only replace the canvas with an error when there is no stale data to show.
+  if (err && (hops === null || hops.length === 0)) return <div className="error">{err}</div>;
   if (hops === null) return <div className="empty">Loading MTR history…</div>;
   if (toSec - fromSec > 7 * 24 * 3600) {
     return <div className="empty">MTR history limited to 7d windows</div>;
@@ -271,6 +272,21 @@ export function MtrHeatmap({
       }}
     >
       <canvas ref={canvasRef} style={{ display: "block" }} />
+      {err && (
+        <div style={{
+          position: "absolute",
+          top: 4,
+          right: 4,
+          fontSize: 10,
+          color: "#8a93a6",
+          background: "#0f141c",
+          padding: "1px 5px",
+          borderRadius: 3,
+          pointerEvents: "none",
+        }}>
+          stale
+        </div>
+      )}
     </div>
   );
 }
