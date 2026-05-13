@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
+import { LossStripCanvas, type LossSeries } from "./LossStrip";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
@@ -295,6 +296,14 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     <div className="chart-host" style={{ minHeight: height }}>
       <div ref={divRef} style={{ width: "100%" }} />
       {points.length === 0 && <div className="chart-empty">No data in range</div>}
+      {points.length > 0 && built.anyLoss && (
+        <LossStripCanvas
+          lossSeries={built.lossSeries}
+          fromSec={fromSec}
+          toSec={toSec}
+          onCyclePick={onCyclePick}
+        />
+      )}
       {points.length > 0 && (
         <BarChartLegend
           built={built}
@@ -376,6 +385,8 @@ type Built = {
   data: AlignedData;
   stacks: SourceStack[];
   yRange: [number, number];
+  lossSeries: LossSeries[];
+  anyLoss: boolean;
 };
 
 function buildSources(points: CyclePoint[]): Built {
@@ -385,6 +396,8 @@ function buildSources(points: CyclePoint[]): Built {
       data: [[]],
       stacks: [],
       yRange: [0, 1],
+      lossSeries: [],
+      anyLoss: false,
     };
   }
 
@@ -413,6 +426,8 @@ function buildSources(points: CyclePoint[]): Built {
 
   const data: (number | null)[][] = [xs];
   const stacks: SourceStack[] = [];
+  const lossSeries: LossSeries[] = [];
+  let anyLoss = false;
   let yLo = Infinity;
   let yHi = -Infinity;
 
@@ -488,6 +503,10 @@ function buildSources(points: CyclePoint[]): Built {
       // outages are visually loud.
       medianColor: palette.stroke,
     });
+
+    const hasLoss = losses.some((l) => l > 0);
+    if (hasLoss) anyLoss = true;
+    lossSeries.push({ ts, losses, hasLoss });
   });
 
   if (!isFinite(yLo) || !isFinite(yHi)) {
@@ -501,6 +520,8 @@ function buildSources(points: CyclePoint[]): Built {
     data: data as AlignedData,
     stacks,
     yRange: [Math.max(0, yLo - yPad), yHi + yPad],
+    lossSeries,
+    anyLoss,
   };
 }
 
