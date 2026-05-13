@@ -272,7 +272,10 @@ func (c *CachingReader) runCyclesLeader(ctx context.Context, key cycleCacheKey, 
 	c.mu.Unlock()
 
 	if err != nil && stale != nil {
-		call.points = stale // call.err stays nil: stale served silently
+		// Serve stale silently. The stale window is unbounded: the entry
+		// stays in the LRU until displaced by fresh inserts. Operators
+		// should monitor Influx availability via their own tooling.
+		call.points = stale
 	} else {
 		call.points = pts
 		call.err = err
@@ -444,7 +447,10 @@ func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl
 	c.hopsMu.Unlock()
 
 	if err != nil && stale != nil {
-		call.points = stale // call.err stays nil: stale served silently
+		// Serve stale silently. The stale window is unbounded: the entry
+		// stays in the LRU until displaced by fresh inserts. Operators
+		// should monitor Influx availability via their own tooling.
+		call.points = stale
 	} else {
 		call.points = hops
 		call.err = err

@@ -293,7 +293,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     const empty = built.stacks.length === 0;
 
     stacksRef.current = empty ? [] : built.stacks;
-    if (!soloSourceRef.current) {
+    if (soloSourceRef.current === null) {
       yRangeRef.current = empty ? [0, 1] : built.yRange;
     }
 

@@ -839,3 +839,34 @@ func TestCachingReader_Cycles_ServesStaleCacheOnError(t *testing.T) {
 		t.Fatalf("inner calls: got %d want 2", got)
 	}
 }
+
+func TestCachingReader_Cycles_ErrorPropagatesWhenStaleEvicted(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	clock := now
+	inner := &fakeReader{out: []CyclePoint{{Time: now, Median: 1.5}}}
+	// cap=1 so inserting "b" evicts "a".
+	c := NewCachingReader(inner, 1, 1)
+	c.nowFn = func() time.Time { return clock }
+
+	refA := newRef("g", "a")
+	refB := newRef("g", "b")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	// Warm "a".
+	if _, err := c.QueryCycles(context.Background(), refA, from, now, Resolution1h, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	// Insert "b", which evicts "a" from the LRU.
+	if _, err := c.QueryCycles(context.Background(), refB, from, now, Resolution1h, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	// Advance past TTL and inject failure.
+	clock = now.Add(cacheTTLLive + time.Second)
+	inner.err = errors.New("influx down")
+
+	// "a" was evicted — no stale entry exists, so the error must propagate.
+	_, err := c.QueryCycles(context.Background(), refA, from, now, Resolution1h, QueryFilter{})
+	if err == nil {
+		t.Fatal("got nil error; want propagated error (no stale entry after eviction)")
+	}
+}
