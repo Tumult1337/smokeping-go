@@ -230,17 +230,19 @@ func (w *Writer) addToBatcher(c scheduler.Cycle) {
 	}
 
 	cycleFields := map[string]any{
-		"rtt_min":    ms(c.Summary.Min),
-		"rtt_max":    ms(c.Summary.Max),
-		"rtt_mean":   ms(c.Summary.Mean),
-		"rtt_median": ms(c.Summary.Median),
-		"rtt_stddev": ms(c.Summary.StdDev),
 		"loss_pct":   lossPct,
 		"loss_count": c.LossCount,
 		"pings_sent": c.Sent,
 	}
-	for _, spec := range stats.PercentileSet {
-		cycleFields["rtt_"+spec.Name] = ms(spec.Get(c.Summary))
+	if len(c.RTTs) > 0 {
+		cycleFields["rtt_min"] = ms(c.Summary.Min)
+		cycleFields["rtt_max"] = ms(c.Summary.Max)
+		cycleFields["rtt_mean"] = ms(c.Summary.Mean)
+		cycleFields["rtt_median"] = ms(c.Summary.Median)
+		cycleFields["rtt_stddev"] = ms(c.Summary.StdDev)
+		for _, spec := range stats.PercentileSet {
+			cycleFields["rtt_"+spec.Name] = ms(spec.Get(c.Summary))
+		}
 	}
 
 	points := make([]*influxdb3.Point, 0, 1+len(c.RTTs)+len(c.HTTPSamples)+len(c.Hops))

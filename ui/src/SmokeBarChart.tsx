@@ -423,14 +423,21 @@ function buildSources(points: CyclePoint[]): Built {
     );
 
     const ts = pts.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-    const medians = pts.map((p) => p.Median);
+    // NaN signals "no valid RTT" (100%-loss cycle) to the draw hook so it
+    // skips the median tick rather than drawing it at 0ms.
+    const medians = pts.map((p) => p.LossPct >= 100 ? NaN : p.Median);
     const losses = pts.map((p) => p.LossPct);
 
-    // Per-cycle percentile stack — any fully-zero pair (legacy rollups before
-    // the 5% step) gets filtered so old data still renders something useful.
+    // Per-cycle percentile stack.
+    // - 100%-loss cycles: no bands (Median/Min/Max are all 0 artifacts).
+    // - Rollup cycles where Min=0 but Median>0: the Flux min() picked up a
+    //   zero from a 100%-loss sub-cycle. Use P5 as the outer band floor so
+    //   the bar doesn't falsely extend to 0ms.
     const bands: Band[][] = pts.map((p) => {
+      if (p.LossPct >= 100) return [];
+      const effMin = p.Min === 0 && p.LossPct > 0 ? (p.P5 || p.Median) : p.Min;
       const all: Band[] = [
-        { lo: p.Min, hi: p.Max, alpha: 0.07 },
+        { lo: effMin, hi: p.Max, alpha: 0.07 },
         { lo: p.P5, hi: p.P95, alpha: 0.09 },
         { lo: p.P10, hi: p.P90, alpha: 0.11 },
         { lo: p.P15, hi: p.P85, alpha: 0.13 },
@@ -445,7 +452,9 @@ function buildSources(points: CyclePoint[]): Built {
     });
 
     for (const p of pts) {
-      if (p.Min < yLo) yLo = p.Min;
+      if (p.LossPct >= 100) continue;
+      // Skip Min=0 rollup artifacts when computing the y floor.
+      if (p.Min > 0 && p.Min < yLo) yLo = p.Min;
       if (p.Max > yHi) yHi = p.Max;
     }
 
@@ -560,7 +569,7 @@ function drawStack(
       ctx.fillRect(x, yHi, w, yLo - yHi);
     });
 
-    if (!medHidden) {
+    if (!medHidden && isFinite(medians[i])) {
       const yMed = Math.round(u.valToPos(medians[i], "y", true));
       // Toggling "loss" off in the legend suppresses the outage coloring so
       // the median tick falls back to the plain palette stroke.

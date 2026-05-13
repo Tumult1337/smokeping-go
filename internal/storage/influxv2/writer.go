@@ -198,17 +198,22 @@ func (w *Writer) writeCycle(c scheduler.Cycle) {
 	}
 
 	cycleFields := map[string]any{
-		"rtt_min":    ms(c.Summary.Min),
-		"rtt_max":    ms(c.Summary.Max),
-		"rtt_mean":   ms(c.Summary.Mean),
-		"rtt_median": ms(c.Summary.Median),
-		"rtt_stddev": ms(c.Summary.StdDev),
 		"loss_pct":   lossPct,
 		"loss_count": c.LossCount,
 		"pings_sent": c.Sent,
 	}
-	for _, spec := range stats.PercentileSet {
-		cycleFields["rtt_"+spec.Name] = ms(spec.Get(c.Summary))
+	// Only write RTT fields when there are actual measurements. Omitting them
+	// on 100%-loss cycles prevents Flux min()/mean() rollup tasks from picking
+	// up the zero-value placeholders and falsely reporting 0ms latency.
+	if len(c.RTTs) > 0 {
+		cycleFields["rtt_min"] = ms(c.Summary.Min)
+		cycleFields["rtt_max"] = ms(c.Summary.Max)
+		cycleFields["rtt_mean"] = ms(c.Summary.Mean)
+		cycleFields["rtt_median"] = ms(c.Summary.Median)
+		cycleFields["rtt_stddev"] = ms(c.Summary.StdDev)
+		for _, spec := range stats.PercentileSet {
+			cycleFields["rtt_"+spec.Name] = ms(spec.Get(c.Summary))
+		}
 	}
 	w.write.WritePoint(write.NewPoint(measurementCycle, tags, cycleFields, c.Time))
 

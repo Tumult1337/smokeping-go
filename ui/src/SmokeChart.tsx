@@ -390,8 +390,18 @@ function buildAligned(points: CyclePoint[]): Built {
     for (const p of sorted) {
       const i = xIdx.get(Math.floor(new Date(p.Time).getTime() / 1000));
       if (i == null) continue;
+      // 100%-loss cycles have no valid RTT data; leave as null so spanGaps
+      // bridges over them rather than drawing a false dip to 0ms.
+      if (p.LossPct >= 100) continue;
       PCT_KEYS.forEach((k, c) => {
-        cols[c][i] = p[k];
+        // When Min=0 from a rollup that included 100%-loss sub-cycles, the
+        // Flux min() was poisoned by those zeroes. Substitute P5 so the outer
+        // band doesn't extend all the way to 0ms.
+        if (k === "Min" && p.Min === 0 && p.LossPct > 0 && p.Median > 0) {
+          cols[c][i] = p.P5 > 0 ? p.P5 : p.Median;
+        } else {
+          cols[c][i] = p[k];
+        }
       });
     }
     cols.forEach((c) => data.push(c));
