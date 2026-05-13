@@ -332,9 +332,8 @@ body {
   text-decoration: underline dotted;
   text-underline-offset: 2px;
 }
-.smoke-legend-name-btn:hover {
-  filter: brightness(1.3);
-}
+.smoke-legend-name-btn:hover { filter: brightness(1.3); }
+.smoke-legend-row.dimmed { opacity: 0.3; }
 .smoke-legend-val {
   background: transparent;
   border: none;

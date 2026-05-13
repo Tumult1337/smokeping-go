@@ -11,7 +11,6 @@ interface Props {
   toSec?: number;
   onCyclePick?: (timeSec: number) => void;
   onZoomChange?: (window: { from: number; to: number } | null) => void;
-  onSourcePick?: (source: string) => void;
 }
 
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
@@ -22,7 +21,7 @@ interface Props {
 // sharing a single x-axis. Each source gets its own colour from the palette
 // and its own set of 7 series; nulls at timestamps where that source didn't
 // probe are bridged with spanGaps so fills don't break across the interleave.
-export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSourcePick }: Props) {
+export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const onCyclePickRef = useRef(onCyclePick);
@@ -57,8 +56,11 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   // Flat series indices the user toggled off in the legend. Reset whenever
   // the source set changes so the mapping stays sane after rebuild.
   const [hidden, setHidden] = useState<Set<number>>(new Set());
+  // Which source name is soloed (others hidden in chart). null = show all.
+  const [soloSource, setSoloSource] = useState<string | null>(null);
   useEffect(() => {
     setHidden(new Set());
+    setSoloSource(null);
   }, [sourcesKey]);
 
   useEffect(() => {
@@ -243,18 +245,20 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
     });
   }, [built, fromSec, toSec]);
 
-  // Apply the hidden-series set to uPlot. Runs on every mount (in case the
-  // chart was just rebuilt — e.g. the 5173-dev HMR reload) and on every
-  // toggle. Any series not in `hidden` is re-shown, so un-clicking restores.
+  // Apply the hidden-series set (individual toggles) and soloSource (show one
+  // source only) to uPlot. sourcesKey in deps covers built.sources changes.
   useEffect(() => {
     const u = plotRef.current;
     if (!u) return;
     u.batch(() => {
       for (let i = 1; i < u.series.length; i++) {
-        u.setSeries(i, { show: !hidden.has(i) });
+        const srcIdx = Math.floor((i - 1) / PCT_LABELS.length);
+        const srcName = built.sources[srcIdx] ?? "";
+        const soloHide = soloSource != null && srcName !== soloSource;
+        u.setSeries(i, { show: !hidden.has(i) && !soloHide });
       }
     });
-  }, [hidden, sourcesKey]);
+  }, [hidden, soloSource, sourcesKey]);
 
   // Resolve the index the legend should show. Cursor-hover wins; otherwise
   // fall back to the last column so idle state reads the latest values.
@@ -268,7 +272,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       {points.length === 0 && <div className="chart-empty">No data in range</div>}
       {points.length > 0 && built.anyLoss && (
         <LossStripCanvas
-          lossSeries={built.lossSeries}
+          lossSeries={soloSource != null
+            ? built.lossSeries.filter((_, i) => built.sources[i] === soloSource)
+            : built.lossSeries}
           fromSec={fromSec}
           toSec={toSec}
           onCyclePick={onCyclePick}
@@ -280,15 +286,16 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
             const palette = PALETTE[srcIdx % PALETTE.length];
             const base = 1 + srcIdx * PCT_LABELS.length;
             const multi = built.sources.length > 1;
+            const dimmed = soloSource != null && src !== soloSource;
             return (
-              <div className="smoke-legend-row" key={src || `src-${srcIdx}`}>
-                {multi && onSourcePick ? (
+              <div className={`smoke-legend-row${dimmed ? " dimmed" : ""}`} key={src || `src-${srcIdx}`}>
+                {multi ? (
                   <button
                     type="button"
                     className="smoke-legend-name smoke-legend-name-btn"
                     style={{ color: palette.stroke }}
-                    onClick={() => onSourcePick(src)}
-                    title={`Show only ${src || "—"}`}
+                    onClick={() => setSoloSource((prev) => prev === src ? null : src)}
+                    title={soloSource === src ? "Show all sources" : `Show only ${src || "—"}`}
                   >
                     {src || "—"}
                   </button>
