@@ -323,6 +323,18 @@ body {
   font-weight: 600;
   min-width: 80px;
 }
+.smoke-legend-name-btn {
+  background: transparent;
+  border: none;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.smoke-legend-name-btn:hover {
+  filter: brightness(1.3);
+}
 .smoke-legend-val {
   background: transparent;
   border: none;

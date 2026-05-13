@@ -533,6 +533,7 @@ export default function App() {
                     toSec={toSec}
                     onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
+                    onSourcePick={setSelectedSource}
                   />
                 ) : (
                   <SmokeBarChart
@@ -541,6 +542,7 @@ export default function App() {
                     toSec={toSec}
                     onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
+                    onSourcePick={setSelectedSource}
                   />
                 )}
                 {windowStats && (

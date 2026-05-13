@@ -18,6 +18,7 @@ interface Props {
   // Used by the MTR cycle-picker to swap the HopsTable to that moment.
   onCyclePick?: (timeSec: number) => void;
   onZoomChange?: (window: { from: number; to: number } | null) => void;
+  onSourcePick?: (source: string) => void;
 }
 
 type Band = { lo: number; hi: number; alpha: number };
@@ -41,7 +42,7 @@ type SourceStack = {
 // smooth smoke gradient that darkens around the median. The median tick on
 // top is colour-coded by per-cycle loss percentage. In multi-source "all"
 // view, each source gets its own palette entry and is drawn independently.
-export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange }: Props) {
+export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSourcePick }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   // Keep onCyclePick in a ref so swapping the callback doesn't force a full
@@ -310,6 +311,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
           cursorIdx={cursorIdx}
           hidden={hidden}
           setHidden={setHidden}
+          onSourcePick={onSourcePick}
         />
       )}
     </div>
@@ -321,11 +323,13 @@ function BarChartLegend({
   cursorIdx,
   hidden,
   setHidden,
+  onSourcePick,
 }: {
   built: Built;
   cursorIdx: number | null;
   hidden: Set<string>;
   setHidden: (updater: (prev: Set<string>) => Set<string>) => void;
+  onSourcePick?: (source: string) => void;
 }) {
   const xCol = built.data[0] as number[] | undefined;
   const lastIdx = xCol && xCol.length > 0 ? xCol.length - 1 : null;
@@ -344,14 +348,27 @@ function BarChartLegend({
       {built.sources.map((src, srcIdx) => {
         const palette = PALETTE[srcIdx % PALETTE.length];
         const base = 1 + srcIdx * BAR_PCT_LABELS.length;
+        const multi = built.sources.length > 1;
         return (
           <div className="smoke-legend-row" key={src || `src-${srcIdx}`}>
-            <span
-              className="smoke-legend-name"
-              style={{ color: palette.stroke }}
-            >
-              {src || "—"}
-            </span>
+            {multi && onSourcePick ? (
+              <button
+                type="button"
+                className="smoke-legend-name smoke-legend-name-btn"
+                style={{ color: palette.stroke }}
+                onClick={() => onSourcePick(src)}
+                title={`Show only ${src || "—"}`}
+              >
+                {src || "—"}
+              </button>
+            ) : (
+              <span
+                className="smoke-legend-name"
+                style={{ color: palette.stroke }}
+              >
+                {src || "—"}
+              </span>
+            )}
             {BAR_PCT_LABELS.map((label, j) => {
               const col = built.data[base + j] as (number | null)[] | undefined;
               const v = legendIdx != null && col ? col[legendIdx] : null;

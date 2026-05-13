@@ -11,6 +11,7 @@ interface Props {
   toSec?: number;
   onCyclePick?: (timeSec: number) => void;
   onZoomChange?: (window: { from: number; to: number } | null) => void;
+  onSourcePick?: (source: string) => void;
 }
 
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
@@ -21,7 +22,7 @@ interface Props {
 // sharing a single x-axis. Each source gets its own colour from the palette
 // and its own set of 7 series; nulls at timestamps where that source didn't
 // probe are bridged with spanGaps so fills don't break across the interleave.
-export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange }: Props) {
+export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSourcePick }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const onCyclePickRef = useRef(onCyclePick);
@@ -278,14 +279,27 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
           {built.sources.map((src, srcIdx) => {
             const palette = PALETTE[srcIdx % PALETTE.length];
             const base = 1 + srcIdx * PCT_LABELS.length;
+            const multi = built.sources.length > 1;
             return (
               <div className="smoke-legend-row" key={src || `src-${srcIdx}`}>
-                <span
-                  className="smoke-legend-name"
-                  style={{ color: palette.stroke }}
-                >
-                  {src || "—"}
-                </span>
+                {multi && onSourcePick ? (
+                  <button
+                    type="button"
+                    className="smoke-legend-name smoke-legend-name-btn"
+                    style={{ color: palette.stroke }}
+                    onClick={() => onSourcePick(src)}
+                    title={`Show only ${src || "—"}`}
+                  >
+                    {src || "—"}
+                  </button>
+                ) : (
+                  <span
+                    className="smoke-legend-name"
+                    style={{ color: palette.stroke }}
+                  >
+                    {src || "—"}
+                  </span>
+                )}
                 {PCT_LABELS.map((label, j) => {
                   const col = built.data[base + j] as (number | null)[] | undefined;
                   const v = legendIdx != null && col ? col[legendIdx] : null;
