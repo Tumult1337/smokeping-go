@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series, type Band } from "uplot";
 import type { CyclePoint } from "./api";
-import { PALETTE, lossColor } from "./palette";
+import { PALETTE } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
 
 interface Props {
@@ -38,7 +38,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   const requestedWindowRef = useRef<{ from?: number; to?: number }>({});
   requestedWindowRef.current = { from: fromSec, to: toSec };
 
-  const lossMarkersRef = useRef<LossMarker[]>([]);
   // Left/right gutter of the uPlot plot area in CSS px. Tracked from u.bbox
   // so the LossStripCanvas canvas covers exactly the same x range as the chart.
   const [plotOffsets, setPlotOffsets] = useState({ left: 34, right: 0 });
@@ -107,35 +106,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
             const left = Math.round(u.bbox.left / dpr);
             const right = Math.round(u.width - (u.bbox.left + u.bbox.width) / dpr);
             setPlotOffsets((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
-            const markers = lossMarkersRef.current;
-            if (markers.length === 0) return;
-            const ctx = u.ctx;
-            ctx.save();
-            ctx.beginPath();
-            ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
-            ctx.clip();
-            for (const { ts, medians, losses, stroke } of markers) {
-              const n = ts.length;
-              if (n === 0) continue;
-              const cxs = ts.map((t) => u.valToPos(t, "x", true));
-              for (let i = 0; i < n; i++) {
-                if (losses[i] <= 0) continue;
-                const med = medians[i];
-                if (med == null) continue;
-                const cx = cxs[i];
-                let lo: number, hi: number;
-                if (n === 1) { lo = cx - 3; hi = cx + 3; }
-                else if (i === 0) { hi = (cx + cxs[i + 1]) / 2; lo = cx - (hi - cx); }
-                else if (i === n - 1) { lo = (cxs[i - 1] + cx) / 2; hi = cx + (cx - lo); }
-                else { lo = (cxs[i - 1] + cx) / 2; hi = (cx + cxs[i + 1]) / 2; }
-                const x = Math.floor(lo);
-                const w = Math.max(1, Math.ceil(hi) - x);
-                const yMed = Math.round(u.valToPos(med, "y", true));
-                ctx.fillStyle = lossColor(losses[i], stroke);
-                ctx.fillRect(x, yMed - 1, w, 2);
-              }
-            }
-            ctx.restore();
           },
         ],
         setCursor: [
@@ -243,7 +213,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
     pinRef.current = { from: fromSec, to: toSec };
     const pin = pinChanged && fromSec != null && toSec != null;
-    lossMarkersRef.current = built.lossMarkers;
     u.batch(() => {
       if (pin) {
         internalScaleRef.current = true;
@@ -362,15 +331,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
 }
 
 
-// Per-source data for the in-chart loss tick draw hook. Kept separate from
-// LossSeries (which LossStripCanvas uses) so the shared type stays lean.
-type LossMarker = {
-  ts: number[];
-  medians: (number | null)[];
-  losses: number[];
-  stroke: string;
-};
-
 type SourceAgg = {
   min: number | null;
   p5: number | null;
@@ -388,7 +348,6 @@ type Built = {
   bands: Band[];
   lossSeries: LossSeries[];
   anyLoss: boolean;
-  lossMarkers: LossMarker[];
   aggregates: SourceAgg[];
   sourceYRanges: Map<string, [number, number]>;
   globalYRange: [number, number] | null;
@@ -410,7 +369,6 @@ function buildAligned(points: CyclePoint[]): Built {
       bands: bandsFor(1),
       lossSeries: [],
       anyLoss: false,
-      lossMarkers: [],
       aggregates: [{ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null }],
       sourceYRanges: new Map(),
       globalYRange: null,
@@ -447,7 +405,6 @@ function buildAligned(points: CyclePoint[]): Built {
   const series: Series[] = [xSeries];
   const bands: Band[] = [];
   const lossSeries: LossSeries[] = [];
-  const lossMarkers: LossMarker[] = [];
   const aggregates: SourceAgg[] = [];
   let anyLoss = false;
 
@@ -479,11 +436,9 @@ function buildAligned(points: CyclePoint[]): Built {
 
     const ts = sorted.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
     const losses = sorted.map((p) => p.LossPct);
-    const medians = sorted.map((p) => p.LossPct >= 100 ? null : p.Median);
     const hasLoss = losses.some((l) => l > 0);
     if (hasLoss) anyLoss = true;
     lossSeries.push({ ts, losses, hasLoss });
-    lossMarkers.push({ ts, medians, losses, stroke: palette.stroke });
 
     // Per-source window aggregate for the legend (mean of each percentile
     // across all non-100%-loss cycles in the window).
@@ -533,7 +488,6 @@ function buildAligned(points: CyclePoint[]): Built {
     bands,
     lossSeries,
     anyLoss,
-    lossMarkers,
     aggregates,
     sourceYRanges,
     globalYRange: isFinite(globalLo) && isFinite(globalHi) ? [globalLo, globalHi] : null,
