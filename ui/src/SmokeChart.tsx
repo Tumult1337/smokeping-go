@@ -267,7 +267,14 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
         u.setSeries(i, { show: !hidden.has(i) && !soloHide });
       }
     });
-  }, [hidden, soloSource, sourcesKey]);
+    // Rescale Y to the soloed source's range, or back to global when all shown.
+    const range = soloSource != null
+      ? (built.sourceYRanges.get(soloSource) ?? built.globalYRange)
+      : built.globalYRange;
+    if (range) {
+      u.setScale("y", { min: range[0], max: range[1] });
+    }
+  }, [hidden, soloSource, sourcesKey, built.sourceYRanges, built.globalYRange]);
 
   return (
     <div className="chart-host" style={{ minHeight: height }}>
@@ -383,6 +390,8 @@ type Built = {
   anyLoss: boolean;
   lossMarkers: LossMarker[];
   aggregates: SourceAgg[];
+  sourceYRanges: Map<string, [number, number]>;
+  globalYRange: [number, number] | null;
 };
 
 const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
@@ -403,6 +412,8 @@ function buildAligned(points: CyclePoint[]): Built {
       anyLoss: false,
       lossMarkers: [],
       aggregates: [{ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null }],
+      sourceYRanges: new Map(),
+      globalYRange: null,
     };
   }
 
@@ -428,6 +439,9 @@ function buildAligned(points: CyclePoint[]): Built {
   const xs = [...tsSet].sort((a, b) => a - b);
   const xIdx = new Map<number, number>();
   xs.forEach((t, i) => xIdx.set(t, i));
+
+  const sourceYRanges = new Map<string, [number, number]>();
+  let globalLo = Infinity, globalHi = -Infinity;
 
   const data: (number | null)[][] = [xs];
   const series: Series[] = [xSeries];
@@ -492,6 +506,22 @@ function buildAligned(points: CyclePoint[]): Built {
     } else {
       aggregates.push({ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null });
     }
+
+    // Per-source y range for solo rescale.
+    let srcLo = Infinity, srcHi = -Infinity;
+    for (const p of sorted) {
+      if (p.LossPct >= 100) continue;
+      const effMin = (p.Min === 0 && p.LossPct > 0 && p.Median > 0) ? (p.P5 > 0 ? p.P5 : p.Median) : p.Min;
+      if (effMin > 0 && effMin < srcLo) srcLo = effMin;
+      if (p.Max > srcHi) srcHi = p.Max;
+    }
+    if (isFinite(srcLo) && isFinite(srcHi)) {
+      const srcPad = Math.max(1, (srcHi - srcLo) * 0.1);
+      const r: [number, number] = [Math.max(0, srcLo - srcPad), srcHi + srcPad];
+      sourceYRanges.set(name, r);
+      if (r[0] < globalLo) globalLo = r[0];
+      if (r[1] > globalHi) globalHi = r[1];
+    }
   });
 
   bands.push(...bandsFor(sources.length));
@@ -505,6 +535,8 @@ function buildAligned(points: CyclePoint[]): Built {
     anyLoss,
     lossMarkers,
     aggregates,
+    sourceYRanges,
+    globalYRange: isFinite(globalLo) && isFinite(globalHi) ? [globalLo, globalHi] : null,
   };
 }
 
