@@ -71,6 +71,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   const hiddenRef = useRef<Set<string>>(new Set());
   // Index (into stacks/sources) of the soloed source, or null for all.
   const soloIdxRef = useRef<number | null>(null);
+  const soloSourceRef = useRef<string | null>(null);
 
   const built = useMemo(() => buildSources(points), [points]);
   // Left/right gutter of the uPlot plot area in CSS px, tracked from u.bbox
@@ -95,9 +96,18 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     plotRef.current?.redraw(false, true);
   }, [hidden]);
   useEffect(() => {
+    soloSourceRef.current = soloSource;
     soloIdxRef.current = soloSource != null ? built.sources.indexOf(soloSource) : null;
-    plotRef.current?.redraw(false, true);
-  }, [soloSource, built.sources]);
+    const range = soloSource != null
+      ? (built.sourceYRanges.get(soloSource) ?? built.yRange)
+      : built.yRange;
+    yRangeRef.current = range;
+    const u = plotRef.current;
+    if (u) {
+      u.setScale("y", { min: range[0], max: range[1] });
+      u.redraw(false, true);
+    }
+  }, [soloSource, built.sources, built.yRange, built.sourceYRanges]);
 
   useEffect(() => {
     if (!divRef.current) return;
@@ -283,7 +293,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
     const empty = built.stacks.length === 0;
 
     stacksRef.current = empty ? [] : built.stacks;
-    yRangeRef.current = empty ? [0, 1] : built.yRange;
+    if (!soloSourceRef.current) {
+      yRangeRef.current = empty ? [0, 1] : built.yRange;
+    }
 
     u.batch(() => {
       if (pin) {
@@ -447,6 +459,7 @@ type Built = {
   data: AlignedData;
   stacks: SourceStack[];
   yRange: [number, number];
+  sourceYRanges: Map<string, [number, number]>;
   lossSeries: LossSeries[];
   anyLoss: boolean;
   aggregates: SourceAgg[];
@@ -459,6 +472,7 @@ function buildSources(points: CyclePoint[]): Built {
       data: [[]],
       stacks: [],
       yRange: [0, 1],
+      sourceYRanges: new Map(),
       lossSeries: [],
       anyLoss: false,
       aggregates: [],
@@ -495,6 +509,7 @@ function buildSources(points: CyclePoint[]): Built {
   let anyLoss = false;
   let yLo = Infinity;
   let yHi = -Infinity;
+  const sourceYRanges = new Map<string, [number, number]>();
 
   sources.forEach((name, srcIdx) => {
     const palette = PALETTE[srcIdx % PALETTE.length];
@@ -536,6 +551,18 @@ function buildSources(points: CyclePoint[]): Built {
       // Skip Min=0 rollup artifacts when computing the y floor.
       if (p.Min > 0 && p.Min < yLo) yLo = p.Min;
       if (p.Max > yHi) yHi = p.Max;
+    }
+
+    // Per-source y range for solo rescale.
+    let srcLo = Infinity, srcHi = -Infinity;
+    for (const p of pts) {
+      if (p.LossPct >= 100) continue;
+      if (p.Min > 0 && p.Min < srcLo) srcLo = p.Min;
+      if (p.Max > srcHi) srcHi = p.Max;
+    }
+    if (isFinite(srcLo) && isFinite(srcHi)) {
+      const srcPad = Math.max(1, (srcHi - srcLo) * 0.1);
+      sourceYRanges.set(name, [Math.max(0, srcLo - srcPad), srcHi + srcPad]);
     }
 
     // Build 8 aligned columns on the union x-axis: min/p5/p25/median/p75/p95/
@@ -606,6 +633,7 @@ function buildSources(points: CyclePoint[]): Built {
     data: data as AlignedData,
     stacks,
     yRange: [Math.max(0, yLo - yPad), yHi + yPad],
+    sourceYRanges,
     lossSeries,
     anyLoss,
     aggregates,
