@@ -285,7 +285,25 @@ export default function App() {
     }
   }, [selectedSource, targetSources, targets.length]);
   const points = cycles?.points ?? [];
-  const latest = points.length ? points[points.length - 1] : null;
+  // Aggregate stats across the full window and all sources. Mean is used for
+  // median/p95 (representative typical value); true min/max; mean loss so
+  // partial-window outages show as a fraction rather than hiding behind the
+  // last cycle's value.
+  const windowStats = useMemo(() => {
+    if (points.length === 0) return null;
+    const valid = points.filter((p) => p.LossPct < 100);
+    const loss = points.reduce((s, p) => s + p.LossPct, 0) / points.length;
+    if (valid.length === 0) return { median: null, p95: null, min: null, max: null, loss };
+    const median = valid.reduce((s, p) => s + p.Median, 0) / valid.length;
+    const p95 = valid.reduce((s, p) => s + p.P95, 0) / valid.length;
+    // Skip Min=0 rollup artifacts (Flux min() poisoned by 100%-loss sub-cycles).
+    const min = valid.reduce((m, p) => {
+      const floor = p.Min === 0 && p.LossPct > 0 ? (p.P5 > 0 ? p.P5 : p.Median) : p.Min;
+      return floor > 0 && floor < m ? floor : m;
+    }, Infinity);
+    const max = valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity);
+    return { median, p95, min: isFinite(min) ? min : null, max: isFinite(max) ? max : null, loss };
+  }, [points]);
   // Pin the chart x-axis to the server's echoed window so clicking 1y vs
   // 30d visibly changes the span even when only a slice has data. Falls back
   // to undefined (uPlot auto-fit) before the first response arrives.
@@ -524,22 +542,30 @@ export default function App() {
                     onZoomChange={setZoom}
                   />
                 )}
-                {latest && (
+                {windowStats && (
                   <div className="stats" style={{ marginTop: 12 }}>
                     <span>
-                      median: <strong>{latest.Median.toFixed(1)}ms</strong>
+                      median:{" "}
+                      <strong>
+                        {windowStats.median == null ? "—" : `${windowStats.median.toFixed(1)}ms`}
+                      </strong>
                     </span>
                     <span>
-                      p95: <strong>{latest.P95.toFixed(1)}ms</strong>
+                      p95:{" "}
+                      <strong>
+                        {windowStats.p95 == null ? "—" : `${windowStats.p95.toFixed(1)}ms`}
+                      </strong>
                     </span>
                     <span>
                       min/max:{" "}
                       <strong>
-                        {latest.Min.toFixed(1)} / {latest.Max.toFixed(1)}ms
+                        {windowStats.min == null || windowStats.max == null
+                          ? "— / —"
+                          : `${windowStats.min.toFixed(1)} / ${windowStats.max.toFixed(1)}ms`}
                       </strong>
                     </span>
                     <span>
-                      loss: <strong>{latest.LossPct.toFixed(1)}%</strong>
+                      loss: <strong>{windowStats.loss.toFixed(1)}%</strong>
                     </span>
                   </div>
                 )}

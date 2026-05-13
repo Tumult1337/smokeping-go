@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series, type Band } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
@@ -42,12 +42,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   const requestedWindowRef = useRef<{ from?: number; to?: number }>({});
   requestedWindowRef.current = { from: fromSec, to: toSec };
 
-  // Loss strip state read by the draw hook. The hook is registered at uPlot
-  // construction and closes over these refs, so subsequent data refreshes
-  // can update what gets painted without rebuilding the chart.
-  const lossSeriesRef = useRef<LossSeries[]>([]);
-  const anyLossRef = useRef(false);
-
   const built = useMemo(() => buildAligned(points), [points]);
   // Stable signature of the source set. Only when this changes do we have to
   // tear down uPlot — series/bands topology depends on the source count, but
@@ -79,15 +73,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       height,
       scales: {
         x: { time: true },
-        // Pad the y-axis asymmetrically: 25% below data_min, 10% above
-        // data_max. The extra bottom padding pushes the smoke band up so
-        // it doesn't crowd the loss strip drawn at the plot bottom, and
-        // generally gives the chart more breathing room beneath the
-        // median. Top stays at uPlot's default so taller spikes still get
-        // their usual headroom.
         y: {
           auto: true,
-          range: { min: { pad: 0.25 }, max: { pad: 0.1 } },
+          range: { min: { pad: 0.1 }, max: { pad: 0.1 } },
         },
       },
       axes: [
@@ -110,14 +98,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       // clear it.
       cursor: { bind: { dblclick: () => null } },
       hooks: {
-        draw: [
-          (u) => {
-            if (!anyLossRef.current) return;
-            const all = lossSeriesRef.current;
-            if (all.length === 0) return;
-            drawLossStrip(u, all);
-          },
-        ],
         setCursor: [
           (u) => {
             const next = u.cursor.idx ?? null;
@@ -223,11 +203,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       pinRef.current.from !== fromSec || pinRef.current.to !== toSec;
     pinRef.current = { from: fromSec, to: toSec };
     const pin = pinChanged && fromSec != null && toSec != null;
-    // Refresh the loss-strip inputs read by the draw hook. setData below
-    // triggers a redraw, which will then read the fresh values from these
-    // refs — no separate redraw call needed.
-    lossSeriesRef.current = built.lossSeries;
-    anyLossRef.current = built.anyLoss;
     u.batch(() => {
       if (pin) {
         internalScaleRef.current = true;
@@ -261,6 +236,14 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
     <div className="chart-host" style={{ minHeight: height }}>
       <div ref={divRef} style={{ width: "100%" }} />
       {points.length === 0 && <div className="chart-empty">No data in range</div>}
+      {points.length > 0 && built.anyLoss && (
+        <LossStripCanvas
+          lossSeries={built.lossSeries}
+          fromSec={fromSec}
+          toSec={toSec}
+          onCyclePick={onCyclePick}
+        />
+      )}
       {points.length > 0 && (
         <div className="smoke-legend">
           {built.sources.map((src, srcIdx) => {
@@ -463,89 +446,128 @@ function bandsFor(sourceCount: number): Band[] {
   return out;
 }
 
-// drawLossStrip paints a labelled "loss" lane along the bottom of the plot:
-// a faint track per source (so the lane is visible as a defined zone even
-// where the cycle wasn't lossy), coloured cells per lossy cycle inside the
-// track (yellow / orange / red on the same thresholds bars mode uses for
-// the median tick), a thin separator above to split the lane from the
-// smoke, and a small "loss" label so it's self-explanatory. Without the
-// track + label, lossy cycles read as floating coloured pixels below the
-// chart, which looks like a UI glitch on first glance. Only sources with
-// at least one lossy cycle take a row, and a clean target skips the whole
-// section so smoke fills the full plot height.
-//
-// Cell widths are computed per source from neighbour midpoints — the same
-// rule SmokeBarChart uses for bar widths — so sparse sources still produce
-// cells that touch without overlap, and a multi-source chart paints each
-// source against its own cadence.
-function drawLossStrip(u: uPlot, all: LossSeries[]): void {
-  const lossy = all.filter((ls) => ls.hasLoss);
-  if (lossy.length === 0) return;
-  const ctx = u.ctx;
-  ctx.save();
-  // Clip so the strip never spills into the axis gutter when the user
-  // drag-zooms into a narrow window — matches the bar chart's clip.
-  ctx.beginPath();
-  ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
-  ctx.clip();
-  const left = u.bbox.left;
-  const width = u.bbox.width;
-  const bottom = u.bbox.top + u.bbox.height;
-  const stripTop = bottom - LOSS_STRIP_H * lossy.length;
+// LossStripCanvas renders below the main chart as a separate element so it
+// doesn't consume y-axis space or interfere with the time axis labels.
+// X-positions are computed linearly from fromSec/toSec; cell widths follow
+// the same neighbour-midpoint rule the bar chart uses so cells always touch.
+function LossStripCanvas({
+  lossSeries,
+  fromSec,
+  toSec,
+  onCyclePick,
+}: {
+  lossSeries: LossSeries[];
+  fromSec: number | undefined;
+  toSec: number | undefined;
+  onCyclePick?: (timeSec: number) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
 
-  // Track: faint neutral overlay so the lane is visible as its own zone.
-  // Neutral (not palette-tinted) on purpose — palette yellow against the
-  // yellow loss threshold would muddy the signal in multi-source views.
-  ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
-  ctx.fillRect(left, stripTop, width, LOSS_STRIP_H * lossy.length);
+  // Keep the latest props accessible inside stable callbacks without stale closures.
+  const lossSeriesRef = useRef(lossSeries);
+  const fromSecRef = useRef(fromSec);
+  const toSecRef = useRef(toSec);
+  lossSeriesRef.current = lossSeries;
+  fromSecRef.current = fromSec;
+  toSecRef.current = toSec;
 
-  // Separator rule above the strip — same darkness family as the axis
-  // grid, slightly lighter so it reads as a divider, not a grid line.
-  ctx.fillStyle = "#2a3142";
-  ctx.fillRect(left, stripTop - 1, width, 1);
-
-  // "loss" label, sitting in the y-axis bottom padding just above the
-  // strip. The 25% bottom pad on the y-scale guarantees this lands clear
-  // of any smoke fill.
-  ctx.font = "10px ui-sans-serif, -apple-system, system-ui, sans-serif";
-  ctx.textBaseline = "alphabetic";
-  ctx.fillStyle = "#8a93a6";
-  ctx.fillText("loss", left + 4, stripTop - 4);
-
-  // Loss cells painted on top of the track. Cells with loss<=0 are skipped
-  // so the track shows through and the colour stays exclusive to outages.
-  lossy.forEach((ls, row) => {
-    const { ts, losses } = ls;
-    const n = ts.length;
-    if (n === 0) return;
-    const cxs = ts.map((t) => u.valToPos(t, "x", true));
-    const rowTop = bottom - LOSS_STRIP_H * (row + 1);
-    for (let i = 0; i < n; i++) {
-      if (losses[i] <= 0) continue;
-      const cx = cxs[i];
-      let leftEdge: number;
-      let rightEdge: number;
-      if (n === 1) {
-        leftEdge = cx - 3;
-        rightEdge = cx + 3;
-      } else if (i === 0) {
-        rightEdge = (cx + cxs[i + 1]) / 2;
-        leftEdge = cx - (rightEdge - cx);
-      } else if (i === n - 1) {
-        leftEdge = (cxs[i - 1] + cx) / 2;
-        rightEdge = cx + (cx - leftEdge);
-      } else {
-        leftEdge = (cxs[i - 1] + cx) / 2;
-        rightEdge = (cx + cxs[i + 1]) / 2;
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ls = lossSeriesRef.current;
+    const from = fromSecRef.current;
+    const to = toSecRef.current;
+    const lossy = ls.filter((s) => s.hasLoss);
+    if (lossy.length === 0 || from == null || to == null) return;
+    const w = canvas.clientWidth;
+    if (w === 0) return;
+    const stripH = lossy.length * LOSS_STRIP_H;
+    const dpr = devicePixelRatio || 1;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(stripH * dpr);
+    const ctx = canvas.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    const span = to - from;
+    const valToX = (t: number) => ((t - from) / span) * w;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+    ctx.fillRect(0, 0, w, stripH);
+    lossy.forEach((src, row) => {
+      const { ts, losses } = src;
+      const n = ts.length;
+      if (n === 0) return;
+      const cxs = ts.map((t) => valToX(t));
+      const rowTop = row * LOSS_STRIP_H;
+      for (let i = 0; i < n; i++) {
+        if (losses[i] <= 0) continue;
+        const cx = cxs[i];
+        let lo: number, hi: number;
+        if (n === 1) { lo = cx - 3; hi = cx + 3; }
+        else if (i === 0) { hi = (cx + cxs[i + 1]) / 2; lo = cx - (hi - cx); }
+        else if (i === n - 1) { lo = (cxs[i - 1] + cx) / 2; hi = cx + (cx - lo); }
+        else { lo = (cxs[i - 1] + cx) / 2; hi = (cx + cxs[i + 1]) / 2; }
+        const x = Math.max(0, Math.floor(lo));
+        const cw = Math.max(1, Math.min(w - x, Math.ceil(hi) - x));
+        ctx.fillStyle = lossColor(losses[i], "transparent");
+        ctx.fillRect(x, rowTop, cw, LOSS_STRIP_H);
       }
-      const x = Math.floor(leftEdge);
-      const w = Math.max(1, Math.ceil(rightEdge) - x);
-      // Pass "transparent" as the ok-colour for defence in depth — we
-      // already skip loss<=0 above, so this branch is only ever hit with
-      // a real loss value and gets yellow / orange / red.
-      ctx.fillStyle = lossColor(losses[i], "transparent");
-      ctx.fillRect(x, rowTop, w, LOSS_STRIP_H);
+    });
+  }, []);
+
+  useEffect(() => { draw(); }, [lossSeries, fromSec, toSec, draw]);
+
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const ro = new ResizeObserver(draw);
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [draw]);
+
+  const onCyclePickRef = useRef(onCyclePick);
+  onCyclePickRef.current = onCyclePick;
+
+  const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const from = fromSecRef.current;
+    const to = toSecRef.current;
+    const cb = onCyclePickRef.current;
+    if (from == null || to == null || !cb) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const t = from + ((e.clientX - rect.left) / rect.width) * (to - from);
+    let bestT: number | null = null;
+    let bestDist = Infinity;
+    for (const src of lossSeriesRef.current) {
+      for (const ts of src.ts) {
+        const d = Math.abs(ts - t);
+        if (d < bestDist) { bestDist = d; bestT = ts; }
+      }
     }
-  });
-  ctx.restore();
+    if (bestT != null) cb(bestT);
+  }, []);
+
+  const lossy = lossSeries.filter((s) => s.hasLoss);
+  if (lossy.length === 0 || fromSec == null || toSec == null) return null;
+
+  return (
+    <div
+      ref={wrapRef}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        borderTop: "1px solid #2a3142",
+        paddingTop: 3,
+        marginTop: 2,
+      }}
+    >
+      <span style={{ fontSize: 10, color: "#8a93a6", flexShrink: 0, width: 28, textAlign: "right" }}>
+        loss
+      </span>
+      <canvas
+        ref={canvasRef}
+        style={{ flex: 1, height: lossy.length * LOSS_STRIP_H, cursor: "pointer", display: "block" }}
+        onClick={handleClick}
+      />
+    </div>
+  );
 }
