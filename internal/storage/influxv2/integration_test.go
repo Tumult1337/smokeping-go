@@ -76,7 +76,7 @@ func TestBootstrapAndWrite(t *testing.T) {
 
 	from := c.Time.Add(-time.Minute)
 	to := c.Time.Add(time.Minute)
-	cycles, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, "")
+	cycles, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, storage.QueryFilter{})
 	if err != nil {
 		t.Fatalf("query cycles: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestBootstrapAndWrite(t *testing.T) {
 		t.Errorf("median = 0, want >0")
 	}
 
-	rtts, err := r.QueryRTTs(ctx, c.Target, from, to, "")
+	rtts, err := r.QueryRTTs(ctx, c.Target, from, to, storage.QueryFilter{})
 	if err != nil {
 		t.Fatalf("query rtts: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestSourceTagRoundtrip(t *testing.T) {
 	from := c.Time.Add(-time.Minute)
 	to := c.Time.Add(time.Minute)
 
-	matching, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, "eu-west")
+	matching, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, storage.QueryFilter{Source: "eu-west"})
 	if err != nil {
 		t.Fatalf("query cycles (matching source): %v", err)
 	}
@@ -141,7 +141,7 @@ func TestSourceTagRoundtrip(t *testing.T) {
 		t.Fatal("no cycles with source=eu-west")
 	}
 
-	other, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, "us-east")
+	other, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, storage.QueryFilter{Source: "us-east"})
 	if err != nil {
 		t.Fatalf("query cycles (other source): %v", err)
 	}
@@ -149,7 +149,7 @@ func TestSourceTagRoundtrip(t *testing.T) {
 		t.Errorf("got %d cycles with source=us-east, want 0", len(other))
 	}
 
-	unfiltered, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, "")
+	unfiltered, err := r.QueryCycles(ctx, c.Target, from, to, storage.ResolutionRaw, storage.QueryFilter{})
 	if err != nil {
 		t.Fatalf("query cycles (unfiltered): %v", err)
 	}
