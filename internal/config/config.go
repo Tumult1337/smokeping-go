@@ -43,9 +43,47 @@ const (
 // configuration. Only the block referenced by Backend is consulted; the
 // other may be omitted.
 type Storage struct {
-	Backend  BackendName `json:"backend"`
-	InfluxV2 InfluxV2    `json:"influxv2"`
-	InfluxV3 InfluxV3    `json:"influxv3"`
+	Backend   BackendName `json:"backend"`
+	InfluxV2  InfluxV2    `json:"influxv2"`
+	InfluxV3  InfluxV3    `json:"influxv3"`
+	HopPolicy HopPolicy   `json:"hop_policy"`
+}
+
+// HopPolicy configures how aggressively probe_hop points are written.
+// Mode defaults to "always" when empty, preserving historical behaviour.
+// SampleEvery is a Go duration string ("30m", "1h") and is only meaningful
+// when Mode == "sampled"; otherwise it is ignored. See
+// internal/storage/hoppolicy.go for the runtime gate.
+type HopPolicy struct {
+	Mode        string `json:"mode,omitempty"`
+	SampleEvery string `json:"sample_every,omitempty"`
+}
+
+func (h *HopPolicy) Validate() error {
+	switch h.Mode {
+	case "", "always", "on_loss":
+		return nil
+	case "sampled":
+		d, err := h.ParsedSampleEvery()
+		if err != nil {
+			return fmt.Errorf("storage.hop_policy.sample_every: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("storage.hop_policy.sample_every must be > 0 for sampled mode")
+		}
+		return nil
+	default:
+		return fmt.Errorf("storage.hop_policy.mode %q must be one of: always, on_loss, sampled", h.Mode)
+	}
+}
+
+// ParsedSampleEvery returns SampleEvery as a time.Duration. Required when
+// Mode == "sampled"; the caller is expected to have run Validate first.
+func (h *HopPolicy) ParsedSampleEvery() (time.Duration, error) {
+	if h.SampleEvery == "" {
+		return 0, fmt.Errorf("required when mode is sampled")
+	}
+	return time.ParseDuration(h.SampleEvery)
 }
 
 // InfluxV2 configures the InfluxDB v2 backend. BucketRaw is required;
@@ -85,11 +123,11 @@ type InfluxV3 struct {
 // Backend with missing required fields is fatal so operators get a clear
 // error at startup instead of silent data loss.
 func (s *Storage) Validate() error {
+	if err := s.HopPolicy.Validate(); err != nil {
+		return err
+	}
 	switch s.Backend {
 	case "":
-		// Unset backend is only valid when no credentials were supplied
-		// for any backend — otherwise the operator clearly intended to
-		// use one and we want to refuse to guess which.
 		if s.InfluxV2.URL != "" || s.InfluxV3.URL != "" {
 			return fmt.Errorf("storage.backend must be set when any backend credentials are configured")
 		}

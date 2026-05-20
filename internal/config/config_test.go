@@ -197,6 +197,42 @@ func TestValidateErrors(t *testing.T) {
 	}
 }
 
+func TestStorageHopPolicyValidate(t *testing.T) {
+	cases := []struct {
+		name    string
+		policy  HopPolicy
+		wantErr bool
+	}{
+		{"empty defaults ok", HopPolicy{}, false},
+		{"always ok", HopPolicy{Mode: "always"}, false},
+		{"on_loss ok", HopPolicy{Mode: "on_loss"}, false},
+		{"sampled requires sample_every", HopPolicy{Mode: "sampled"}, true},
+		{"sampled with duration ok", HopPolicy{Mode: "sampled", SampleEvery: "30m"}, false},
+		{"sampled with bad duration", HopPolicy{Mode: "sampled", SampleEvery: "garbage"}, true},
+		{"sampled with zero duration", HopPolicy{Mode: "sampled", SampleEvery: "0s"}, true},
+		{"unknown mode", HopPolicy{Mode: "wat"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.policy.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate(%+v): err=%v, wantErr=%v", tc.policy, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestStorageHopPolicyParsedDuration(t *testing.T) {
+	hp := HopPolicy{Mode: "sampled", SampleEvery: "45m"}
+	d, err := hp.ParsedSampleEvery()
+	if err != nil {
+		t.Fatalf("ParsedSampleEvery: %v", err)
+	}
+	if d != 45*time.Minute {
+		t.Fatalf("got %s want 45m", d)
+	}
+}
+
 func TestStoreReload(t *testing.T) {
 	p := writeTmp(t, minimalConfig)
 	cfg, err := Load(p)

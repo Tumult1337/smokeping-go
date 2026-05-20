@@ -17,7 +17,8 @@
       "url": "",
       "token": "",
       "database": ""
-    }
+    },
+    "hop_policy": {}
   },
   "probes": {
     "fping": {
