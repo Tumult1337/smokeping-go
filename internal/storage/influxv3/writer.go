@@ -28,6 +28,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
 	"github.com/tumult/gosmokeping/internal/stats"
+	"github.com/tumult/gosmokeping/internal/storage"
 )
 
 // batcher tunables. The batching package fires the emit callback on size
@@ -74,9 +75,10 @@ const (
 // When the queue saturates because Influx is sick, OnCycle drops the
 // oldest queued cycle so the freshest data wins.
 type Writer struct {
-	log     *slog.Logger
-	client  *influxdb3.Client
-	batcher *batching.Batcher
+	log       *slog.Logger
+	client    *influxdb3.Client
+	batcher   *batching.Batcher
+	hopPolicy *storage.HopPolicy
 
 	queue   chan scheduler.Cycle
 	stop    chan struct{}
@@ -90,7 +92,7 @@ type Writer struct {
 // Enterprise, Cloud Dedicated) speaks the v3 API with a bearer token; the
 // client's empty-default would otherwise emit "Token <secret>" which only
 // v2-compat endpoints accept.
-func NewWriter(log *slog.Logger, cfg config.InfluxV3) (*Writer, error) {
+func NewWriter(log *slog.Logger, cfg config.InfluxV3, policy *storage.HopPolicy) (*Writer, error) {
 	c, err := influxdb3.New(influxdb3.ClientConfig{
 		Host:       cfg.URL,
 		Token:      cfg.Token,
@@ -101,11 +103,12 @@ func NewWriter(log *slog.Logger, cfg config.InfluxV3) (*Writer, error) {
 		return nil, fmt.Errorf("influxv3 client: %w", err)
 	}
 	w := &Writer{
-		log:    log,
-		client: c,
-		queue:  make(chan scheduler.Cycle, cycleQueueCap),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		log:       log,
+		client:    c,
+		hopPolicy: policy,
+		queue:     make(chan scheduler.Cycle, cycleQueueCap),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	w.batcher = batching.NewBatcher(
 		batching.WithSize(batchSize),
@@ -283,31 +286,33 @@ func (w *Writer) addToBatcher(c scheduler.Cycle) {
 		}
 	}
 
-	for _, hop := range c.Hops {
-		hopTags := map[string]string{
-			"target":    c.Target.Target.Name,
-			"group":     c.Target.Group,
-			"probe":     c.ProbeName,
-			"hop_index": strconv.Itoa(hop.Index),
+	if w.hopPolicy.ShouldWrite(c) {
+		for _, hop := range c.Hops {
+			hopTags := map[string]string{
+				"target":    c.Target.Target.Name,
+				"group":     c.Target.Group,
+				"probe":     c.ProbeName,
+				"hop_index": strconv.Itoa(hop.Index),
+			}
+			if c.Source != "" {
+				hopTags["source"] = c.Source
+			}
+			summary := stats.Compute(hop.RTTs)
+			hopLoss := 0.0
+			if hop.Sent > 0 {
+				hopLoss = 100 * float64(hop.Lost) / float64(hop.Sent)
+			}
+			points = append(points, influxdb3.NewPoint(measurementHop, hopTags, map[string]any{
+				"hop_ip":     hop.IP,
+				"rtt_min":    ms(summary.Min),
+				"rtt_max":    ms(summary.Max),
+				"rtt_mean":   ms(summary.Mean),
+				"rtt_median": ms(summary.Median),
+				"loss_pct":   hopLoss,
+				"loss_count": hop.Lost,
+				"pings_sent": hop.Sent,
+			}, c.Time))
 		}
-		if c.Source != "" {
-			hopTags["source"] = c.Source
-		}
-		summary := stats.Compute(hop.RTTs)
-		hopLoss := 0.0
-		if hop.Sent > 0 {
-			hopLoss = 100 * float64(hop.Lost) / float64(hop.Sent)
-		}
-		points = append(points, influxdb3.NewPoint(measurementHop, hopTags, map[string]any{
-			"hop_ip":     hop.IP,
-			"rtt_min":    ms(summary.Min),
-			"rtt_max":    ms(summary.Max),
-			"rtt_mean":   ms(summary.Mean),
-			"rtt_median": ms(summary.Median),
-			"loss_pct":   hopLoss,
-			"loss_count": hop.Lost,
-			"pings_sent": hop.Sent,
-		}, c.Time))
 	}
 
 	w.batcher.Add(points...)
