@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/storage"
 )
 
 func TestFormatEvery(t *testing.T) {
@@ -79,4 +81,39 @@ func TestOnCycleNonBlockingDropsOldest(t *testing.T) {
 			t.Errorf("queue order: got cycle ts=%d, want %d", got, i)
 		}
 	}
+}
+
+func TestWriter_HopPolicyGate(t *testing.T) {
+	// On-loss policy should skip ShouldWrite on a clean cycle. We test the
+	// policy contract directly here because exercising the writer's hop
+	// emission requires a live Influx; the gate's behaviour is what matters
+	// for the storage savings, and the writer just forwards the bool.
+	p, err := storage.NewHopPolicy("on_loss", 0)
+	if err != nil {
+		t.Fatalf("NewHopPolicy: %v", err)
+	}
+	clean := scheduler.Cycle{
+		Time:   time.Unix(0, 0),
+		Target: config.TargetRef{Group: "g", Target: config.Target{Name: "t"}},
+		Hops:   []probe.Hop{{Index: 0, Sent: 10, Lost: 0}},
+	}
+	lossy := clean
+	lossy.Hops = []probe.Hop{{Index: 0, Sent: 10, Lost: 1}}
+
+	if p.ShouldWrite(clean) {
+		t.Fatal("expected on_loss to skip clean cycle")
+	}
+	if !p.ShouldWrite(lossy) {
+		t.Fatal("expected on_loss to write lossy cycle")
+	}
+
+	// And confirm NewWriter accepts the policy.
+	w := NewWriter(slog.New(slog.NewTextHandler(io.Discard, nil)), config.InfluxV2{URL: "http://invalid.example"}, p)
+	if w == nil {
+		t.Fatal("NewWriter returned nil")
+	}
+	if w.hopPolicy != p {
+		t.Fatal("writer did not store the supplied HopPolicy")
+	}
+	w.Close()
 }

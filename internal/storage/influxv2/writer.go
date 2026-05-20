@@ -19,6 +19,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
 	"github.com/tumult/gosmokeping/internal/stats"
+	"github.com/tumult/gosmokeping/internal/storage"
 )
 
 const (
@@ -60,30 +61,32 @@ const (
 // make room for the new one, so monitoring keeps producing fresh data
 // instead of freezing every probing goroutine in lockstep.
 type Writer struct {
-	log      *slog.Logger
-	client   influxdb2.Client
-	write    api.WriteAPI
-	cfg      config.InfluxV2
-	queue    chan scheduler.Cycle
-	stop     chan struct{}
-	flushWg  sync.WaitGroup // tracks only flushLoop
-	errsDone chan struct{}   // closed when the errors goroutine exits
-	once     sync.Once
-	dropped  atomic.Int64
+	log       *slog.Logger
+	client    influxdb2.Client
+	write     api.WriteAPI
+	cfg       config.InfluxV2
+	hopPolicy *storage.HopPolicy
+	queue     chan scheduler.Cycle
+	stop      chan struct{}
+	flushWg   sync.WaitGroup // tracks only flushLoop
+	errsDone  chan struct{}   // closed when the errors goroutine exits
+	once      sync.Once
+	dropped   atomic.Int64
 }
 
 // NewWriter constructs a Writer backed by a new v2 client. The caller must
 // Close the returned Writer on shutdown to flush buffered writes.
-func NewWriter(log *slog.Logger, cfg config.InfluxV2) *Writer {
+func NewWriter(log *slog.Logger, cfg config.InfluxV2, policy *storage.HopPolicy) *Writer {
 	client := influxdb2.NewClient(cfg.URL, cfg.Token)
 	wa := client.WriteAPI(cfg.Org, cfg.BucketRaw)
 	w := &Writer{
-		log:    log,
-		client: client,
-		write:  wa,
-		cfg:    cfg,
-		queue:  make(chan scheduler.Cycle, cycleQueueCap),
-		stop:   make(chan struct{}),
+		log:       log,
+		client:    client,
+		write:     wa,
+		cfg:       cfg,
+		hopPolicy: policy,
+		queue:     make(chan scheduler.Cycle, cycleQueueCap),
+		stop:      make(chan struct{}),
 	}
 	// Log async write errors. errsDone is closed when this goroutine exits
 	// so Close can wait for it after client.Close() drains the channel.
@@ -251,31 +254,33 @@ func (w *Writer) writeCycle(c scheduler.Cycle) {
 		}
 	}
 
-	for _, hop := range c.Hops {
-		hopTags := map[string]string{
-			"target":    c.Target.Target.Name,
-			"group":     c.Target.Group,
-			"probe":     c.ProbeName,
-			"hop_index": strconv.Itoa(hop.Index),
+	if w.hopPolicy.ShouldWrite(c) {
+		for _, hop := range c.Hops {
+			hopTags := map[string]string{
+				"target":    c.Target.Target.Name,
+				"group":     c.Target.Group,
+				"probe":     c.ProbeName,
+				"hop_index": strconv.Itoa(hop.Index),
+			}
+			if c.Source != "" {
+				hopTags["source"] = c.Source
+			}
+			summary := stats.Compute(hop.RTTs)
+			lossPct := 0.0
+			if hop.Sent > 0 {
+				lossPct = 100 * float64(hop.Lost) / float64(hop.Sent)
+			}
+			w.write.WritePoint(write.NewPoint(measurementHop, hopTags, map[string]any{
+				"hop_ip":     hop.IP,
+				"rtt_min":    ms(summary.Min),
+				"rtt_max":    ms(summary.Max),
+				"rtt_mean":   ms(summary.Mean),
+				"rtt_median": ms(summary.Median),
+				"loss_pct":   lossPct,
+				"loss_count": hop.Lost,
+				"pings_sent": hop.Sent,
+			}, c.Time))
 		}
-		if c.Source != "" {
-			hopTags["source"] = c.Source
-		}
-		summary := stats.Compute(hop.RTTs)
-		lossPct := 0.0
-		if hop.Sent > 0 {
-			lossPct = 100 * float64(hop.Lost) / float64(hop.Sent)
-		}
-		w.write.WritePoint(write.NewPoint(measurementHop, hopTags, map[string]any{
-			"hop_ip":     hop.IP,
-			"rtt_min":    ms(summary.Min),
-			"rtt_max":    ms(summary.Max),
-			"rtt_mean":   ms(summary.Mean),
-			"rtt_median": ms(summary.Median),
-			"loss_pct":   lossPct,
-			"loss_count": hop.Lost,
-			"pings_sent": hop.Sent,
-		}, c.Time))
 	}
 }
 
