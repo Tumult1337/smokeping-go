@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -28,6 +29,11 @@ type storageBackend struct {
 // storage.ErrDisabled when the selected backend has no credentials — the
 // caller logs a warning and runs without persistent storage.
 func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage) (*storageBackend, error) {
+	hopPolicy, err := buildHopPolicy(log, cfg.HopPolicy)
+	if err != nil {
+		return nil, err
+	}
+
 	switch cfg.Backend {
 	case "":
 		return nil, storage.ErrDisabled
@@ -38,7 +44,7 @@ func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage) (*st
 		if err := influxv2.Bootstrap(ctx, log, cfg.InfluxV2); err != nil {
 			return nil, fmt.Errorf("bootstrap influxv2: %w", err)
 		}
-		w := influxv2.NewWriter(log, cfg.InfluxV2)
+		w := influxv2.NewWriter(log, cfg.InfluxV2, hopPolicy)
 		r := influxv2.NewReader(cfg.InfluxV2)
 		return &storageBackend{
 			sink:   w,
@@ -56,7 +62,7 @@ func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage) (*st
 		if err := influxv3.Bootstrap(ctx, log, cfg.InfluxV3); err != nil {
 			return nil, fmt.Errorf("bootstrap influxv3: %w", err)
 		}
-		w, err := influxv3.NewWriter(log, cfg.InfluxV3)
+		w, err := influxv3.NewWriter(log, cfg.InfluxV3, hopPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("influxv3 writer: %w", err)
 		}
@@ -77,4 +83,28 @@ func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage) (*st
 	default:
 		return nil, fmt.Errorf("unknown storage backend %q", cfg.Backend)
 	}
+}
+
+// buildHopPolicy turns the config sub-block into a runtime HopPolicy. Returns
+// (nil, nil) when the mode is empty so callers get a nil receiver that
+// behaves as "always" — i.e. legacy behaviour unchanged unless the operator
+// explicitly opts in.
+func buildHopPolicy(log *slog.Logger, cfg config.HopPolicy) (*storage.HopPolicy, error) {
+	if cfg.Mode == "" {
+		return nil, nil
+	}
+	var sampleEvery time.Duration
+	if cfg.Mode == "sampled" {
+		d, err := cfg.ParsedSampleEvery()
+		if err != nil {
+			return nil, err
+		}
+		sampleEvery = d
+	}
+	p, err := storage.NewHopPolicy(cfg.Mode, sampleEvery)
+	if err != nil {
+		return nil, fmt.Errorf("storage.hop_policy: %w", err)
+	}
+	log.Info("storage.hop_policy", "mode", cfg.Mode, "sample_every", sampleEvery)
+	return p, nil
 }
