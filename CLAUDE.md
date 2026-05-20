@@ -80,9 +80,10 @@ Key points a reader can't derive from a single file:
 - **Hop write policy:** `storage.hop_policy.mode` ∈ `always`|`on_loss`|
   `sampled` gates the `probe_hop` write loop in both v2 and v3 writers.
   `always` (default) keeps the legacy behaviour; `on_loss` writes hops
-  only when the last hop in the trace reports `Lost > 0`; `sampled` keeps
-  `on_loss` plus one baseline write per `sample_every` window per
-  `(target, source)`. The gate lives in `internal/storage/hoppolicy.go`
+  only when the last hop in the trace reports `Lost > 0`; `sampled`
+  writes one cycle per `sample_every` window per `(target, source)` —
+  a loss cycle consumes the slot, otherwise a baseline snapshot does
+  (loss wins, baseline fills the gap). The gate lives in `internal/storage/hoppolicy.go`
   and is consulted from both backend writers — adding a new writer means
   threading the same `*storage.HopPolicy` through its constructor. The
   policy is constructed once at startup in `cmd/gosmokeping/storage.go`

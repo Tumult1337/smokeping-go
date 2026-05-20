@@ -167,7 +167,7 @@ on busy installs. Two knobs:
    |------|-----------|
    | `always` (default) | Every cycle that has hops writes them. Legacy behaviour, no upgrade surprise. |
    | `on_loss` | Hops written only when the trace's last hop reports `Lost > 0`. |
-   | `sampled` | `on_loss` plus one baseline snapshot per `sample_every` window per `(target, source)`. Requires `sample_every` (e.g. `"30m"`). |
+   | `sampled` | One write per `sample_every` window per `(target, source)`: a loss cycle fills the slot, otherwise a baseline snapshot does. Loss wins, baseline fills the gap. Requires `sample_every` (e.g. `"30m"`). |
 
    ```json
    "storage": {
