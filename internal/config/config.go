@@ -66,7 +66,7 @@ func (h *HopPolicy) Validate() error {
 	case "sampled":
 		d, err := h.ParsedSampleEvery()
 		if err != nil {
-			return fmt.Errorf("storage.hop_policy.sample_every: %w", err)
+			return err
 		}
 		if d <= 0 {
 			return fmt.Errorf("storage.hop_policy.sample_every must be > 0 for sampled mode")
@@ -77,13 +77,17 @@ func (h *HopPolicy) Validate() error {
 	}
 }
 
-// ParsedSampleEvery returns SampleEvery as a time.Duration. Required when
-// Mode == "sampled"; the caller is expected to have run Validate first.
+// ParsedSampleEvery returns SampleEvery as a time.Duration. Safe to call
+// standalone — errors include the storage.hop_policy.sample_every path.
 func (h *HopPolicy) ParsedSampleEvery() (time.Duration, error) {
 	if h.SampleEvery == "" {
-		return 0, fmt.Errorf("required when mode is sampled")
+		return 0, fmt.Errorf("storage.hop_policy.sample_every: required when mode is sampled")
 	}
-	return time.ParseDuration(h.SampleEvery)
+	d, err := time.ParseDuration(h.SampleEvery)
+	if err != nil {
+		return 0, fmt.Errorf("storage.hop_policy.sample_every: %w", err)
+	}
+	return d, nil
 }
 
 // InfluxV2 configures the InfluxDB v2 backend. BucketRaw is required;
@@ -128,6 +132,9 @@ func (s *Storage) Validate() error {
 	}
 	switch s.Backend {
 	case "":
+		// Unset backend is only valid when no credentials were supplied
+		// for any backend — otherwise the operator clearly intended to
+		// use one and we want to refuse to guess which.
 		if s.InfluxV2.URL != "" || s.InfluxV3.URL != "" {
 			return fmt.Errorf("storage.backend must be set when any backend credentials are configured")
 		}

@@ -211,6 +211,9 @@ func TestStorageHopPolicyValidate(t *testing.T) {
 		{"sampled with bad duration", HopPolicy{Mode: "sampled", SampleEvery: "garbage"}, true},
 		{"sampled with zero duration", HopPolicy{Mode: "sampled", SampleEvery: "0s"}, true},
 		{"unknown mode", HopPolicy{Mode: "wat"}, true},
+		// SampleEvery on a non-sampled mode is silently ignored, matching
+		// how InfluxV3.RetentionPeriod is ignored when the backend is v2.
+		{"always with sample_every ignored", HopPolicy{Mode: "always", SampleEvery: "30m"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
