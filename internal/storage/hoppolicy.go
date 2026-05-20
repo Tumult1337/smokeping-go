@@ -81,13 +81,14 @@ func (p *HopPolicy) ShouldWrite(c scheduler.Cycle) bool {
 		return hasLoss
 	}
 	// sampled: loss always wins; otherwise per-bucket baseline.
-	if hasLoss {
-		return true
-	}
 	key := c.Target.ID() + "|" + c.Source
-	bucket := c.Time.Unix() / int64(p.sampleEvery.Seconds())
+	bucket := c.Time.UnixNano() / p.sampleEvery.Nanoseconds()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if hasLoss {
+		p.lastBucket[key] = bucket
+		return true
+	}
 	if prev, ok := p.lastBucket[key]; ok && prev == bucket {
 		return false
 	}
