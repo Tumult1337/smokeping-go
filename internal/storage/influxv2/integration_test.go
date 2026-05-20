@@ -49,7 +49,7 @@ func TestBootstrapAndWrite(t *testing.T) {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
-	w := NewWriter(log, cfg)
+	w := NewWriter(log, cfg, nil)
 	defer w.Close()
 
 	if err := w.Ping(ctx); err != nil {
@@ -109,7 +109,7 @@ func TestSourceTagRoundtrip(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w := NewWriter(log, cfg)
+	w := NewWriter(log, cfg, nil)
 	defer w.Close()
 
 	c := scheduler.Cycle{
