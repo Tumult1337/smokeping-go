@@ -190,7 +190,7 @@ this is load-bearing under systemd where cwd is `/`. Real shell env always
 wins over `.env` (godotenv default); a missing `.env` is a silent no-op.
 
 `storage.backend` selects the persistence layer: `"influxv2"` (default;
-three-bucket rollup tasks, Flux queries) or `"influxv3"` (single database,
+four-bucket tiered Flux rollups, Flux queries) or `"influxv3"` (single database,
 SQL/Flight queries, query-time `date_bin` aggregation). The UI and alert
 evaluator are backend-agnostic — they only see `storage.Reader` and
 `scheduler.Sink`. Pick v3 when slave fan-out is producing more write load

@@ -57,7 +57,7 @@ the "all" view overlays every source with its own palette colour.
 
 ## Quick start
 
-Prerequisites: Go 1.22+, Node 20+, a running InfluxDB v2 instance.
+Prerequisites: Go 1.26+, Node 20+, a running InfluxDB v2 instance.
 
 ### 1. Start InfluxDB and grab credentials
 
