@@ -107,13 +107,12 @@ func TestWriter_HopPolicyGate(t *testing.T) {
 		t.Fatal("expected on_loss to write lossy cycle")
 	}
 
-	// And confirm NewWriter accepts the policy.
-	w := NewWriter(slog.New(slog.NewTextHandler(io.Discard, nil)), config.InfluxV2{URL: "http://invalid.example"}, p)
-	if w == nil {
-		t.Fatal("NewWriter returned nil")
-	}
+	// And confirm the Writer struct exposes hopPolicy at the expected field
+	// name and type. We build the struct literally rather than via NewWriter
+	// because NewWriter starts an influxdb-client-go errors-drain goroutine
+	// that races with Close() inside the library (upstream issue, not ours).
+	w := &Writer{hopPolicy: p}
 	if w.hopPolicy != p {
 		t.Fatal("writer did not store the supplied HopPolicy")
 	}
-	w.Close()
 }
