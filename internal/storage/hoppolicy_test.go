@@ -132,12 +132,10 @@ func TestHopPolicy_SampledConcurrentAccess(t *testing.T) {
 	p, _ := NewHopPolicy("sampled", time.Minute)
 	c := cycleWithLastHopLoss(0)
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 20 {
+		wg.Go(func() {
 			p.ShouldWrite(c)
-		}()
+		})
 	}
 	wg.Wait()
 }
