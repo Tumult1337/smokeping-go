@@ -144,6 +144,46 @@ Real shell env always wins over `.env`; a missing `.env` is silently ignored.
 | `"influxv2"` | Default. Four buckets, tiered Flux rollups, Flux queries. |
 | `"influxv3"` | Single database, SQL/Arrow Flight queries, query-time `date_bin`. Good for high write throughput from many slaves. |
 
+### Alert conditions
+
+Each alert's `condition` is a single predicate `<field> <op> <value>`. No
+AND/OR — to combine criteria, attach multiple alerts to the target.
+
+| Field | Unit | Notes |
+|-------|------|-------|
+| `loss_pct` | percent | Target-level loss. MTR mirrors the final hop (target) or reports full loss when unreachable; intermediate hop drops are ignored. |
+| `rtt_min`, `rtt_max`, `rtt_mean`, `rtt_median`, `rtt_stddev` | ms | Per-cycle summary across the cycle's RTT samples. |
+| `rtt_p5`, `rtt_p95` | ms | Other percentiles (`p10`..`p90`) are computed and stored, but not currently accepted as alert fields. |
+
+Operators: `>` `>=` `<` `<=` `==` `!=`. Avoid `==`/`!=` on `rtt_*` —
+those are float milliseconds. `rtt_*` values accept Go duration syntax
+(`50ms`, `1.5s`); a bare number is interpreted as milliseconds.
+
+```json
+"alerts": {
+  "high-loss":    { "condition": "loss_pct > 5",      "sustained": 3, "actions": ["log"] },
+  "high-latency": { "condition": "rtt_median > 50ms", "sustained": 5, "actions": ["log"] }
+}
+```
+
+**Sustained / debounce.** `sustained: N` requires `N` consecutive bad
+cycles before the alert transitions to `firing` (with a `pending` event
+on the first bad cycle if `N > 1`). `0` and `1` are equivalent — first
+bad cycle fires immediately. A single good cycle resets the counter and
+transitions back to `ok`; there is no hysteresis, so a metric oscillating
+across the threshold will produce a transition per cycle.
+
+**Full-loss cycles.** When every probe in a cycle fails, all `rtt_*`
+fields read as `0`, so a condition like `rtt_median > 50` will *not*
+fire on an outage — pair it with a `loss_pct` alert if you want both
+"slow" and "down" coverage.
+
+**State lifetime.** Alert state lives in memory only. Restarts return
+every alert to `ok`; if a target is still bad, the next cycle re-walks
+`ok → pending/firing` and re-emits the event. In cluster mode state is
+keyed by `(target, alert, source)`, so a slave firing does not affect
+the master's counter for the same target.
+
 ### Alert actions
 
 | Type | Shape |
