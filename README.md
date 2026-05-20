@@ -144,6 +144,44 @@ Real shell env always wins over `.env`; a missing `.env` is silently ignored.
 | `"influxv2"` | Default. Four buckets, tiered Flux rollups, Flux queries. |
 | `"influxv3"` | Single database, SQL/Arrow Flight queries, query-time `date_bin`. Good for high write throughput from many slaves. |
 
+### Trimming raw bucket size
+
+`probe_hop` (MTR + opportunistic ICMP traces) dominates raw-bucket storage
+on busy installs. Two knobs:
+
+1. **Reduce raw retention.** `influxv2.Bootstrap` creates `smokeping_raw`
+   with 7-day retention by default. Cut it to 48h with the influx CLI:
+
+   ```bash
+   docker exec smokeping-influxdb-1 influx bucket list
+   docker exec smokeping-influxdb-1 influx bucket update \
+     --id <smokeping_raw-id> --retention 48h
+   ```
+
+   Cycle min/avg/max/loss survive in the 5m/1h/1d rollups; only per-ping
+   (`probe_rtt`) and per-hop (`probe_hop`) detail is shortened.
+
+2. **Suppress baseline hop writes** via `storage.hop_policy.mode`:
+
+   | Mode | Behaviour |
+   |------|-----------|
+   | `always` (default) | Every cycle that has hops writes them. Legacy behaviour, no upgrade surprise. |
+   | `on_loss` | Hops written only when the trace's last hop reports `Lost > 0`. |
+   | `sampled` | `on_loss` plus one baseline snapshot per `sample_every` window per `(target, source)`. Requires `sample_every` (e.g. `"30m"`). |
+
+   ```json
+   "storage": {
+     "backend": "influxv2",
+     "influxv2": { ... },
+     "hop_policy": { "mode": "sampled", "sample_every": "30m" }
+   }
+   ```
+
+   Mode changes require a restart (the writer captures the policy at
+   construction; no hot-reload). Combined with reduced retention,
+   hop-heavy installs typically see `smokeping_raw` shrink by an order
+   of magnitude after the next InfluxDB compaction.
+
 ### Alert conditions
 
 Each alert's `condition` is a single predicate `<field> <op> <value>`. No

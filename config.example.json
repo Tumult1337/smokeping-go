@@ -14,7 +14,8 @@
       "bucket_1h": "smokeping_1h",
       "bucket_1d": "smokeping_1d"
     },
-    "influxv3": { "url": "", "token": "", "database": "", "retention_period": "" }
+    "influxv3": { "url": "", "token": "", "database": "", "retention_period": "" },
+    "hop_policy": { "mode": "always", "sample_every": "30m" }
   },
 
   "probes": {

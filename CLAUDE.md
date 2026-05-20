@@ -77,6 +77,18 @@ Key points a reader can't derive from a single file:
   optional in `InfluxV2.Bucket5m`; when unset the v2 reader's
   `fallbackChain` walks down to raw automatically (slower, but correct).
 
+- **Hop write policy:** `storage.hop_policy.mode` ∈ `always`|`on_loss`|
+  `sampled` gates the `probe_hop` write loop in both v2 and v3 writers.
+  `always` (default) keeps the legacy behaviour; `on_loss` writes hops
+  only when the last hop in the trace reports `Lost > 0`; `sampled` keeps
+  `on_loss` plus one baseline write per `sample_every` window per
+  `(target, source)`. The gate lives in `internal/storage/hoppolicy.go`
+  and is consulted from both backend writers — adding a new writer means
+  threading the same `*storage.HopPolicy` through its constructor. The
+  policy is constructed once at startup in `cmd/gosmokeping/storage.go`
+  (`buildHopPolicy`) and not hot-reloaded, so a config change requires a
+  process restart to bind.
+
 - **UI embed:** `internal/ui/ui.go` uses `//go:embed all:dist` against
   `internal/ui/dist/`. That directory must exist at build time, so the
   repo keeps a `.gitkeep` in it. `FS()` returns nil when dist is empty,
