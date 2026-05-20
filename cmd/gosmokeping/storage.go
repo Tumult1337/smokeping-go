@@ -105,6 +105,6 @@ func buildHopPolicy(log *slog.Logger, cfg config.HopPolicy) (*storage.HopPolicy,
 	if err != nil {
 		return nil, fmt.Errorf("storage.hop_policy: %w", err)
 	}
-	log.Info("storage.hop_policy", "mode", cfg.Mode, "sample_every", sampleEvery)
+	log.Info("storage.hop_policy", "mode", cfg.Mode, "sample_every", sampleEvery.String())
 	return p, nil
 }
