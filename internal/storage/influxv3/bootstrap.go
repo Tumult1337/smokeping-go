@@ -54,11 +54,15 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV3) error
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cfg.Token)
 
-	resp, err := http.DefaultClient.Do(req)
+	// Use a local client with an explicit timeout rather than http.DefaultClient.
+	// reqCtx already bounds the call, but the client-level timeout is defense in
+	// depth — and matches every other HTTP client in the codebase.
+	httpClient := &http.Client{Timeout: bootstrapHTTPTimeout}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("influxv3 bootstrap: do: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	switch {

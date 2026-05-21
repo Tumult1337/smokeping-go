@@ -125,7 +125,13 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.InfluxV2) error
 		}
 	}
 	if cfg.Bucket1d != "" {
-		if err := ensureTask(ctx, log, client, orgID, "gosmokeping-1d-v4", fluxRollup(cfg.Bucket1h, cfg.Bucket1d, 24*time.Hour), "1d"); err != nil {
+		// 1d rolls UP from 1h, not raw — raw retention (7d) is shorter than 1d's
+		// natural lookback. If 1h isn't configured, the source bucket would be
+		// "" and the Flux task would silently produce no data; skip with a
+		// warning rather than installing a broken task.
+		if cfg.Bucket1h == "" {
+			log.Warn("bucket_1d configured without bucket_1h — skipping 1d rollup task; configure bucket_1h to enable daily rollups")
+		} else if err := ensureTask(ctx, log, client, orgID, "gosmokeping-1d-v4", fluxRollup(cfg.Bucket1h, cfg.Bucket1d, 24*time.Hour), "1d"); err != nil {
 			return err
 		}
 	}

@@ -4,7 +4,12 @@ GO         ?= go
 BIN        ?= gosmokeping
 PKG        ?= github.com/tumult/gosmokeping/cmd/gosmokeping
 UI_DIR     ?= ui
-LDFLAGS    ?= -s -w
+# VERSION is stamped into the binary so /api/v1/health and slave /register
+# reports identify deployed builds. Derived from git when available; falls
+# back to "dev" so a clean checkout without git still builds. Operators
+# overriding `make build VERSION=1.2.3` get their literal string.
+VERSION    ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS    ?= -s -w -X main.version=$(VERSION)
 
 build: ui
 	$(GO) build -ldflags="$(LDFLAGS)" -o $(BIN) $(PKG)

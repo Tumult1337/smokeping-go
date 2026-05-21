@@ -1,7 +1,8 @@
 package master
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 	"time"
 )
@@ -55,7 +56,7 @@ func (r *Registry) Names() []string {
 	for name := range r.slaves {
 		out = append(out, name)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -88,6 +89,6 @@ func (r *Registry) Snapshot() []SlaveInfo {
 	for _, v := range r.slaves {
 		out = append(out, *v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	slices.SortFunc(out, func(a, b SlaveInfo) int { return cmp.Compare(a.Name, b.Name) })
 	return out
 }

@@ -123,7 +123,7 @@ The Docker image and the bundled systemd unit handle this automatically.
 ```
 
 Open <http://localhost:8080>. Cycles start landing within one probe
-interval (default 30 s).
+interval (default 5 min; `config.example.json` overrides to 30 s).
 
 ## Config
 

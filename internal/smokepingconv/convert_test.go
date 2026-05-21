@@ -35,7 +35,7 @@ func runGolden(t *testing.T, in string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	abs, _ := filepath.Abs(in)
 	cfg, notes, err := Convert(f, filepath.Dir(abs), abs)
 	if err != nil {

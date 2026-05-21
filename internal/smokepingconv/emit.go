@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/tumult/gosmokeping/internal/config"
 )
@@ -86,7 +86,7 @@ func encodeProbes(probes map[string]config.Probe) (json.RawMessage, error) {
 			rest = append(rest, k)
 		}
 	}
-	sort.Strings(rest)
+	slices.Sort(rest)
 	keys = append(keys, rest...)
 
 	var buf bytes.Buffer

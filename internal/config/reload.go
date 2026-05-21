@@ -107,12 +107,16 @@ func (s *Store) WatchFile(ctx context.Context, log *slog.Logger) error {
 	dir := filepath.Dir(s.path)
 	base := filepath.Base(s.path)
 	if err := w.Add(dir); err != nil {
-		w.Close()
+		_ = w.Close()
 		return err
 	}
 
 	go func() {
-		defer w.Close()
+		defer func() {
+			if err := w.Close(); err != nil {
+				log.Warn("config watcher close", "err", err)
+			}
+		}()
 		// Debounce bursty editor writes (vim: WRITE → RENAME → CHMOD).
 		// A 200ms quiet period is short enough to feel instant and long
 		// enough to collapse any real editor save into one reload.

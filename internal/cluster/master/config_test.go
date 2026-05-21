@@ -58,7 +58,7 @@ func TestBuildClusterConfigFiltersAssignedTargets(t *testing.T) {
 		t.Fatalf("eu1 expected 2 targets (shared + eu-only), got %+v", eu1)
 	}
 	names := []string{eu1[0].Targets[0].Name, eu1[0].Targets[1].Name}
-	if !(slices.Contains(names, "shared") && slices.Contains(names, "eu-only")) || slices.Contains(names, "us-only") {
+	if !slices.Contains(names, "shared") || !slices.Contains(names, "eu-only") || slices.Contains(names, "us-only") {
 		t.Errorf("eu1 target names = %v", names)
 	}
 

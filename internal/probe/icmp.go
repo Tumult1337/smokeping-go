@@ -69,7 +69,7 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	if err != nil {
 		return nil, fmt.Errorf("listen icmp: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Each cycle uses a fresh id/base-seq to avoid cross-cycle reply confusion.
 	id := int(rand.Uint32() & 0xffff)

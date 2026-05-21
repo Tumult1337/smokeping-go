@@ -32,7 +32,7 @@ func TestEmit_ProbeOrder(t *testing.T) {
 	iHttp := strings.Index(s, `"http"`)
 	iDns := strings.Index(s, `"dns"`)
 	iCurl := strings.Index(s, `"curl"`)
-	if !(iIcmp < iTcp && iTcp < iHttp && iHttp < iDns && iDns < iCurl) {
+	if iIcmp >= iTcp || iTcp >= iHttp || iHttp >= iDns || iDns >= iCurl {
 		t.Errorf("probe order wrong, got:\n%s", s)
 	}
 	if !strings.HasSuffix(s, "\n") {

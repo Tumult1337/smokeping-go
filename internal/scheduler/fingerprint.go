@@ -1,7 +1,7 @@
 package scheduler
 
 import (
-	"sort"
+	"slices"
 	"strconv"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -33,7 +33,7 @@ func Fingerprint(cfg *config.Config) string {
 	for name := range cfg.Probes {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	for _, name := range names {
 		p := cfg.Probes[name]
 		out = append(out, name...)

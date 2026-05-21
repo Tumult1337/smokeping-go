@@ -22,7 +22,7 @@ import (
 // storage + alerts + UI + optional cluster master endpoints, and blocks
 // running the scheduler (via Supervisor, so SIGHUP-triggered target edits are
 // applied live) until ctx is cancelled.
-func runNode(ctx context.Context, log *slog.Logger, configPath string) {
+func runNode(ctx context.Context, log *slog.Logger, configPath, version string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -113,6 +113,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath string) {
 		UIFS:           ui.FS(),
 		ClusterHandler: clusterHandler,
 		Slaves:         slaveLister,
+		Version:        version,
 	})
 	serverDone := make(chan error, 1)
 	go func() {

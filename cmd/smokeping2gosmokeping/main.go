@@ -70,7 +70,7 @@ func run(inPath, outPath, notesPath string, force, strict bool) error {
 	if err != nil {
 		return fmt.Errorf("open -in: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	absIn, _ := filepath.Abs(inPath)
 	cfg, notes, err := smokepingconv.Convert(f, filepath.Dir(absIn), absIn)

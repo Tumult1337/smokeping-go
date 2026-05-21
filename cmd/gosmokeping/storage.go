@@ -22,7 +22,7 @@ import (
 type storageBackend struct {
 	sink   scheduler.Sink
 	reader storage.Reader
-	close  func() error
+	close  func()
 }
 
 // openStorage builds the backend selected by cfg.Backend. Returns
@@ -49,10 +49,9 @@ func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage) (*st
 		return &storageBackend{
 			sink:   w,
 			reader: r,
-			close: func() error {
+			close: func() {
 				w.Close()
 				r.Close()
-				return nil
 			},
 		}, nil
 	case config.BackendInfluxV3:
@@ -74,10 +73,9 @@ func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage) (*st
 		return &storageBackend{
 			sink:   w,
 			reader: r,
-			close: func() error {
+			close: func() {
 				w.Close()
 				r.Close()
-				return nil
 			},
 		}, nil
 	default:

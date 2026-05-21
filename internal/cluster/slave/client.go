@@ -18,8 +18,15 @@ import (
 	"github.com/tumult/gosmokeping/internal/cluster"
 )
 
-// ErrAuth is returned when the master rejects our bearer token. The runner
-// treats this as fatal — the operator must rotate + restart.
+// ErrAuth is returned when the master rejects our bearer token with 401.
+// The runner treats this as fatal — the operator must rotate + restart.
+//
+// 403 is intentionally NOT treated as ErrAuth. A 403 from a WAF / CDN
+// (Cloudflare bot management, JS challenges, IUAM, geo-blocks, rate limits)
+// is transient and recoverable — fast-failing the process on a CDN flap
+// would tear down the whole slave fleet on every challenge. Real "token
+// lacks scope" 403s from the master itself just become indefinite retries,
+// which the operator notices via metrics rather than a crash loop.
 var ErrAuth = errors.New("cluster: 401 unauthorized")
 
 // ErrNotModified signals that a GET /config returned 304 — caller keeps its
@@ -123,7 +130,7 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 	if err != nil {
 		return 0, httpResult{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	const maxResponseBody = 64 << 20 // 64 MiB — generous cap against a rogue/MitM master
 	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {

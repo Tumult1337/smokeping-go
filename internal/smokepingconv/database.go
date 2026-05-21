@@ -2,7 +2,7 @@ package smokepingconv
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"time"
 
@@ -52,7 +52,7 @@ func mapDatabase(root *parser.SPRoot) (time.Duration, int, []Note) {
 		}
 		extras = append(extras, k)
 	}
-	sort.Strings(extras)
+	slices.Sort(extras)
 	for _, k := range extras {
 		notes = append(notes, Note{
 			Level: LevelWarn, Category: CatGeneral,

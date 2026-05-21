@@ -69,7 +69,7 @@ export interface CyclesResponse {
   points: CyclePoint[];
 }
 
-export type Resolution = "raw" | "1h" | "1d" | "auto";
+export type Resolution = "raw" | "5m" | "1h" | "1d" | "auto";
 
 async function jsonGet<T>(url: string, signal?: AbortSignal): Promise<T> {
   const r = await fetch(url, { signal });

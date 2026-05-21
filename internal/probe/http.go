@@ -193,7 +193,7 @@ func (p *HTTP) one(ctx context.Context, client *http.Client, url string) (time.D
 	if err != nil {
 		return 0, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Drain a bounded amount so the transport can pool the connection.
 	_, _ = io.CopyN(io.Discard, resp.Body, 4096)
 

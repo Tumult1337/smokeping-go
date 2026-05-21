@@ -151,7 +151,7 @@ from(bucket: "%s")
 	if err != nil {
 		return nil, fmt.Errorf("query cycles: %w", err)
 	}
-	defer res2.Close()
+	defer func() { _ = res2.Close() }()
 
 	var out []storage.CyclePoint
 	for res2.Next() {
@@ -204,7 +204,7 @@ from(bucket: "%s")
 	if err != nil {
 		return nil, fmt.Errorf("query rtts: %w", err)
 	}
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 
 	var out []storage.RTTPoint
 	for res.Next() {
@@ -242,7 +242,7 @@ from(bucket: "%s")
 	if err != nil {
 		return nil, fmt.Errorf("query http: %w", err)
 	}
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 
 	var out []storage.HTTPPoint
 	for res.Next() {
@@ -355,7 +355,7 @@ from(bucket: %q)
 	if err != nil {
 		return nil, fmt.Errorf("query hops bucketed: %w", err)
 	}
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 
 	var out []storage.HopPoint
 	for res.Next() {
@@ -405,7 +405,7 @@ from(bucket: "%s")
 	if err != nil {
 		return nil, fmt.Errorf("query hops range: %w", err)
 	}
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 
 	var out []storage.HopPoint
 	for res.Next() {

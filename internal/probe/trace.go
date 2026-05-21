@@ -36,7 +36,7 @@ func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, tim
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %v", errRawUnavailable, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	return traceOnConn(ctx, conn, ip, isV6, rounds, maxTTL, timeout, spacing)
 }
 

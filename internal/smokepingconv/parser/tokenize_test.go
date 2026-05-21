@@ -93,7 +93,7 @@ func TestTokenize_Include(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	lines, err := Tokenize(f, dir, parent)
 	if err != nil {
 		t.Fatalf("Tokenize: %v", err)
@@ -129,7 +129,7 @@ func TestTokenize_IncludeCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := Tokenize(f, dir, a); err == nil {
 		t.Fatal("expected cycle error, got nil")
 	}

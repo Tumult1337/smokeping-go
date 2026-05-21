@@ -11,6 +11,11 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=...".
+// The Makefile derives it from `git describe`; bare `go build` keeps the dev
+// default so unstamped binaries are still identifiable as such.
+var version = "dev"
+
 func main() {
 	var (
 		configPath = flag.String("config", "config.json", "path to config file")
@@ -37,8 +42,8 @@ func main() {
 	defer cancel()
 
 	if *slaveMode {
-		runSlave(ctx, log, *configPath)
+		runSlave(ctx, log, *configPath, version)
 		return
 	}
-	runNode(ctx, log, *configPath)
+	runNode(ctx, log, *configPath, version)
 }

@@ -96,7 +96,7 @@ func (d *ActionDispatcher) webhook(ctx context.Context, a config.Action, body st
 		d.log.Warn("webhook deliver", "url", a.URL, "err", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode >= 400 {
 		d.log.Warn("webhook non-2xx", "url", a.URL, "status", resp.StatusCode)
@@ -170,7 +170,7 @@ func (d *ActionDispatcher) discord(ctx context.Context, a config.Action, body st
 		d.log.Warn("discord deliver", "url", a.URL, "err", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode >= 400 {
 		d.log.Warn("discord non-2xx", "url", a.URL, "status", resp.StatusCode)

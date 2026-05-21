@@ -32,6 +32,7 @@ type Server struct {
 	uiFS           fs.FS
 	clusterHandler http.Handler
 	slaves         SlaveLister
+	version        string
 	startAt        time.Time
 }
 
@@ -48,9 +49,15 @@ type Options struct {
 	// Slaves is the live slave registry used to compute /sources. Nil when
 	// not in master mode.
 	Slaves SlaveLister
+	// Version is the build version reported by /health. Empty falls back to "dev".
+	Version string
 }
 
 func New(opts Options) *Server {
+	v := opts.Version
+	if v == "" {
+		v = "dev"
+	}
 	return &Server{
 		log:            opts.Log,
 		store:          opts.Store,
@@ -58,6 +65,7 @@ func New(opts Options) *Server {
 		uiFS:           opts.UIFS,
 		clusterHandler: opts.ClusterHandler,
 		slaves:         opts.Slaves,
+		version:        v,
 		startAt:        time.Now(),
 	}
 }
@@ -135,7 +143,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"uptime":  time.Since(s.startAt).String(),
-		"version": "dev",
+		"version": s.version,
 	})
 }
 

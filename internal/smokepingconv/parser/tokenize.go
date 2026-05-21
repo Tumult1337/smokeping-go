@@ -123,7 +123,7 @@ func tokenizeRec(r io.Reader, baseDir, path string, visited map[string]bool) ([]
 				return nil, fmt.Errorf("%s:%d: @include %s: %w", abs, lineNo, ipath, ierr)
 			}
 			sub, serr := tokenizeRec(f, filepath.Dir(ipath), ipath, visited)
-			f.Close()
+			_ = f.Close()
 			if serr != nil {
 				return nil, serr
 			}
