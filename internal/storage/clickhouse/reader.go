@@ -66,11 +66,140 @@ func pickHopStep(span time.Duration) time.Duration {
 	return 15 * time.Minute
 }
 
-// QueryCycles, QueryRTTs, QueryHTTPSamples, QueryLatestHops, QueryHopsAt,
-// QueryHopsTimeline are implemented in Tasks 12–15.
 func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.CyclePoint, error) {
-	return nil, fmt.Errorf("not implemented")
+	step := f.Step
+	if step == 0 {
+		return r.queryCyclesRaw(ctx, ref, from, to, f.Source)
+	}
+	return r.queryCyclesBucketed(ctx, ref, from, to, f.Source, step)
 }
+
+func (r *Reader) queryCyclesRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.CyclePoint, error) {
+	const q = `
+SELECT timestamp, source,
+       rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms, rtt_stddev_ms,
+       p5_ms, p10_ms, p15_ms, p20_ms, p25_ms,
+       p30_ms, p35_ms, p40_ms, p45_ms, p55_ms,
+       p60_ms, p65_ms, p70_ms, p75_ms, p80_ms,
+       p85_ms, p90_ms, p95_ms,
+       loss_pct, lost, sent
+FROM probe_cycle
+WHERE target_id = ?
+  AND timestamp >= ? AND timestamp < ?
+  AND (? = '' OR source = ?)
+ORDER BY timestamp`
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, source, source)
+	if err != nil {
+		return nil, fmt.Errorf("query cycles raw: %w", err)
+	}
+	defer rows.Close()
+
+	var out []storage.CyclePoint
+	for rows.Next() {
+		var p storage.CyclePoint
+		var lossPct float32
+		var lost, sent uint16
+		var min, max, mean, median, stddev float64
+		var p5, p10, p15, p20, p25, p30, p35, p40, p45 float64
+		var p55, p60, p65, p70, p75, p80, p85, p90, p95 float64
+		if err := rows.Scan(
+			&p.Time, &p.Source,
+			&min, &max, &mean, &median, &stddev,
+			&p5, &p10, &p15, &p20, &p25,
+			&p30, &p35, &p40, &p45, &p55,
+			&p60, &p65, &p70, &p75, &p80,
+			&p85, &p90, &p95,
+			&lossPct, &lost, &sent,
+		); err != nil {
+			return nil, err
+		}
+		p.Min = min; p.Max = max; p.Mean = mean; p.Median = median; p.StdDev = stddev
+		p.P5 = p5; p.P10 = p10; p.P15 = p15; p.P20 = p20; p.P25 = p25
+		p.P30 = p30; p.P35 = p35; p.P40 = p40; p.P45 = p45; p.P55 = p55
+		p.P60 = p60; p.P65 = p65; p.P70 = p70; p.P75 = p75; p.P80 = p80
+		p.P85 = p85; p.P90 = p90; p.P95 = p95
+		p.LossPct = float64(lossPct)
+		p.LossCount = int64(lost)
+		p.Sent = int64(sent)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (r *Reader) queryCyclesBucketed(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.CyclePoint, error) {
+	q := fmt.Sprintf(`
+SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
+       any(source)                                         AS src,
+       min(rtt_min_ms), max(rtt_max_ms),
+       avgWeighted(rtt_mean_ms, sent),
+       avgWeighted(rtt_median_ms, sent),
+       sqrt(avgWeighted(pow(rtt_stddev_ms, 2), sent))      AS rtt_stddev_ms,
+       quantilesExactWeighted(0.05)(p5_ms, sent)[1],
+       quantilesExactWeighted(0.10)(p10_ms, sent)[1],
+       quantilesExactWeighted(0.15)(p15_ms, sent)[1],
+       quantilesExactWeighted(0.20)(p20_ms, sent)[1],
+       quantilesExactWeighted(0.25)(p25_ms, sent)[1],
+       quantilesExactWeighted(0.30)(p30_ms, sent)[1],
+       quantilesExactWeighted(0.35)(p35_ms, sent)[1],
+       quantilesExactWeighted(0.40)(p40_ms, sent)[1],
+       quantilesExactWeighted(0.45)(p45_ms, sent)[1],
+       quantilesExactWeighted(0.55)(p55_ms, sent)[1],
+       quantilesExactWeighted(0.60)(p60_ms, sent)[1],
+       quantilesExactWeighted(0.65)(p65_ms, sent)[1],
+       quantilesExactWeighted(0.70)(p70_ms, sent)[1],
+       quantilesExactWeighted(0.75)(p75_ms, sent)[1],
+       quantilesExactWeighted(0.80)(p80_ms, sent)[1],
+       quantilesExactWeighted(0.85)(p85_ms, sent)[1],
+       quantilesExactWeighted(0.90)(p90_ms, sent)[1],
+       quantilesExactWeighted(0.95)(p95_ms, sent)[1],
+       100.0 * sum(lost) / nullIf(sum(sent), 0)            AS loss_pct,
+       sum(lost), sum(sent)
+FROM probe_cycle
+WHERE target_id = ?
+  AND timestamp >= ? AND timestamp < ?
+  AND (? = '' OR source = ?)
+GROUP BY bucket_ts
+ORDER BY bucket_ts`, int(step.Seconds()))
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, source, source)
+	if err != nil {
+		return nil, fmt.Errorf("query cycles bucketed: %w", err)
+	}
+	defer rows.Close()
+
+	var out []storage.CyclePoint
+	for rows.Next() {
+		var p storage.CyclePoint
+		var lossPct float64
+		var lost, sent uint64
+		var min, max, mean, median, stddev float64
+		var p5, p10, p15, p20, p25, p30, p35, p40, p45 float64
+		var p55, p60, p65, p70, p75, p80, p85, p90, p95 float64
+		if err := rows.Scan(
+			&p.Time, &p.Source,
+			&min, &max, &mean, &median, &stddev,
+			&p5, &p10, &p15, &p20, &p25,
+			&p30, &p35, &p40, &p45, &p55,
+			&p60, &p65, &p70, &p75, &p80,
+			&p85, &p90, &p95,
+			&lossPct, &lost, &sent,
+		); err != nil {
+			return nil, err
+		}
+		p.Min = min; p.Max = max; p.Mean = mean; p.Median = median; p.StdDev = stddev
+		p.P5 = p5; p.P10 = p10; p.P15 = p15; p.P20 = p20; p.P25 = p25
+		p.P30 = p30; p.P35 = p35; p.P40 = p40; p.P45 = p45; p.P55 = p55
+		p.P60 = p60; p.P65 = p65; p.P70 = p70; p.P75 = p75; p.P80 = p80
+		p.P85 = p85; p.P90 = p90; p.P95 = p95
+		p.LossPct = lossPct
+		p.LossCount = int64(lost)
+		p.Sent = int64(sent)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// QueryRTTs, QueryHTTPSamples, QueryLatestHops, QueryHopsAt,
+// QueryHopsTimeline are implemented in Tasks 13–15.
 func (r *Reader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.RTTPoint, error) {
 	return nil, fmt.Errorf("not implemented")
 }

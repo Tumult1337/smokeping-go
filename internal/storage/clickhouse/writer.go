@@ -146,20 +146,20 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 	defer ticker.Stop()
 
 	pending := make([]any, 0, maxRows)
-	flush := func() {
+	flush := func(flushCtx context.Context) {
 		if len(pending) == 0 {
 			return
 		}
 		var err error
 		switch table {
 		case tableProbeCycle:
-			err = w.flushCycles(ctx, pending)
+			err = w.flushCycles(flushCtx, pending)
 		case tableProbeRTT:
-			err = w.flushRTTs(ctx, pending)
+			err = w.flushRTTs(flushCtx, pending)
 		case tableProbeHop:
-			err = w.flushHops(ctx, pending)
+			err = w.flushHops(flushCtx, pending)
 		case tableProbeHTTP:
-			err = w.flushHTTP(ctx, pending)
+			err = w.flushHTTP(flushCtx, pending)
 		}
 		if err != nil {
 			w.log.Warn("clickhouse.flush", "table", tableName(table), "err", err, "rows", len(pending))
@@ -169,15 +169,30 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 	for {
 		select {
 		case <-ctx.Done():
-			flush()
+			// Drain the channel and then flush with a fresh context.
+			// The shutdown context is already cancelled so any batch
+			// using it would fail immediately; context.Background() with
+			// a timeout ensures in-flight rows reach ClickHouse.
+			for {
+				select {
+				case row := <-w.chans[table]:
+					pending = append(pending, row)
+				default:
+					goto drainDone
+				}
+			}
+		drainDone:
+			drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			flush(drainCtx)
+			cancel()
 			return
 		case row := <-w.chans[table]:
 			pending = append(pending, row)
 			if len(pending) >= maxRows {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		}
 	}
 }

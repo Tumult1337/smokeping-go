@@ -17,6 +17,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
 	"github.com/tumult/gosmokeping/internal/stats"
+	"github.com/tumult/gosmokeping/internal/storage"
 )
 
 func testDSN(t *testing.T) (config.ClickHouse, func()) {
@@ -221,5 +222,82 @@ func TestWriterRTTHopHTTPRoundTrip(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: got %d rows, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+func TestReaderQueryCyclesRaw(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg)
+	at := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < 3; i++ {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:   at.Add(time.Duration(i) * time.Minute),
+			Target: config.TargetRef{Target: config.Target{Name: "tc"}, Group: "g"},
+			Source: "master",
+			Sent:   20,
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	pts, err := r.QueryCycles(ctx,
+		config.TargetRef{Target: config.Target{Name: "tc"}, Group: "g"},
+		at.Add(-time.Hour), at.Add(time.Hour),
+		storage.QueryFilter{},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(pts))
+	}
+}
+
+func TestReaderQueryCyclesBucketed(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+
+	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	for i := 0; i < 120; i++ { // two hours worth at 1/min
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:   start.Add(time.Duration(i) * time.Minute),
+			Target: config.TargetRef{Target: config.Target{Name: "tb"}, Group: "g"},
+			Source: "master",
+			Sent:   20,
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close()
+
+	pts, err := r.QueryCycles(ctx,
+		config.TargetRef{Target: config.Target{Name: "tb"}, Group: "g"},
+		start, start.Add(2*time.Hour+time.Minute),
+		storage.QueryFilter{Step: time.Hour},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// Two complete hours -> two buckets.
+	if len(pts) < 2 {
+		t.Fatalf("expected ≥ 2 buckets, got %d", len(pts))
 	}
 }
