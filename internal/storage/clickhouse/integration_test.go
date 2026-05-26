@@ -301,3 +301,69 @@ func TestReaderQueryCyclesBucketed(t *testing.T) {
 		t.Fatalf("expected ≥ 2 buckets, got %d", len(pts))
 	}
 }
+
+func TestReaderQueryRTTs(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+	at := time.Now().UTC().Truncate(time.Second)
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time:   at,
+		Target: config.TargetRef{Target: config.Target{Name: "tr"}, Group: "g"},
+		Source: "master",
+		Sent:   3,
+		RTTs:   []time.Duration{1 * time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond},
+	})
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close()
+	pts, err := r.QueryRTTs(ctx,
+		config.TargetRef{Target: config.Target{Name: "tr"}, Group: "g"},
+		at.Add(-time.Hour), at.Add(time.Hour),
+		storage.QueryFilter{},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 3 {
+		t.Fatalf("expected 3 samples, got %d", len(pts))
+	}
+}
+
+func TestReaderQueryHTTPSamples(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+	at := time.Now().UTC().Truncate(time.Second)
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time:        at,
+		Target:      config.TargetRef{Target: config.Target{Name: "th"}, Group: "g"},
+		Source:      "master",
+		Sent:        1,
+		HTTPSamples: []probe.HTTPSample{{Time: at, RTT: 100 * time.Millisecond, Status: 200}},
+	})
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close()
+	pts, err := r.QueryHTTPSamples(ctx,
+		config.TargetRef{Target: config.Target{Name: "th"}, Group: "g"},
+		at.Add(-time.Hour), at.Add(time.Hour),
+		storage.QueryFilter{},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 1 || pts[0].Status != 200 {
+		t.Fatalf("unexpected: %+v", pts)
+	}
+}

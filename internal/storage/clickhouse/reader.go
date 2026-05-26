@@ -198,14 +198,61 @@ ORDER BY bucket_ts`, int(step.Seconds()))
 	return out, rows.Err()
 }
 
-// QueryRTTs, QueryHTTPSamples, QueryLatestHops, QueryHopsAt,
-// QueryHopsTimeline are implemented in Tasks 13–15.
 func (r *Reader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.RTTPoint, error) {
-	return nil, fmt.Errorf("not implemented")
+	const q = `
+SELECT timestamp, rtt_ms, seq
+FROM probe_rtt
+WHERE target_id = ?
+  AND timestamp >= ? AND timestamp < ?
+  AND (? = '' OR source = ?)
+ORDER BY timestamp, seq`
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, f.Source, f.Source)
+	if err != nil {
+		return nil, fmt.Errorf("query rtts: %w", err)
+	}
+	defer rows.Close()
+	var out []storage.RTTPoint
+	for rows.Next() {
+		var p storage.RTTPoint
+		var seq uint16
+		if err := rows.Scan(&p.Time, &p.RTT, &seq); err != nil {
+			return nil, err
+		}
+		p.Seq = int64(seq)
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
+
 func (r *Reader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HTTPPoint, error) {
-	return nil, fmt.Errorf("not implemented")
+	const q = `
+SELECT timestamp, source, rtt_ms, status, seq, error
+FROM probe_http
+WHERE target_id = ?
+  AND timestamp >= ? AND timestamp < ?
+  AND (? = '' OR source = ?)
+ORDER BY timestamp, seq`
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, f.Source, f.Source)
+	if err != nil {
+		return nil, fmt.Errorf("query http: %w", err)
+	}
+	defer rows.Close()
+	var out []storage.HTTPPoint
+	for rows.Next() {
+		var p storage.HTTPPoint
+		var status uint16
+		var seq uint16
+		if err := rows.Scan(&p.Time, &p.Source, &p.RTT, &status, &seq, &p.Err); err != nil {
+			return nil, err
+		}
+		p.Status = int64(status)
+		p.Seq = int64(seq)
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
+
+// QueryLatestHops, QueryHopsAt, QueryHopsTimeline are implemented in Tasks 14–15.
 func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	return nil, fmt.Errorf("not implemented")
 }
