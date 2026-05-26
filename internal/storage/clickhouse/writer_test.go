@@ -13,7 +13,7 @@ import (
 // call returns without blocking and bumps the drop counter.
 func TestWriterDropsOnFullChannel(t *testing.T) {
 	w := newTestWriter(t, 1) // tiny channel buffer
-	defer w.Close()
+	defer w.Close() //nolint:errcheck // test cleanup
 
 	// Fill the channel; subsequent sends should be dropped (non-blocking).
 	for i := 0; i < 10; i++ {

@@ -23,7 +23,7 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 	if err != nil {
 		return fmt.Errorf("open clickhouse: %w", err)
 	}
-	defer root.Close()
+	defer root.Close() //nolint:errcheck // connection teardown; error not actionable
 
 	if err := root.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.Database)); err != nil {
 		return fmt.Errorf("create database: %w", err)
@@ -39,7 +39,7 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 	if err != nil {
 		return fmt.Errorf("open clickhouse (db): %w", err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck // connection teardown; error not actionable
 
 	for _, ddl := range PerTableDDL(cfg.Cluster,
 		cfg.Retention.CycleDays, cfg.Retention.RTTDays,

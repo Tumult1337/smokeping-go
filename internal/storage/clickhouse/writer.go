@@ -61,7 +61,7 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) (*W
 		return nil, err
 	}
 	if err := conn.Ping(ctx); err != nil {
-		conn.Close()
+		conn.Close() //nolint:errcheck // best-effort cleanup after ping failure
 		return nil, err
 	}
 

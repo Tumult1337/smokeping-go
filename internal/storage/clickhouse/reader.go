@@ -28,7 +28,7 @@ func NewReader(ctx context.Context, cfg config.ClickHouse) (*Reader, error) {
 		return nil, err
 	}
 	if err := conn.Ping(ctx); err != nil {
-		conn.Close()
+		conn.Close() //nolint:errcheck // best-effort cleanup after ping failure
 		return nil, err
 	}
 	return &Reader{conn: conn}, nil
@@ -92,7 +92,7 @@ ORDER BY timestamp`
 	if err != nil {
 		return nil, fmt.Errorf("query cycles raw: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // rows.Err() returned below captures any close-time error
 
 	var out []storage.CyclePoint
 	for rows.Next() {
@@ -164,7 +164,7 @@ ORDER BY bucket_ts`, int(step.Seconds()))
 	if err != nil {
 		return nil, fmt.Errorf("query cycles bucketed: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // rows.Err() returned below captures any close-time error
 
 	var out []storage.CyclePoint
 	for rows.Next() {
@@ -210,7 +210,7 @@ ORDER BY timestamp, seq`
 	if err != nil {
 		return nil, fmt.Errorf("query rtts: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // rows.Err() returned below captures any close-time error
 	var out []storage.RTTPoint
 	for rows.Next() {
 		var p storage.RTTPoint
@@ -236,7 +236,7 @@ ORDER BY timestamp, seq`
 	if err != nil {
 		return nil, fmt.Errorf("query http: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // rows.Err() returned below captures any close-time error
 	var out []storage.HTTPPoint
 	for rows.Next() {
 		var p storage.HTTPPoint
@@ -275,7 +275,7 @@ ORDER BY ttl`
 	if err != nil {
 		return nil, fmt.Errorf("query latest hops: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
 	return scanHopRows(rows)
 }
 
@@ -299,7 +299,7 @@ LIMIT 64`
 	if err != nil {
 		return nil, fmt.Errorf("query hops at: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
 	return scanHopRows(rows)
 }
 
@@ -356,7 +356,7 @@ ORDER BY timestamp, ttl`
 	if err != nil {
 		return nil, fmt.Errorf("query hops raw: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
 	return scanHopRows(rows)
 }
 
@@ -379,7 +379,7 @@ ORDER BY bucket_ts, ttl`, int(step.Seconds()))
 	if err != nil {
 		return nil, fmt.Errorf("query hops bucketed: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // rows.Err() returned below captures any close-time error
 	var out []storage.HopPoint
 	for rows.Next() {
 		var p storage.HopPoint
