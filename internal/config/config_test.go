@@ -215,6 +215,12 @@ func TestStorageClickHouseBadInterval(t *testing.T) {
 	}
 }
 
+func TestExampleConfigLoads(t *testing.T) {
+	if _, err := Load("../../config.example.json"); err != nil {
+		t.Fatalf("example config: %v", err)
+	}
+}
+
 func TestStoreReload(t *testing.T) {
 	p := writeTmp(t, minimalConfig)
 	cfg, err := Load(p)
