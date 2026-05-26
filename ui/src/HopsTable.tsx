@@ -68,63 +68,130 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
       </>
     );
   }
-  const maxRtt = Math.max(1, ...visible.map((h) => h.Max));
+
+  // Group by Source so the all-view (one cycle per source returned by
+  // /hops?at=…) renders as one labeled subtable per source instead of a
+  // flat concatenation of N paths with repeating ttl=1..N columns. With
+  // a single source (filtered view) groups.length === 1 and the layout
+  // collapses back to the original single-table form.
+  const groups = groupBySource(visible);
+  const sharedScale = Math.max(1, ...visible.map((h) => h.Max));
 
   return (
     <>
-    <HopsHeader atSec={atSec} cycleTime={cycleTime} onResetAt={onResetAt} />
-    <div className="hops-table-wrap">
-    <table className="hops-table">
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>host</th>
-          <th className="num">loss%</th>
-          <th className="num">sent</th>
-          <th className="num">min</th>
-          <th className="num">avg</th>
-          <th className="num">max</th>
-          <th>latency</th>
-        </tr>
-      </thead>
-      <tbody>
-        {visible.map((h) => (
-          <tr key={h.Index}>
-            <td>{h.Index}</td>
-            <td>
-              {h.IP ? (
-                <>
-                  <span className="hop-ip">{h.IP}</span>
-                  <a
-                    className="hop-whois"
-                    href={`https://bgp.tools/search?q=${encodeURIComponent(h.IP)}`}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    title={`Look up ${h.IP} on bgp.tools`}
-                  >
-                    ↗
-                  </a>
-                </>
-              ) : (
-                <span className="hop-none">???</span>
-              )}
-            </td>
-            <td className="num" style={{ color: lossColor(h.LossPct, "#cfd3dd") }}>
-              {h.LossPct.toFixed(1)}
-            </td>
-            <td className="num">{h.Sent}</td>
-            <td className="num">{h.Min.toFixed(1)}</td>
-            <td className="num">{h.Mean.toFixed(1)}</td>
-            <td className="num">{h.Max.toFixed(1)}</td>
-            <td>
-              <HopBar min={h.Min} mean={h.Mean} max={h.Max} scale={maxRtt} />
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-    </div>
+      <HopsHeader
+        atSec={atSec}
+        cycleTime={groups.length === 1 ? cycleTime : null}
+        onResetAt={onResetAt}
+      />
+      {groups.map((g) => (
+        <HopsPath
+          key={g.source || "(unspecified)"}
+          source={g.source}
+          time={g.time}
+          rows={g.rows}
+          scale={sharedScale}
+          showSourceHeading={groups.length > 1}
+        />
+      ))}
     </>
+  );
+}
+
+interface HopsGroup {
+  source: string;
+  time: string;
+  rows: HopPoint[];
+}
+
+function groupBySource(hops: HopPoint[]): HopsGroup[] {
+  const order: string[] = [];
+  const byKey = new Map<string, HopsGroup>();
+  for (const h of hops) {
+    const existing = byKey.get(h.Source);
+    if (existing) {
+      existing.rows.push(h);
+    } else {
+      order.push(h.Source);
+      byKey.set(h.Source, { source: h.Source, time: h.Time, rows: [h] });
+    }
+  }
+  return order.map((s) => byKey.get(s)!);
+}
+
+function HopsPath({
+  source,
+  time,
+  rows,
+  scale,
+  showSourceHeading,
+}: {
+  source: string;
+  time: string;
+  rows: HopPoint[];
+  scale: number;
+  showSourceHeading: boolean;
+}) {
+  return (
+    <div className="hops-path">
+      {showSourceHeading && (
+        <div className="hops-path-heading">
+          <span className="hops-path-source">{source || "(unspecified)"}</span>
+          <span className="hops-path-time">{new Date(time).toLocaleString()}</span>
+        </div>
+      )}
+      <div className="hops-table-wrap">
+        <table className="hops-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>host</th>
+              <th className="num">loss%</th>
+              <th className="num">sent</th>
+              <th className="num">min</th>
+              <th className="num">avg</th>
+              <th className="num">max</th>
+              <th>latency</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((h) => (
+              <tr key={h.Index}>
+                <td>{h.Index}</td>
+                <td>
+                  {h.IP ? (
+                    <>
+                      <span className="hop-ip">{h.IP}</span>
+                      <a
+                        className="hop-whois"
+                        href={`https://bgp.tools/search?q=${encodeURIComponent(h.IP)}`}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        title={`Look up ${h.IP} on bgp.tools`}
+                      >
+                        ↗
+                      </a>
+                    </>
+                  ) : (
+                    <span className="hop-none">???</span>
+                  )}
+                </td>
+                <td className="num" style={{ color: lossColor(h.LossPct, "#cfd3dd") }}>
+                  {h.LossPct.toFixed(1)}
+                </td>
+                <td className="num">{h.Sent}</td>
+                <td className="num">{h.Min.toFixed(1)}</td>
+                <td className="num">{h.Mean.toFixed(1)}</td>
+                <td className="num">{h.Max.toFixed(1)}</td>
+                <td>
+                  <HopBar min={h.Min} mean={h.Mean} max={h.Max} scale={scale} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

@@ -260,6 +260,25 @@ body {
 }
 .hops-reset:hover { background: #222837; }
 
+.hops-path + .hops-path { margin-top: 14px; }
+.hops-path-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0 6px 0;
+  font-size: 12px;
+  border-top: 1px solid #1a1f2b;
+}
+.hops-path-source {
+  color: #cfd3dd;
+  font-weight: 600;
+}
+.hops-path-time {
+  color: #4a5160;
+  font-variant-numeric: tabular-nums;
+}
+
 .mtr-heatmap {
   background: #0f141c;
   border-radius: 4px;
