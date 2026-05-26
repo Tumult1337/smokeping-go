@@ -43,16 +43,11 @@ func Convert(r io.Reader, baseDir, path string) (*config.Config, []Note, error) 
 		Listen:   ":8080",
 		Interval: interval,
 		Pings:    pings,
+		// User must edit storage.clickhouse.addr to point at their ClickHouse instance.
 		Storage: config.Storage{
-			Backend: config.BackendInfluxV2,
-			InfluxV2: config.InfluxV2{
-				URL:       "${INFLUX_URL}",
-				Token:     "${INFLUX_TOKEN}",
-				Org:       "${INFLUX_ORG}",
-				BucketRaw: "smokeping_raw",
-				Bucket5m:  "smokeping_5m",
-				Bucket1h:  "smokeping_1h",
-				Bucket1d:  "smokeping_1d",
+			ClickHouse: config.ClickHouse{
+				Addr:     "127.0.0.1:9000",
+				Database: "gosmokeping",
 			},
 		},
 		Probes:  probes,
@@ -74,7 +69,7 @@ func Convert(r io.Reader, baseDir, path string) (*config.Config, []Note, error) 
 	notes = append(notes, alertNotes...)
 	notes = append(notes, Note{
 		Level: LevelWarn, Category: CatGeneral,
-		Detail: "storage.influxv2 is a placeholder — edit URL/token/org before running gosmokeping",
+		Detail: "storage.clickhouse.addr is set to 127.0.0.1:9000 — edit to point at your ClickHouse instance before running gosmokeping",
 	})
 	for _, u := range root.Unknown {
 		notes = append(notes, Note{

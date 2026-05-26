@@ -62,9 +62,9 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		reader = storage.NewCachingReader(backend.reader, 256, 16)
 	case errors.Is(err, storage.ErrDisabled):
 		log.Warn("storage backend disabled, running without persistent storage",
-			"backend", cfg.Storage.Backend)
+			"storage", "clickhouse")
 	default:
-		log.Error("open storage", "backend", cfg.Storage.Backend, "err", err)
+		log.Error("open storage", "storage", "clickhouse", "err", err)
 		os.Exit(1)
 	}
 
