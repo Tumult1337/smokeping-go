@@ -63,13 +63,10 @@ export interface CyclePoint {
 }
 
 export interface CyclesResponse {
-  resolution: string;
   from: string;
   to: string;
   points: CyclePoint[];
 }
-
-export type Resolution = "raw" | "5m" | "1h" | "1d" | "auto";
 
 async function jsonGet<T>(url: string, signal?: AbortSignal): Promise<T> {
   const r = await fetch(url, { signal });
@@ -96,12 +93,10 @@ export function getCycles(
   id: string,
   from: string,
   to?: string,
-  resolution?: Resolution,
   source?: string,
 ): Promise<CyclesResponse> {
   const params = new URLSearchParams({ from });
   if (to) params.set("to", to);
-  if (resolution && resolution !== "auto") params.set("resolution", resolution);
   if (source) params.set("source", source);
   return jsonGet<CyclesResponse>(`/api/v1/targets/${id}/cycles?${params}`);
 }
