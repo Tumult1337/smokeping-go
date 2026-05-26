@@ -81,8 +81,21 @@ func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to
 	return r.queryCyclesBucketed(ctx, ref, from, to, f.Source, step)
 }
 
+// sourceFilter builds the optional source-predicate clause and its bound
+// argument. Returns ("", nil) when no filter is wanted — the caller's
+// WHERE clause then has a static shape so CH can use the ORDER BY's
+// secondary sort key (source) for granule pruning instead of scanning
+// every granule looking for a runtime-empty branch.
+func sourceFilter(source string) (clause string, args []any) {
+	if source == "" {
+		return "", nil
+	}
+	return "\n  AND source = ?", []any{source}
+}
+
 func (r *Reader) queryCyclesRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.CyclePoint, error) {
-	const q = `
+	srcClause, srcArgs := sourceFilter(source)
+	q := `
 SELECT timestamp, source,
        rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms, rtt_stddev_ms,
        p5_ms, p10_ms, p15_ms, p20_ms, p25_ms,
@@ -92,10 +105,10 @@ SELECT timestamp, source,
        loss_pct, lost, sent
 FROM probe_cycle
 WHERE target_id = ?
-  AND timestamp >= ? AND timestamp < ?
-  AND (? = '' OR source = ?)
+  AND timestamp >= ? AND timestamp < ?` + srcClause + `
 ORDER BY timestamp`
-	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, source, source)
+	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query cycles raw: %w", err)
 	}
@@ -134,6 +147,7 @@ ORDER BY timestamp`
 }
 
 func (r *Reader) queryCyclesBucketed(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.CyclePoint, error) {
+	srcClause, srcArgs := sourceFilter(source)
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
        any(source)                                         AS src,
@@ -163,11 +177,11 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
        sum(lost), sum(sent)
 FROM probe_cycle
 WHERE target_id = ?
-  AND timestamp >= ? AND timestamp < ?
-  AND (? = '' OR source = ?)
+  AND timestamp >= ? AND timestamp < ?%s
 GROUP BY bucket_ts
-ORDER BY bucket_ts`, int(step.Seconds()))
-	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, source, source)
+ORDER BY bucket_ts`, int(step.Seconds()), srcClause)
+	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query cycles bucketed: %w", err)
 	}
@@ -206,14 +220,15 @@ ORDER BY bucket_ts`, int(step.Seconds()))
 }
 
 func (r *Reader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.RTTPoint, error) {
-	const q = `
+	srcClause, srcArgs := sourceFilter(f.Source)
+	q := `
 SELECT timestamp, rtt_ms, seq
 FROM probe_rtt
 WHERE target_id = ?
-  AND timestamp >= ? AND timestamp < ?
-  AND (? = '' OR source = ?)
+  AND timestamp >= ? AND timestamp < ?` + srcClause + `
 ORDER BY timestamp, seq`
-	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, f.Source, f.Source)
+	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query rtts: %w", err)
 	}
@@ -232,14 +247,15 @@ ORDER BY timestamp, seq`
 }
 
 func (r *Reader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HTTPPoint, error) {
-	const q = `
+	srcClause, srcArgs := sourceFilter(f.Source)
+	q := `
 SELECT timestamp, source, rtt_ms, status, seq, error
 FROM probe_http
 WHERE target_id = ?
-  AND timestamp >= ? AND timestamp < ?
-  AND (? = '' OR source = ?)
+  AND timestamp >= ? AND timestamp < ?` + srcClause + `
 ORDER BY timestamp, seq`
-	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, f.Source, f.Source)
+	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query http: %w", err)
 	}
@@ -260,25 +276,26 @@ ORDER BY timestamp, seq`
 }
 
 func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
-	const q = `
+	srcClause, srcArgs := sourceFilter(f.Source)
+	q := `
 WITH latest AS (
   SELECT max(timestamp) AS ts
   FROM probe_hop
-  WHERE target_id = ?
-    AND (? = '' OR source = ?)
+  WHERE target_id = ?` + srcClause + `
 )
 SELECT timestamp, source, ttl, hop_addr,
        rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
        loss_pct, lost, sent
 FROM probe_hop
-WHERE target_id = ?
-  AND (? = '' OR source = ?)
+WHERE target_id = ?` + srcClause + `
   AND timestamp = (SELECT ts FROM latest)
 ORDER BY ttl`
-	rows, err := r.conn.Query(ctx, q,
-		ref.Target.Name, f.Source, f.Source,
-		ref.Target.Name, f.Source, f.Source,
-	)
+	// args layout: CTE filter (target + opt source), outer filter (target + opt source)
+	args := []any{ref.Target.Name}
+	args = append(args, srcArgs...)
+	args = append(args, ref.Target.Name)
+	args = append(args, srcArgs...)
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query latest hops: %w", err)
 	}
@@ -288,21 +305,20 @@ ORDER BY ttl`
 
 func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	half := window / 2
-	const q = `
+	srcClause, srcArgs := sourceFilter(f.Source)
+	q := `
 SELECT timestamp, source, ttl, hop_addr,
        rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
        loss_pct, lost, sent
 FROM probe_hop
-WHERE target_id = ?
-  AND (? = '' OR source = ?)
+WHERE target_id = ?` + srcClause + `
   AND timestamp >= ? AND timestamp < ?
 ORDER BY abs(dateDiff('millisecond', timestamp, toDateTime64(?, 3, 'UTC'))) ASC, ttl
 LIMIT 64`
-	rows, err := r.conn.Query(ctx, q,
-		ref.Target.Name, f.Source, f.Source,
-		at.Add(-half), at.Add(half),
-		at,
-	)
+	args := []any{ref.Target.Name}
+	args = append(args, srcArgs...)
+	args = append(args, at.Add(-half), at.Add(half), at)
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query hops at: %w", err)
 	}
@@ -350,16 +366,17 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 }
 
 func (r *Reader) queryHopsRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {
-	const q = `
+	srcClause, srcArgs := sourceFilter(source)
+	q := `
 SELECT timestamp, source, ttl, hop_addr,
        rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
        loss_pct, lost, sent
 FROM probe_hop
 WHERE target_id = ?
-  AND timestamp >= ? AND timestamp < ?
-  AND (? = '' OR source = ?)
+  AND timestamp >= ? AND timestamp < ?` + srcClause + `
 ORDER BY timestamp, ttl`
-	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, source, source)
+	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query hops raw: %w", err)
 	}
@@ -368,6 +385,7 @@ ORDER BY timestamp, ttl`
 }
 
 func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
+	srcClause, srcArgs := sourceFilter(source)
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        any(source)                                       AS src,
@@ -378,11 +396,11 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        100.0 * sum(lost) / nullIf(sum(sent), 0)          AS loss_pct
 FROM probe_hop
 WHERE target_id = ?
-  AND timestamp >= ? AND timestamp < ?
-  AND (? = '' OR source = ?)
+  AND timestamp >= ? AND timestamp < ?%s
 GROUP BY bucket_ts, ttl, hop_addr
-ORDER BY bucket_ts, ttl`, int(step.Seconds()))
-	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, source, source)
+ORDER BY bucket_ts, ttl`, int(step.Seconds()), srcClause)
+	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query hops bucketed: %w", err)
 	}

@@ -467,3 +467,61 @@ func TestReaderQueryHopsTimelineRawAndBucketed(t *testing.T) {
 		t.Fatalf("expected 2 rows for ttl=2 (path flap), got %d (full: %+v)", ttl2, pts)
 	}
 }
+
+// TestReaderSourceFilter confirms QueryFilter.Source narrows results to
+// one source and that the empty-source path returns everything. Together
+// they exercise both branches of the sourceFilter helper introduced when
+// the (? = '' OR source = ?) pattern was retired in favour of a query
+// shape the CH planner can prune granules on.
+func TestReaderSourceFilter(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg)
+	at := time.Now().UTC().Truncate(time.Second)
+	for i, source := range []string{"master", "slave-eu", "slave-us"} {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:   at.Add(time.Duration(i) * time.Second),
+			Target: config.TargetRef{Target: config.Target{Name: "tsf"}, Group: "g"},
+			Source: source,
+			Sent:   20,
+		})
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("writer close: %v", err)
+	}
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	all, err := r.QueryCycles(ctx,
+		config.TargetRef{Target: config.Target{Name: "tsf"}, Group: "g"},
+		at.Add(-time.Hour), at.Add(time.Hour),
+		storage.QueryFilter{},
+	)
+	if err != nil {
+		t.Fatalf("query all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("unfiltered: expected 3 rows, got %d", len(all))
+	}
+
+	one, err := r.QueryCycles(ctx,
+		config.TargetRef{Target: config.Target{Name: "tsf"}, Group: "g"},
+		at.Add(-time.Hour), at.Add(time.Hour),
+		storage.QueryFilter{Source: "slave-eu"},
+	)
+	if err != nil {
+		t.Fatalf("query filtered: %v", err)
+	}
+	if len(one) != 1 {
+		t.Fatalf("filtered: expected 1 row, got %d", len(one))
+	}
+	if one[0].Source != "slave-eu" {
+		t.Errorf("filtered: source = %q, want slave-eu", one[0].Source)
+	}
+}
