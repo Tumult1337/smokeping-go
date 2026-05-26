@@ -429,6 +429,149 @@ func TestReaderQueryLatestHops(t *testing.T) {
 	}
 }
 
+// TestReaderQueryHopsAtSingleCycle writes three cycles inside the query
+// window and asserts QueryHopsAt returns exactly the hops from the cycle
+// nearest `at`, not a windowed mix. Regression for the bug where the
+// previous LIMIT-N implementation stacked rows from several cycles into
+// one response, causing the UI to render the hop table multiple times.
+//
+// The window is intentionally wider than the cycle spacing so the
+// "naive ORDER BY abs(dt) LIMIT N" implementation would return rows
+// from all three cycles.
+func TestReaderQueryHopsAtSingleCycle(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg)
+	base := time.Now().UTC().Truncate(time.Second).Add(-5 * time.Minute)
+	cycleTimes := []time.Time{
+		base,
+		base.Add(20 * time.Second),
+		base.Add(40 * time.Second),
+	}
+	for _, ts := range cycleTimes {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:   ts,
+			Target: config.TargetRef{Target: config.Target{Name: "thsc"}, Group: "g"},
+			Source: "master",
+			Sent:   3,
+			Hops: []probe.Hop{
+				{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{1 * time.Millisecond}},
+				{Index: 2, IP: "10.0.0.2", Sent: 3, Lost: 0, RTTs: []time.Duration{2 * time.Millisecond}},
+			},
+		})
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("writer close: %v", err)
+	}
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	target := cycleTimes[1] // the middle cycle
+	pts, err := r.QueryHopsAt(ctx,
+		config.TargetRef{Target: config.Target{Name: "thsc"}, Group: "g"},
+		target, 30*time.Minute,
+		storage.QueryFilter{Source: "master"},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 2 {
+		t.Fatalf("expected 2 hops (one ttl=1 + one ttl=2), got %d (timestamps: %v)",
+			len(pts), uniqueTimes(pts))
+	}
+	for _, p := range pts {
+		if !p.Time.Equal(target) {
+			t.Errorf("hop ttl=%d not pinned to target cycle: time = %v, want %v",
+				p.Index, p.Time, target)
+		}
+	}
+}
+
+// TestReaderQueryHopsAtPerSourceCycle exercises the per-source pinning
+// branch: with two sources writing their own cycles at slightly
+// different timestamps, an unfiltered QueryHopsAt should return each
+// source's nearest cycle independently — not pick whichever source
+// happens to have a row closest to `at` and drop the other.
+func TestReaderQueryHopsAtPerSourceCycle(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg)
+	base := time.Now().UTC().Truncate(time.Second).Add(-5 * time.Minute)
+	// Two sources, each with three cycles at staggered offsets.
+	for _, src := range []string{"master", "slave-eu"} {
+		offset := time.Duration(0)
+		if src == "slave-eu" {
+			offset = 5 * time.Second
+		}
+		for i := 0; i < 3; i++ {
+			w.OnCycle(ctx, scheduler.Cycle{
+				Time:   base.Add(time.Duration(i)*20*time.Second + offset),
+				Target: config.TargetRef{Target: config.Target{Name: "thpc"}, Group: "g"},
+				Source: src,
+				Sent:   3,
+				Hops: []probe.Hop{
+					{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{1 * time.Millisecond}},
+				},
+			})
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("writer close: %v", err)
+	}
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	at := base.Add(25 * time.Second) // between cycle[0] (5s offset for slave) and cycle[1]
+	pts, err := r.QueryHopsAt(ctx,
+		config.TargetRef{Target: config.Target{Name: "thpc"}, Group: "g"},
+		at, 30*time.Minute,
+		storage.QueryFilter{}, // unfiltered: expect one cycle per source
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 2 {
+		t.Fatalf("expected exactly 2 rows (one ttl=1 per source), got %d (rows: %+v)", len(pts), pts)
+	}
+	seen := map[string]bool{}
+	for _, p := range pts {
+		if seen[p.Source] {
+			t.Errorf("duplicate source in response: %q", p.Source)
+		}
+		seen[p.Source] = true
+	}
+	for _, want := range []string{"master", "slave-eu"} {
+		if !seen[want] {
+			t.Errorf("missing source %q in response", want)
+		}
+	}
+}
+
+func uniqueTimes(pts []storage.HopPoint) []time.Time {
+	seen := map[time.Time]struct{}{}
+	var out []time.Time
+	for _, p := range pts {
+		if _, ok := seen[p.Time]; ok {
+			continue
+		}
+		seen[p.Time] = struct{}{}
+		out = append(out, p.Time)
+	}
+	return out
+}
+
 func TestReaderQueryHopsTimelineRawAndBucketed(t *testing.T) {
 	cfg, cleanup := testDSN(t)
 	defer cleanup()

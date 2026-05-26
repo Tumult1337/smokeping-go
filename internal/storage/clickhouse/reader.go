@@ -306,18 +306,36 @@ ORDER BY ttl`
 func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	half := window / 2
 	srcClause, srcArgs := sourceFilter(f.Source)
+	// Pick the single cycle per source nearest to `at` via argMin, then
+	// return every row at that exact timestamp. A naive
+	// `ORDER BY abs(dt) LIMIT N` is wrong: it spans whichever N
+	// cycles happen to be closest, so the UI's "hops at this cycle"
+	// table ends up rendering a stack of consecutive cycles instead
+	// of one. With argMin we pin per-source and let the IN-list join
+	// pull only those rows.
 	q := `
+WITH nearest AS (
+  SELECT source,
+         argMin(timestamp, abs(dateDiff('millisecond', timestamp, toDateTime64(?, 3, 'UTC')))) AS ts
+  FROM probe_hop
+  WHERE target_id = ?` + srcClause + `
+    AND timestamp >= ? AND timestamp < ?
+  GROUP BY source
+)
 SELECT timestamp, source, ttl, hop_addr,
        rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
        loss_pct, lost, sent
 FROM probe_hop
 WHERE target_id = ?` + srcClause + `
-  AND timestamp >= ? AND timestamp < ?
-ORDER BY abs(dateDiff('millisecond', timestamp, toDateTime64(?, 3, 'UTC'))) ASC, ttl
-LIMIT 64`
-	args := []any{ref.Target.Name}
+  AND (source, timestamp) IN (SELECT source, ts FROM nearest)
+ORDER BY source, ttl`
+	// args layout: CTE — `at` (the centre), target, optional source, from, to;
+	//              outer — target, optional source.
+	args := []any{at, ref.Target.Name}
 	args = append(args, srcArgs...)
-	args = append(args, at.Add(-half), at.Add(half), at)
+	args = append(args, at.Add(-half), at.Add(half))
+	args = append(args, ref.Target.Name)
+	args = append(args, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query hops at: %w", err)
