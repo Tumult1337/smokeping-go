@@ -130,7 +130,6 @@ type hopsInflight struct {
 
 type cycleCacheKey struct {
 	group, name, source string
-	res                 Resolution
 	fromUnix, toUnix    int64
 }
 
@@ -176,12 +175,11 @@ func NewCachingReader(inner Reader, cyclesMax, hopsMax int) *CachingReader {
 	}
 }
 
-func (c *CachingReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res Resolution, f QueryFilter) ([]CyclePoint, error) {
+func (c *CachingReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]CyclePoint, error) {
 	key := cycleCacheKey{
 		group:    ref.Group,
 		name:     ref.Target.Name,
 		source:   f.Source,
-		res:      res,
 		fromUnix: floorUnix(from, cacheKeyFromQuantum),
 		toUnix:   ceilUnix(to, cacheKeyToQuantum),
 	}
@@ -192,7 +190,7 @@ func (c *CachingReader) QueryCycles(ctx context.Context, ref config.TargetRef, f
 	}
 
 	return c.fetchCycles(ctx, key, c.ttlFor(to), func(ctx context.Context) ([]CyclePoint, error) {
-		return c.inner.QueryCycles(ctx, ref, from, to, res, f)
+		return c.inner.QueryCycles(ctx, ref, from, to, f)
 	})
 }
 
