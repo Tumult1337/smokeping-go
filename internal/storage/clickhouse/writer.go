@@ -301,7 +301,11 @@ func (w *Writer) flushHops(ctx context.Context, rows []any) error {
 	}
 	for _, raw := range rows {
 		r := raw.(hopRow)
-		summary := stats.Compute(r.hop.RTTs)
+		// MinMaxMeanMedian sorts r.hop.RTTs in place. Safe here because
+		// the writer owns this hopRow exclusively (it was queued by us
+		// via offer() and no other consumer holds the slice). Avoids the
+		// 17 wasted percentile computations + Clone of stats.Compute.
+		hMin, hMax, hMean, hMedian := stats.MinMaxMeanMedian(r.hop.RTTs)
 		lossPct := float32(0)
 		if r.hop.Sent > 0 {
 			lossPct = float32(100 * float64(r.hop.Lost) / float64(r.hop.Sent))
@@ -315,7 +319,7 @@ func (w *Writer) flushHops(ctx context.Context, rows []any) error {
 			uint16(r.hop.Sent),
 			uint16(r.hop.Lost),
 			lossPct,
-			durMS(summary.Min), durMS(summary.Max), durMS(summary.Mean), durMS(summary.Median),
+			durMS(hMin), durMS(hMax), durMS(hMean), durMS(hMedian),
 		)
 		if err != nil {
 			return err

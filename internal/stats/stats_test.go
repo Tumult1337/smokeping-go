@@ -14,6 +14,27 @@ func TestEmpty(t *testing.T) {
 	}
 }
 
+func TestMinMaxMeanMedian(t *testing.T) {
+	in := []time.Duration{ms(50), ms(30), ms(10), ms(40), ms(20)}
+	min, max, mean, median := MinMaxMeanMedian(in)
+	if min != ms(10) || max != ms(50) || mean != ms(30) || median != ms(30) {
+		t.Errorf("got min=%v max=%v mean=%v median=%v", min, max, mean, median)
+	}
+	// Input is sorted in place as a documented side effect.
+	for i := 1; i < len(in); i++ {
+		if in[i] < in[i-1] {
+			t.Errorf("input not sorted at i=%d: %v", i, in)
+		}
+	}
+}
+
+func TestMinMaxMeanMedianEmpty(t *testing.T) {
+	min, max, mean, median := MinMaxMeanMedian(nil)
+	if min != 0 || max != 0 || mean != 0 || median != 0 {
+		t.Errorf("empty: got min=%v max=%v mean=%v median=%v", min, max, mean, median)
+	}
+}
+
 func TestSingle(t *testing.T) {
 	s := Compute([]time.Duration{ms(42)})
 	if s.Min != ms(42) || s.Max != ms(42) || s.Median != ms(42) ||
