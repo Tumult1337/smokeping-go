@@ -252,13 +252,89 @@ ORDER BY timestamp, seq`
 	return out, rows.Err()
 }
 
-// QueryLatestHops, QueryHopsAt, QueryHopsTimeline are implemented in Tasks 14–15.
 func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
-	return nil, fmt.Errorf("not implemented")
+	const q = `
+WITH latest AS (
+  SELECT max(timestamp) AS ts
+  FROM probe_hop
+  WHERE target_id = ?
+    AND (? = '' OR source = ?)
+)
+SELECT timestamp, source, ttl, hop_addr,
+       rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
+       loss_pct, lost, sent
+FROM probe_hop
+WHERE target_id = ?
+  AND (? = '' OR source = ?)
+  AND timestamp = (SELECT ts FROM latest)
+ORDER BY ttl`
+	rows, err := r.conn.Query(ctx, q,
+		ref.Target.Name, f.Source, f.Source,
+		ref.Target.Name, f.Source, f.Source,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query latest hops: %w", err)
+	}
+	defer rows.Close()
+	return scanHopRows(rows)
 }
+
 func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) ([]storage.HopPoint, error) {
-	return nil, fmt.Errorf("not implemented")
+	half := window / 2
+	const q = `
+SELECT timestamp, source, ttl, hop_addr,
+       rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
+       loss_pct, lost, sent
+FROM probe_hop
+WHERE target_id = ?
+  AND (? = '' OR source = ?)
+  AND timestamp >= ? AND timestamp < ?
+ORDER BY abs(dateDiff('millisecond', timestamp, toDateTime64(?, 3, 'UTC'))) ASC, ttl
+LIMIT 64`
+	rows, err := r.conn.Query(ctx, q,
+		ref.Target.Name, f.Source, f.Source,
+		at.Add(-half), at.Add(half),
+		at,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query hops at: %w", err)
+	}
+	defer rows.Close()
+	return scanHopRows(rows)
 }
+
+// scanHopRows is shared by QueryLatestHops, QueryHopsAt, and the raw
+// path of QueryHopsTimeline (added in T15). Returns rows in the order
+// they came from the cursor.
+func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
+	var out []storage.HopPoint
+	for rows.Next() {
+		var p storage.HopPoint
+		var ttl uint8
+		var lossPct float32
+		var lost, sent uint16
+		var min, max, mean, median float64
+		if err := rows.Scan(
+			&p.Time, &p.Source, &ttl, &p.IP,
+			&min, &max, &mean, &median,
+			&lossPct, &lost, &sent,
+		); err != nil {
+			return nil, err
+		}
+		p.Index = int64(ttl)
+		p.Min = min
+		p.Max = max
+		p.Mean = mean
+		p.Median = median
+		p.LossPct = float64(lossPct)
+		p.LossCount = int64(lost)
+		p.Sent = int64(sent)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// QueryHopsTimeline is implemented in Task 15.
 func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	return nil, fmt.Errorf("not implemented")
 }

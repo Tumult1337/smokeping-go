@@ -367,3 +367,45 @@ func TestReaderQueryHTTPSamples(t *testing.T) {
 		t.Fatalf("unexpected: %+v", pts)
 	}
 }
+
+func TestReaderQueryLatestHops(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+	at := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < 3; i++ {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:   at.Add(time.Duration(i) * time.Minute),
+			Target: config.TargetRef{Target: config.Target{Name: "tlh"}, Group: "g"},
+			Source: "master",
+			Sent:   3,
+			Hops: []probe.Hop{
+				{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{1 * time.Millisecond}},
+				{Index: 2, IP: "10.0.0.2", Sent: 3, Lost: 0, RTTs: []time.Duration{2 * time.Millisecond}},
+			},
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close()
+	pts, err := r.QueryLatestHops(ctx,
+		config.TargetRef{Target: config.Target{Name: "tlh"}, Group: "g"},
+		storage.QueryFilter{},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 2 {
+		t.Fatalf("expected 2 hops, got %d", len(pts))
+	}
+	for _, p := range pts {
+		if !p.Time.Equal(at.Add(2 * time.Minute)) {
+			t.Errorf("hop %d not from latest cycle: time = %v", p.Index, p.Time)
+		}
+	}
+}
