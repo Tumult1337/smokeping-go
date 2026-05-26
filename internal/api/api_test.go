@@ -25,7 +25,7 @@ type stubReader struct {
 	lastSource string
 }
 
-func (s *stubReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res storage.Resolution, f storage.QueryFilter) ([]storage.CyclePoint, error) {
+func (s *stubReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.CyclePoint, error) {
 	s.lastSource = f.Source
 	return s.cycles, s.err
 }
@@ -61,7 +61,7 @@ func newTestServer(t *testing.T, reader storage.Reader) http.Handler {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw", Token: "secret"}},
+		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -117,7 +117,7 @@ func TestListTargetsTitles(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
+		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -177,7 +177,7 @@ func TestListSourcesMasterWithRegisteredSlaves(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
+		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -237,7 +237,7 @@ func TestListTargetsPerTargetSources(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{Backend: config.BackendInfluxV2, InfluxV2: config.InfluxV2{URL: "http://x", BucketRaw: "raw"}},
+		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
