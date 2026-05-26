@@ -5,7 +5,6 @@ import {
   getCycles,
   type Target,
   type CyclesResponse,
-  type Resolution,
 } from "./api";
 import { SmokeChart } from "./SmokeChart";
 import { SmokeBarChart } from "./SmokeBarChart";
@@ -88,7 +87,6 @@ export default function App() {
   const [selectedSource, setSelectedSource] = useState<string | null>(initialUrl.source);
   const [selectedId, setSelectedId] = useState<string | null>(initialUrl.target);
   const [range, setRange] = useState<Range>(initialUrl.range ?? "-24h");
-  const resolution: Resolution = "auto";
   const [cycles, setCycles] = useState<CyclesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -184,7 +182,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedId) return;
     const zoomKey = zoom ? `${zoom.from}-${zoom.to}` : "";
-    const key = `${selectedId}|${range}|${resolution}|${selectedSource ?? ""}|${zoomKey}`;
+    const key = `${selectedId}|${range}|${selectedSource ?? ""}|${zoomKey}`;
     const prevKey = fetchKeyRef.current;
     const isKeyChange = prevKey !== key;
     fetchKeyRef.current = key;
@@ -202,7 +200,7 @@ export default function App() {
     }
     setRefreshing(true);
     let cancelled = false;
-    getCycles(selectedId, fromArg, toArg, resolution, selectedSource ?? undefined)
+    getCycles(selectedId, fromArg, toArg, selectedSource ?? undefined)
       .then((c) => {
         if (!cancelled) setCycles(c);
       })
@@ -218,7 +216,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedId, range, resolution, refreshTick, selectedSource, zoom]);
+  }, [selectedId, range, refreshTick, selectedSource, zoom]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -592,9 +590,7 @@ export default function App() {
               </div>
             ) : (
               <div className="chart-wrap">
-                <div className="chart-title">
-                  Latency — {cycles?.resolution ?? "…"} resolution
-                </div>
+                <div className="chart-title">Latency</div>
                 {cycles === null ? (
                   <div className="empty">Fetching data…</div>
                 ) : chartStyle === "band" ? (
