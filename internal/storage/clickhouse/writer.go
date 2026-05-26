@@ -15,6 +15,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/stats"
 )
 
 // Table identifiers used for the per-table channel + drop-counter index.
@@ -224,10 +225,63 @@ func durMS(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
-// Placeholders for T10 — leave as no-ops so the build is green.
-func (w *Writer) flushRTTs(_ context.Context, _ []any) error  { return nil }
-func (w *Writer) flushHops(_ context.Context, _ []any) error  { return nil }
-func (w *Writer) flushHTTP(_ context.Context, _ []any) error  { return nil }
+func (w *Writer) flushRTTs(ctx context.Context, rows []any) error {
+	batch, err := w.conn.PrepareBatch(ctx, "INSERT INTO probe_rtt")
+	if err != nil {
+		return err
+	}
+	for _, raw := range rows {
+		r := raw.(rttRow)
+		if err := batch.Append(r.ts, r.target, r.source, r.seq, r.rttMS); err != nil {
+			return err
+		}
+	}
+	return batch.Send()
+}
+
+func (w *Writer) flushHops(ctx context.Context, rows []any) error {
+	batch, err := w.conn.PrepareBatch(ctx, "INSERT INTO probe_hop")
+	if err != nil {
+		return err
+	}
+	for _, raw := range rows {
+		r := raw.(hopRow)
+		summary := stats.Compute(r.hop.RTTs)
+		lossPct := float32(0)
+		if r.hop.Sent > 0 {
+			lossPct = float32(100 * float64(r.hop.Lost) / float64(r.hop.Sent))
+		}
+		err := batch.Append(
+			r.cycle.Time,
+			r.cycle.Target.Target.Name,
+			r.cycle.Source,
+			uint8(r.hop.Index),
+			r.hop.IP,
+			uint16(r.hop.Sent),
+			uint16(r.hop.Lost),
+			lossPct,
+			durMS(summary.Min), durMS(summary.Max), durMS(summary.Mean), durMS(summary.Median),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return batch.Send()
+}
+
+func (w *Writer) flushHTTP(ctx context.Context, rows []any) error {
+	batch, err := w.conn.PrepareBatch(ctx, "INSERT INTO probe_http")
+	if err != nil {
+		return err
+	}
+	for _, raw := range rows {
+		r := raw.(httpRow)
+		if err := batch.Append(r.ts, r.target, r.source, r.seq, r.rttMS, r.status, r.err); err != nil {
+			return err
+		}
+	}
+	return batch.Send()
+}
 
 // Close stops the consumers, drains pending rows, and closes the conn.
 func (w *Writer) Close() error {
