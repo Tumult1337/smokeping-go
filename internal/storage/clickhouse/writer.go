@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
 )
 
@@ -76,11 +78,56 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) (*W
 	return w, nil
 }
 
-// OnCycle implements scheduler.Sink. The scaffold version routes every
-// cycle to the probe_cycle channel only — T9 expands to fan out RTTs,
-// Hops, and HTTPSamples to their respective tables.
+// OnCycle decomposes a Cycle into rows for each relevant table.
 func (w *Writer) OnCycle(ctx context.Context, c scheduler.Cycle) {
 	w.offer(tableProbeCycle, c)
+	for i, rtt := range c.RTTs {
+		w.offer(tableProbeRTT, rttRow{
+			ts: c.Time, target: c.Target.Target.Name, source: c.Source,
+			seq: uint16(i), rttMS: rttMS(rtt),
+		})
+	}
+	for _, hop := range c.Hops {
+		w.offer(tableProbeHop, hopRow{cycle: c, hop: hop})
+	}
+	for i, s := range c.HTTPSamples {
+		w.offer(tableProbeHTTP, httpRow{
+			ts: s.Time, target: c.Target.Target.Name, source: c.Source,
+			seq: uint16(i), rttMS: float64(s.RTT) / float64(time.Millisecond),
+			status: uint16(s.Status), err: s.Err,
+		})
+	}
+}
+
+type rttRow struct {
+	ts             time.Time
+	target, source string
+	seq            uint16
+	rttMS          float64
+}
+
+type hopRow struct {
+	cycle scheduler.Cycle
+	hop   probe.Hop
+}
+
+type httpRow struct {
+	ts             time.Time
+	target, source string
+	seq            uint16
+	rttMS          float64
+	status         uint16
+	err            string
+}
+
+// rttMS converts a time.Duration to milliseconds. Returns NaN for
+// zero / negative durations so unanswered pings (Duration == 0) don't
+// pollute aggregations as legitimate zero-ms responses.
+func rttMS(d time.Duration) float64 {
+	if d <= 0 {
+		return math.NaN()
+	}
+	return float64(d) / float64(time.Millisecond)
 }
 
 // offer is the drop-on-overflow primitive used by OnCycle.
@@ -92,9 +139,6 @@ func (w *Writer) offer(table int, row any) {
 	}
 }
 
-// runTable consumes rows and flushes on max-rows or ticker. Per-table
-// batch population is implemented in T9 (probe_cycle) and T10 (RTT, hop,
-// HTTP); for this scaffold, flush is a no-op.
 func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval time.Duration) {
 	defer w.wg.Done()
 	ticker := time.NewTicker(maxInterval)
@@ -105,10 +149,22 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 		if len(pending) == 0 {
 			return
 		}
-		// Per-table batch flush filled in by T9/T10.
+		var err error
+		switch table {
+		case tableProbeCycle:
+			err = w.flushCycles(ctx, pending)
+		case tableProbeRTT:
+			err = w.flushRTTs(ctx, pending)
+		case tableProbeHop:
+			err = w.flushHops(ctx, pending)
+		case tableProbeHTTP:
+			err = w.flushHTTP(ctx, pending)
+		}
+		if err != nil {
+			w.log.Warn("clickhouse.flush", "table", tableName(table), "err", err, "rows", len(pending))
+		}
 		pending = pending[:0]
 	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -124,6 +180,54 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 		}
 	}
 }
+
+func tableName(t int) string {
+	return [...]string{"probe_cycle", "probe_rtt", "probe_hop", "probe_http"}[t]
+}
+
+func (w *Writer) flushCycles(ctx context.Context, rows []any) error {
+	batch, err := w.conn.PrepareBatch(ctx, "INSERT INTO probe_cycle")
+	if err != nil {
+		return err
+	}
+	for _, raw := range rows {
+		c := raw.(scheduler.Cycle)
+		s := c.Summary
+		sentF := float64(c.Sent)
+		lossPct := float32(0)
+		if c.Sent > 0 {
+			lossPct = float32(100 * float64(c.LossCount) / sentF)
+		}
+		err := batch.Append(
+			c.Time,
+			c.Target.Target.Name,
+			c.Target.Group,
+			c.Source,
+			c.ProbeName,
+			uint16(c.Sent),
+			uint16(c.LossCount),
+			lossPct,
+			durMS(s.Min), durMS(s.Max), durMS(s.Mean), durMS(s.Median), durMS(s.StdDev),
+			durMS(s.P5), durMS(s.P10), durMS(s.P15), durMS(s.P20), durMS(s.P25),
+			durMS(s.P30), durMS(s.P35), durMS(s.P40), durMS(s.P45), durMS(s.P55),
+			durMS(s.P60), durMS(s.P65), durMS(s.P70), durMS(s.P75), durMS(s.P80),
+			durMS(s.P85), durMS(s.P90), durMS(s.P95),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return batch.Send()
+}
+
+func durMS(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
+}
+
+// Placeholders for T10 — leave as no-ops so the build is green.
+func (w *Writer) flushRTTs(_ context.Context, _ []any) error  { return nil }
+func (w *Writer) flushHops(_ context.Context, _ []any) error  { return nil }
+func (w *Writer) flushHTTP(_ context.Context, _ []any) error  { return nil }
 
 // Close stops the consumers, drains pending rows, and closes the conn.
 func (w *Writer) Close() error {

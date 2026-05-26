@@ -79,8 +79,7 @@ const ddlProbeCycle = `CREATE TABLE IF NOT EXISTS probe_cycle (
   p80_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
   p85_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
   p90_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p95_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p99_ms         Float64                                           CODEC(Gorilla, ZSTD(1))
+  p95_ms         Float64                                           CODEC(Gorilla, ZSTD(1))
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(timestamp)
