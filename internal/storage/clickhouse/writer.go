@@ -38,7 +38,13 @@ type Writer struct {
 	dropped [numTables]uint64
 	wg      sync.WaitGroup
 	cancel  context.CancelFunc
+	closed  atomic.Bool
 }
+
+// dropLogEvery is how often the writer surfaces sustained overflow to the
+// log. The first drop after Close (or per restart) always logs; after that
+// it's one line per N drops so a saturating channel doesn't flood the log.
+const dropLogEvery = 10000
 
 // NewWriter opens a connection and starts one consumer goroutine per
 // table. Returns an error if the initial Ping fails.
@@ -131,13 +137,47 @@ func rttMS(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
-// offer is the drop-on-overflow primitive used by OnCycle.
+// offer is the drop-on-overflow primitive used by OnCycle. Rows offered
+// after Close are dropped immediately and counted — the channel is still
+// open at that point but its consumer goroutines have exited, so a naive
+// send would queue forever-unflushed bytes with no observability.
 func (w *Writer) offer(table int, row any) {
+	if w.closed.Load() {
+		w.recordDrop(table)
+		return
+	}
 	select {
 	case w.chans[table] <- row:
 	default:
-		atomic.AddUint64(&w.dropped[table], 1)
+		w.recordDrop(table)
 	}
+}
+
+// recordDrop increments the per-table drop counter and emits a log line
+// on the first drop and every dropLogEvery drops after. Log emission is
+// guarded by a modulo check on the atomic-incremented counter so it stays
+// allocation-free under steady-state.
+func (w *Writer) recordDrop(table int) {
+	n := atomic.AddUint64(&w.dropped[table], 1)
+	if w.log == nil {
+		return
+	}
+	if n == 1 || n%dropLogEvery == 0 {
+		w.log.Warn("clickhouse.writer.drop",
+			"table", tableName(table),
+			"dropped_total", n,
+		)
+	}
+}
+
+// Dropped returns the per-table dropped-row counts. Safe to call
+// concurrently with writes; values are eventually consistent.
+func (w *Writer) Dropped() map[string]uint64 {
+	out := make(map[string]uint64, numTables)
+	for i := 0; i < numTables; i++ {
+		out[tableName(i)] = atomic.LoadUint64(&w.dropped[i])
+	}
+	return out
 }
 
 func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval time.Duration) {
@@ -299,7 +339,13 @@ func (w *Writer) flushHTTP(ctx context.Context, rows []any) error {
 }
 
 // Close stops the consumers, drains pending rows, and closes the conn.
+// Idempotent: calling Close twice is safe and the second call is a no-op.
+// After Close returns, further OnCycle calls increment the drop counter
+// instead of queuing rows into a channel with no reader.
 func (w *Writer) Close() error {
+	if !w.closed.CompareAndSwap(false, true) {
+		return nil
+	}
 	if w.cancel != nil {
 		w.cancel()
 	}
