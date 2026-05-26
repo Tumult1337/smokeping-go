@@ -1,9 +1,9 @@
 // Package storage defines the data types and read surface that the API
 // and scheduler consume, independent of which concrete backend persists
-// results. Backends live in subpackages (influxv2, influxv3) and implement
-// storage.Reader + scheduler.Sink; the Backend interface and factory live
-// at the composition root so this package stays a pure leaf and can be
-// imported by any backend without a cycle.
+// results. The active backend lives in the clickhouse subpackage and
+// implements storage.Reader + scheduler.Sink; the Backend interface and
+// factory live at the composition root so this package stays a pure leaf
+// and can be imported by any backend without a cycle.
 package storage
 
 import (

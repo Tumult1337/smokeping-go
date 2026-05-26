@@ -19,8 +19,9 @@ type Cycle struct {
 	ProbeName string
 	// Source identifies which gosmokeping instance produced this cycle.
 	// Empty on legacy cycles, "master" for locally-probed on a master, and
-	// the slave name for cycles pushed in from a slave. Stored as an Influx
-	// tag — present only when non-empty so pre-source data still renders.
+	// the slave name for cycles pushed in from a slave. Stored as the
+	// ClickHouse `source` column (LowCardinality) so the writer can fan
+	// out per-source and queries can filter on it.
 	Source      string
 	RTTs        []time.Duration
 	Sent        int

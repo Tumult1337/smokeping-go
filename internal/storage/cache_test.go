@@ -481,8 +481,8 @@ func TestCachingReader_Cycles_SingleflightsConcurrentMisses(t *testing.T) {
 func TestCachingReader_HopsTimeline_SingleflightsConcurrentMisses(t *testing.T) {
 	// 8 goroutines hit the same cold key in parallel. A naive cache fires 8
 	// inner queries; with singleflight, exactly one runs and the rest wait
-	// for its result. Each Influx query at 7d for a real target is ~13s and
-	// allocates ~113MB of JSON, so this matters.
+	// for its result. A 7d hops query against ClickHouse scans millions of
+	// rows, so collapsing the stampede matters.
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	gate := make(chan struct{})
 	inner := &slowFakeReader{gate: gate, hops: []HopPoint{{Time: now, Index: 1}}}
@@ -793,7 +793,7 @@ func TestCachingReader_HopsTimeline_ServesStaleCacheOnError(t *testing.T) {
 	// Advance past the TTL so the entry is stale.
 	clock = now.Add(cacheTTLLive + time.Second)
 	// Inject a failure into the inner reader.
-	inner.err = errors.New("influx down")
+	inner.err = errors.New("clickhouse down")
 
 	// Stale data must be served silently — no error, correct index.
 	hops, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{})
@@ -825,7 +825,7 @@ func TestCachingReader_Cycles_ServesStaleCacheOnError(t *testing.T) {
 	}
 	// Expire the entry.
 	clock = now.Add(cacheTTLLive + time.Second)
-	inner.err = errors.New("influx down")
+	inner.err = errors.New("clickhouse down")
 
 	pts, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour})
 	if err != nil {
@@ -861,7 +861,7 @@ func TestCachingReader_Cycles_ErrorPropagatesWhenStaleEvicted(t *testing.T) {
 	}
 	// Advance past TTL and inject failure.
 	clock = now.Add(cacheTTLLive + time.Second)
-	inner.err = errors.New("influx down")
+	inner.err = errors.New("clickhouse down")
 
 	// "a" was evicted — no stale entry exists, so the error must propagate.
 	_, err := c.QueryCycles(context.Background(), refA, from, now, QueryFilter{Step: time.Hour})

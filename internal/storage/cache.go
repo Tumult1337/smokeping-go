@@ -116,12 +116,12 @@ type hopsCacheEntry struct {
 	expires time.Time
 }
 
-// hopsInflight dedupes concurrent identical misses. Each hops query at 7d
-// against real Influx returns ~600k rows / ~113MB JSON and takes 10-15s, so
-// letting N parallel UI fetches stampede the same query (the React mount
-// + range-button click + auto-refresh tick easily produce 3) is N× the
-// load on Influx and N× the memory footprint. With singleflight only the
-// first call runs the query; the rest wait on `done` and copy out `points`.
+// hopsInflight dedupes concurrent identical misses. A hops query at 7d
+// scans millions of rows and can take seconds, so letting N parallel UI
+// fetches stampede the same query (the React mount + range-button click
+// + auto-refresh tick easily produce 3) is N× the load on ClickHouse
+// and N× the memory footprint. With singleflight only the first call
+// runs the query; the rest wait on `done` and copy out `points`.
 type hopsInflight struct {
 	done   chan struct{}
 	points []HopPoint
@@ -272,7 +272,7 @@ func (c *CachingReader) runCyclesLeader(ctx context.Context, key cycleCacheKey, 
 	if err != nil && stale != nil {
 		// Serve stale silently. The stale window is unbounded: the entry
 		// stays in the LRU until displaced by fresh inserts. Operators
-		// should monitor Influx availability via their own tooling.
+		// should monitor ClickHouse availability via their own tooling.
 		call.points = stale
 	} else {
 		call.points = pts
@@ -345,22 +345,22 @@ func (c *CachingReader) QueryHopsTimeline(ctx context.Context, ref config.Target
 //     other keys.
 //   - in-flight call for the same key: wait on the leader's `done` channel
 //     and return a copy of its result (or its error). Avoids duplicate
-//     Influx queries when the UI rapidly remounts / changes range / ticks.
+//     ClickHouse queries when the UI rapidly remounts / changes range / ticks.
 //   - cache miss with no leader: spawn one goroutine that runs the query
 //     under a context decoupled from any single caller, store on success,
 //     signal everyone waiting on `done`. The originating caller becomes a
 //     waiter on the same channel, so the leader/waiter paths are unified.
 //
-// The decoupling is load-bearing: a 7d hops query takes 30-60s, and a
-// browser nav / range click / AbortController fire would otherwise cancel
-// the leader's ctx, kill the Influx query, and propagate ctx.Canceled to
-// every waiter — the slow path would never warm the cache. With
-// context.WithoutCancel the in-flight query keeps running on the
-// inner-Reader's own HTTP timeout (90s) and the next request lands on a
+// The decoupling is load-bearing: a 7d hops query can take many seconds,
+// and a browser nav / range click / AbortController fire would otherwise
+// cancel the leader's ctx, kill the ClickHouse query, and propagate
+// ctx.Canceled to every waiter — the slow path would never warm the
+// cache. With context.WithoutCancel the in-flight query keeps running
+// on the inner-Reader's own deadline and the next request lands on a
 // warm entry.
 //
-// Errors are NOT cached (matches QueryCycles): a transient Influx hiccup
-// shouldn't poison subsequent fetches.
+// Errors are NOT cached (matches QueryCycles): a transient ClickHouse
+// hiccup shouldn't poison subsequent fetches.
 func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl time.Duration, run func(context.Context) ([]HopPoint, error)) ([]HopPoint, error) {
 	if hops, ok := c.hopsLookup(key); ok {
 		c.hopsHits.Add(1)
@@ -377,7 +377,7 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 	// result and removed its inflight slot atomically (see runHopsLeader);
 	// without this re-check we'd see no inflight slot, no entry from the
 	// stale earlier lookup, and become a redundant leader — firing the same
-	// 30-60s/100MB Influx query that just completed.
+	// multi-second ClickHouse query that just completed.
 	if elem, ok := c.hopsItems[key]; ok {
 		e := elem.Value.(*hopsCacheEntry)
 		if !c.nowFn().After(e.expires) {
@@ -447,7 +447,7 @@ func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl
 	if err != nil && stale != nil {
 		// Serve stale silently. The stale window is unbounded: the entry
 		// stays in the LRU until displaced by fresh inserts. Operators
-		// should monitor Influx availability via their own tooling.
+		// should monitor ClickHouse availability via their own tooling.
 		call.points = stale
 	} else {
 		call.points = hops

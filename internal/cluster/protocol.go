@@ -27,7 +27,7 @@ type RegisterResp struct {
 }
 
 // ClusterConfigResp is the scrubbed subset of the master config that a slave
-// needs to start probing. Influx/alerts/actions are deliberately excluded —
+// needs to start probing. Storage/alerts/actions are deliberately excluded —
 // slaves never write storage or dispatch alerts.
 type ClusterConfigResp struct {
 	Interval time.Duration           `json:"interval"`

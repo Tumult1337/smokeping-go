@@ -176,7 +176,7 @@ func Load(path string) (*Config, error) {
 }
 
 // LoadMinimal is the slave-mode loader. Same parsing rules as Load but the
-// strict target/influx/alerts checks are skipped — a slave's on-disk config
+// strict target/storage/alerts checks are skipped — a slave's on-disk config
 // only carries its own listen port and cluster{} block; the real target list
 // arrives from the master over the wire.
 func LoadMinimal(path string) (*Config, error) {
@@ -262,7 +262,7 @@ func expandEnv(data []byte) []byte {
 
 // ValidateMinimal is a relaxed Validate used for a slave's local config. A
 // slave only needs listen/log-level plumbing and a populated cluster{} block;
-// influx, targets, and alerts are served by the master over the wire.
+// storage, targets, and alerts are served by the master over the wire.
 func (c *Config) ValidateMinimal() error {
 	if c.Cluster == nil {
 		return fmt.Errorf("cluster block is required for slave mode")
