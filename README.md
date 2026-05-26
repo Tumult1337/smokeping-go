@@ -141,43 +141,33 @@ database is `smokeping`; override with `storage.clickhouse.database` in the conf
 
 ### Managing table retention and size
 
-`probe_hop` (MTR + opportunistic ICMP traces) dominates storage on busy installs.
-Two knobs:
+Per-table TTL is set at bootstrap from `storage.clickhouse.retention`. Defaults
+are generous; tighten them on busy installs where `probe_hop` and `probe_rtt`
+dominate disk usage.
 
-1. **Reduce hop retention.** The `probe_hop` table uses a TTL policy (default
-   7 days). Adjust via `storage.clickhouse.hop_ttl_days` in the config:
+```json
+"storage": {
+  "clickhouse": {
+    "retention": {
+      "cycle_days": 365,
+      "rtt_days":   14,
+      "hop_days":   90,
+      "http_days":  14
+    }
+  }
+}
+```
 
-   ```json
-   "storage": {
-     "clickhouse": {
-       "database": "smokeping",
-       "hop_ttl_days": 2
-     }
-   }
-   ```
+| Table | Default | What it costs you to shorten |
+|-------|---------|------------------------------|
+| `probe_cycle` | 365d | Cycle-level history (min/avg/max/p5..p95, loss). Drop below 30d only if you don't need long-window trend charts. |
+| `probe_rtt` | 14d | Per-ping raw RTT. Used to draw "smoke" bands at short zooms; aggregates in `probe_cycle` retain p5..p95. |
+| `probe_hop` | 90d | Per-cycle hop stats (MTR + opportunistic ICMP traces). Heaviest table on multi-target fleets. |
+| `probe_http` | 14d | Per-request HTTP samples. Aggregates survive in `probe_cycle`. |
 
-   Cycle min/avg/max/loss survive in the 5m/1h/1d rollups (`probe_cycle_5m`,
-   `probe_cycle_1h`, `probe_cycle_1d`); only per-ping (`probe_rtt`) and per-hop
-   (`probe_hop`) detail is shortened.
-
-2. **Suppress baseline hop writes** via `storage.hop_policy.mode`:
-
-   | Mode | Behaviour |
-   |------|-----------|
-   | `always` (default) | Every cycle that has hops writes them. Legacy behaviour, no upgrade surprise. |
-   | `on_loss` | Hops written only when the trace's last hop reports `Lost > 0`. |
-   | `sampled` | One write per `sample_every` window per `(target, source)`: a loss cycle fills the slot, otherwise a baseline snapshot does. Loss wins, baseline fills the gap. Requires `sample_every` (e.g. `"30m"`). |
-
-   ```json
-   "storage": {
-     "clickhouse": { ... },
-     "hop_policy": { "mode": "sampled", "sample_every": "30m" }
-   }
-   ```
-
-   Mode changes require a restart (the writer captures the policy at
-   construction; no hot-reload). Combined with reduced TTL, hop-heavy installs
-   typically see significant storage savings after the TTL merges complete.
+TTL changes take effect on next process start (bootstrap re-emits
+`ALTER TABLE … MODIFY TTL` on every start). Existing rows older than the new
+window are pruned by the next CH merge cycle, not immediately.
 
 ### Alert conditions
 
