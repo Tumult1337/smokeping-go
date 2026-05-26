@@ -13,9 +13,7 @@ type Config struct {
 	Interval time.Duration `json:"interval"`
 	Pings    int           `json:"pings"`
 
-	// Storage selects the persistence backend. Legacy configs with a
-	// top-level "influxdb" key are folded into Storage.InfluxV2 by
-	// loadUnvalidated so existing installs keep working with no edit.
+	// Storage configures the ClickHouse persistence backend.
 	Storage Storage `json:"storage"`
 
 	Probes  map[string]Probe  `json:"probes"`
@@ -29,138 +27,41 @@ type Config struct {
 	Cluster *Cluster `json:"cluster,omitempty"`
 }
 
-// BackendName identifies a concrete storage implementation. The list is
-// closed on purpose: unknown values are rejected at load time so typos
-// don't silently fall through to a default backend.
-type BackendName string
-
-const (
-	BackendInfluxV2 BackendName = "influxv2"
-	BackendInfluxV3 BackendName = "influxv3"
-)
-
-// Storage holds the backend selection plus each backend's per-impl
-// configuration. Only the block referenced by Backend is consulted; the
-// other may be omitted.
+// Storage holds the ClickHouse backend configuration.
 type Storage struct {
-	Backend   BackendName `json:"backend"`
-	InfluxV2  InfluxV2    `json:"influxv2"`
-	InfluxV3  InfluxV3    `json:"influxv3"`
-	HopPolicy HopPolicy   `json:"hop_policy"`
+	ClickHouse ClickHouse `json:"clickhouse"`
 }
 
-// HopPolicy configures how aggressively probe_hop points are written.
-// Mode defaults to "always" when empty, preserving historical behaviour.
-// SampleEvery is a Go duration string ("30m", "1h") and is only meaningful
-// when Mode == "sampled"; otherwise it is ignored. See
-// internal/storage/hoppolicy.go for the runtime gate.
-type HopPolicy struct {
-	Mode        string `json:"mode,omitempty"`
-	SampleEvery string `json:"sample_every,omitempty"`
+// ClickHouse configures the ClickHouse storage backend.
+type ClickHouse struct {
+	Addr      string              `json:"addr"`
+	Database  string              `json:"database"`
+	Username  string              `json:"username"`
+	Password  string              `json:"password"`
+	TLS       bool                `json:"tls"`
+	Cluster   string              `json:"cluster"`
+	Retention ClickHouseRetention `json:"retention"`
+	Batch     ClickHouseBatch     `json:"batch"`
 }
 
-func (h *HopPolicy) Validate() error {
-	switch h.Mode {
-	case "", "always", "on_loss":
-		return nil
-	case "sampled":
-		d, err := h.ParsedSampleEvery()
-		if err != nil {
-			return err
-		}
-		if d <= 0 {
-			return fmt.Errorf("storage.hop_policy.sample_every must be > 0 for sampled mode")
-		}
-		return nil
-	default:
-		return fmt.Errorf("storage.hop_policy.mode %q must be one of: always, on_loss, sampled", h.Mode)
-	}
+// ClickHouseRetention configures per-table TTL in days.
+type ClickHouseRetention struct {
+	CycleDays int `json:"cycle_days"`
+	RTTDays   int `json:"rtt_days"`
+	HopDays   int `json:"hop_days"`
+	HTTPDays  int `json:"http_days"`
 }
 
-// ParsedSampleEvery returns SampleEvery as a time.Duration. Safe to call
-// standalone — errors include the storage.hop_policy.sample_every path.
-func (h *HopPolicy) ParsedSampleEvery() (time.Duration, error) {
-	if h.SampleEvery == "" {
-		return 0, fmt.Errorf("storage.hop_policy.sample_every: required when mode is sampled")
-	}
-	d, err := time.ParseDuration(h.SampleEvery)
-	if err != nil {
-		return 0, fmt.Errorf("storage.hop_policy.sample_every: %w", err)
-	}
-	return d, nil
+// ClickHouseBatch configures the write batcher: flush when MaxRows is
+// reached or MaxInterval elapses, whichever comes first.
+type ClickHouseBatch struct {
+	MaxRows     int    `json:"max_rows"`
+	MaxInterval string `json:"max_interval"`
 }
 
-// InfluxV2 configures the InfluxDB v2 backend. BucketRaw is required;
-// Bucket5m / Bucket1h / Bucket1d are optional and only used if rollup tiers
-// are wanted. The 5m tier is what serves the 24h chart view — without it
-// the reader falls back to raw, which is fine but ~6-10x slower at that
-// span on a busy InfluxDB.
-type InfluxV2 struct {
-	URL       string `json:"url"`
-	Token     string `json:"token"`
-	Org       string `json:"org"`
-	BucketRaw string `json:"bucket_raw"`
-	Bucket5m  string `json:"bucket_5m"`
-	Bucket1h  string `json:"bucket_1h"`
-	Bucket1d  string `json:"bucket_1d"`
-}
-
-// InfluxV3 configures the InfluxDB v3 backend. v3 uses databases instead
-// of buckets and the gRPC/Flight SQL protocol for queries; downsampling
-// happens at query time via SQL date_bin() rather than pre-baked rollup
-// tasks, so a single database holds raw cycles and the reader translates
-// the requested Resolution into a bucket width.
-type InfluxV3 struct {
-	URL      string `json:"url"`
-	Token    string `json:"token"`
-	Database string `json:"database"`
-	// RetentionPeriod is forwarded to the database create call on bootstrap
-	// (e.g. "30d", "1y"). Empty = infinite. v3 Core can only set retention
-	// at create time — changing it later requires creating a fresh database
-	// and migrating data, so operators picking this should pick generously.
-	RetentionPeriod string `json:"retention_period,omitempty"`
-}
-
-// Validate checks the Storage block is internally consistent. Empty
-// Backend + no credentials is allowed — the caller treats it as
-// "standalone without persistent storage" and logs a warning. A set
-// Backend with missing required fields is fatal so operators get a clear
-// error at startup instead of silent data loss.
+// Validate checks the Storage block is internally consistent.
 func (s *Storage) Validate() error {
-	if err := s.HopPolicy.Validate(); err != nil {
-		return err
-	}
-	switch s.Backend {
-	case "":
-		// Unset backend is only valid when no credentials were supplied
-		// for any backend — otherwise the operator clearly intended to
-		// use one and we want to refuse to guess which.
-		if s.InfluxV2.URL != "" || s.InfluxV3.URL != "" {
-			return fmt.Errorf("storage.backend must be set when any backend credentials are configured")
-		}
-		return nil
-	case BackendInfluxV2:
-		if s.InfluxV2.URL == "" {
-			return fmt.Errorf("storage.influxv2.url is required")
-		}
-		if s.InfluxV2.BucketRaw == "" {
-			return fmt.Errorf("storage.influxv2.bucket_raw is required")
-		}
-		return nil
-	case BackendInfluxV3:
-		if s.InfluxV3.URL == "" {
-			return fmt.Errorf("storage.influxv3.url is required")
-		}
-		if s.InfluxV3.Token == "" {
-			return fmt.Errorf("storage.influxv3.token is required")
-		}
-		if s.InfluxV3.Database == "" {
-			return fmt.Errorf("storage.influxv3.database is required")
-		}
-		return nil
-	default:
-		return fmt.Errorf("storage.backend %q is not recognised", s.Backend)
-	}
+	return nil // full validation happens in applyDefaults via Load
 }
 
 type Probe struct {
@@ -236,19 +137,15 @@ type Action struct {
 }
 
 type rawConfig struct {
-	Listen   string  `json:"listen"`
-	Interval string  `json:"interval"`
-	Pings    int     `json:"pings"`
-	Storage  Storage `json:"storage"`
-	// LegacyInfluxDB accepts the pre-backend top-level "influxdb" block so
-	// existing configs keep loading without an edit. Folded into
-	// Storage.InfluxV2 when Storage is otherwise empty — see loadUnvalidated.
-	LegacyInfluxDB *InfluxV2           `json:"influxdb,omitempty"`
-	Probes         map[string]rawProbe `json:"probes"`
-	Targets        []Group             `json:"targets"`
-	Alerts         map[string]Alert    `json:"alerts"`
-	Actions        map[string]Action   `json:"actions"`
-	Cluster        *Cluster            `json:"cluster,omitempty"`
+	Listen   string              `json:"listen"`
+	Interval string              `json:"interval"`
+	Pings    int                 `json:"pings"`
+	Storage  Storage             `json:"storage"`
+	Probes   map[string]rawProbe `json:"probes"`
+	Targets  []Group             `json:"targets"`
+	Alerts   map[string]Alert    `json:"alerts"`
+	Actions  map[string]Action   `json:"actions"`
+	Cluster  *Cluster            `json:"cluster,omitempty"`
 }
 
 type rawProbe struct {
@@ -306,18 +203,6 @@ func loadUnvalidated(path string) (*Config, error) {
 		Actions: raw.Actions,
 		Cluster: raw.Cluster,
 		Probes:  make(map[string]Probe, len(raw.Probes)),
-	}
-	// Backwards-compat: accept the pre-backend top-level `influxdb` key and
-	// fold it into Storage.InfluxV2. Only applied when the new `storage`
-	// block is empty so an explicit "storage" always wins.
-	if raw.LegacyInfluxDB != nil && cfg.Storage.Backend == "" && cfg.Storage.InfluxV2.URL == "" {
-		cfg.Storage.Backend = BackendInfluxV2
-		cfg.Storage.InfluxV2 = *raw.LegacyInfluxDB
-	}
-	// Default to v2 when the backend is left empty but a v2 config block is
-	// present — matches the behaviour operators got before Storage existed.
-	if cfg.Storage.Backend == "" && cfg.Storage.InfluxV2.URL != "" {
-		cfg.Storage.Backend = BackendInfluxV2
 	}
 	if cfg.Cluster != nil && cfg.Cluster.Source == "" {
 		cfg.Cluster.Source = "master"
@@ -393,8 +278,36 @@ func (c *Config) Validate() error {
 	if c.Pings <= 0 {
 		return fmt.Errorf("pings must be positive")
 	}
-	if err := c.Storage.Validate(); err != nil {
-		return err
+	ch := &c.Storage.ClickHouse
+	if ch.Addr == "" {
+		return fmt.Errorf("storage.clickhouse.addr is required")
+	}
+	if ch.Database == "" {
+		ch.Database = "gosmokeping"
+	}
+	if ch.Username == "" {
+		ch.Username = "default"
+	}
+	if ch.Retention.CycleDays == 0 {
+		ch.Retention.CycleDays = 365
+	}
+	if ch.Retention.RTTDays == 0 {
+		ch.Retention.RTTDays = 14
+	}
+	if ch.Retention.HopDays == 0 {
+		ch.Retention.HopDays = 90
+	}
+	if ch.Retention.HTTPDays == 0 {
+		ch.Retention.HTTPDays = 14
+	}
+	if ch.Batch.MaxRows == 0 {
+		ch.Batch.MaxRows = 1000
+	}
+	if ch.Batch.MaxInterval == "" {
+		ch.Batch.MaxInterval = "1s"
+	}
+	if _, err := time.ParseDuration(ch.Batch.MaxInterval); err != nil {
+		return fmt.Errorf("storage.clickhouse.batch.max_interval: %w", err)
 	}
 
 	seenTargets := make(map[string]string)
