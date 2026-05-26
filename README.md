@@ -47,8 +47,13 @@ the "all" view overlays every source with its own palette colour.
 
 - **Probes:** ICMP (unprivileged UDP ping sockets, raw fallback), TCP connect,
   HTTP(S) TTFB, DNS lookup, MTR-style path discovery.
-- **Storage:** ClickHouse (MergeTree tables with automatic rollups: raw 7 d, 5 m,
-  1 h, 1 d). Tables and rollup policies are created automatically on startup.
+- **Storage:** ClickHouse. Four `MergeTree` tables (`probe_cycle`, `probe_rtt`,
+  `probe_hop`, `probe_http`) with codec-stacked columns (Gorilla for floats,
+  T64 for small ints, DoubleDelta for timestamps, ZSTD second pass). Tier-ladder
+  bucketing at query time via `toStartOfInterval` — no materialised views, no
+  rollup tasks. Bootstrap creates the database, tables, and per-table TTLs on
+  every start (idempotent). Cluster mode rewrites to `ReplicatedMergeTree`
+  when `storage.clickhouse.cluster` is set.
 - **UI:** React + Vite + uPlot, embedded in the binary. Smoke band and
   classic-bars chart modes, MTR hop table, per-hop loss heatmap, drag-to-zoom,
   shareable URLs, auto-refresh.
@@ -84,11 +89,14 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
-CLICKHOUSE_ADDR=http://localhost:9000
-CLICKHOUSE_PASSWORD=
+CH_ADDR=127.0.0.1:9000
+CH_DATABASE=gosmokeping
+CH_USERNAME=default
+CH_PASSWORD=
 ```
 
-Edit `config.json` to list the hosts you want to probe. The example ships
+`config.example.json` already interpolates these as `${CH_ADDR}`, etc.
+Edit `config.json` to list the hosts you want to probe — the example ships
 with `1.1.1.1` and `8.8.8.8` so the first run is immediately useful.
 
 ### 3. Build
@@ -231,27 +239,47 @@ the master's counter for the same target.
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/v1/health` | Health + uptime |
+| GET | `/api/v1/sources` | List source labels seen in storage (master + slave names) |
 | GET | `/api/v1/targets` | List all targets |
-| GET | `/api/v1/targets/{group}/{name}/cycles?from&to&resolution` | Aggregated latency |
+| GET | `/api/v1/targets/{group}/{name}/status` | Latest cycle for the target |
+| GET | `/api/v1/targets/{group}/{name}/cycles?from&to` | Aggregated latency, optionally bucketed |
 | GET | `/api/v1/targets/{group}/{name}/rtts?from&to` | Raw per-ping samples |
 | GET | `/api/v1/targets/{group}/{name}/http?from&to` | Raw HTTP samples |
-| GET | `/api/v1/targets/{group}/{name}/hops` | Latest MTR path |
+| GET | `/api/v1/targets/{group}/{name}/hops?at=<unix>` | Latest MTR path, or the one nearest `at` |
 | GET | `/api/v1/targets/{group}/{name}/hops/timeline?from&to` | Per-hop loss history |
 
-`from` / `to` accept RFC3339, unix seconds, or durations like `-24h`.
-`resolution` is `auto` (default), `raw`, `5m`, `1h`, or `1d`. All endpoints
-accept `source=<name>` to filter by probe origin in master/slave deployments.
+`from` / `to` accept RFC3339, unix seconds, or relative durations like `-24h`.
+The bucket width on `/cycles` and `/hops/timeline` is picked server-side from
+the window (≤24h raw, ≤180d 1h, >180d 1d for cycles; ≤24h raw, >24h 15m for
+hops). Cycles also accepts a back-compat `step=raw|1h|1d` override.
+
+All endpoints accept `source=<name>` to filter by probe origin in master/slave
+deployments. `/cycles` and `/hops/timeline` echo the resolved `from`/`to` in
+the response so the UI can pin its x-axis exactly to what the server returned.
 
 ## Deployment
 
-**systemd** — run `sudo ./deploy/install.sh` after `make build`. Creates a
-`gosmokeping` system user, installs the binary to `/opt/smokeping/gosmokeping`,
-stages `/opt/smokeping/` for config + `.env`, and installs the unit file. The
-unit grants `CAP_NET_RAW` via systemd — no `setcap` needed. Re-run to update;
-it's idempotent.
+**Docker compose on a host that already runs ClickHouse natively.** The repo
+ships a `docker-compose.yml` for this shape — single service, `network_mode:
+host` so the binary reaches CH on `127.0.0.1:9000` with no bridge NAT and ICMP
+probes see real interfaces. After cloning, copy `config.example.json` and
+`.env.example` to `config.json` / `.env`, fill them in, then:
 
-**Docker** — the image runs as an unprivileged user and grants `CAP_NET_RAW`
-to the binary via `setcap`:
+```bash
+git pull && make deploy
+```
+
+`make deploy` checks the two files exist, runs `docker compose build` and
+`docker compose up -d`, and reports `docker compose ps`. Use this on the
+deploy VM as the steady-state update flow.
+
+**Docker compose with CH in the stack** (CH not on the host). See
+[`docs/docker-master.md`](docs/docker-master.md) — adds a `clickhouse` service
+alongside, walks through CH user setup, master/slave layout, and reverse-proxy
+recommendations.
+
+**Docker, ad-hoc.** The image runs as an unprivileged user and grants
+`CAP_NET_RAW` to the binary via `setcap`:
 
 ```bash
 docker run -d --name gosmokeping -p 8080:8080 \
@@ -259,6 +287,12 @@ docker run -d --name gosmokeping -p 8080:8080 \
   -v $(pwd)/.env:/opt/smokeping/.env:ro \
   gosmokeping
 ```
+
+**systemd** — run `sudo ./deploy/install.sh` after `make build`. Creates a
+`gosmokeping` system user, installs the binary to `/opt/smokeping/gosmokeping`,
+stages `/opt/smokeping/` for config + `.env`, and installs the unit file. The
+unit grants `CAP_NET_RAW` via systemd — no `setcap` needed. Re-run to update;
+it's idempotent.
 
 **Reverse proxy** — terminate TLS and authenticate at the proxy (Nginx/Caddy).
 The binary has no built-in auth.
@@ -330,6 +364,15 @@ deploy/             # systemd unit + install script
 docs/screenshots/   # README screenshots
 ```
 
+## Upgrading from the InfluxDB-era release
+
+If you were running gosmokeping before the ClickHouse migration (any commit
+on the `legacy/influx` branch, or the `v0-last-influx` tag), see
+[`docs/migrate-from-influx.md`](docs/migrate-from-influx.md) — there is no
+schema-level data migration, but the doc covers the orderly cutover (export
+what you want to keep, stand up CH, swap the config, leave the legacy stack
+running side-by-side if you need historical access).
+
 ## Migrating from SmokePing
 
 `smokeping2gosmokeping` reads a SmokePing `Config::Grammar` config and emits
@@ -341,9 +384,9 @@ smokeping2gosmokeping -in /etc/smokeping/config -out config.json
 # writes config.json and config.json.notes.txt
 ```
 
-Storage credentials are emitted as `${CLICKHOUSE_ADDR}` / `${CLICKHOUSE_PASSWORD}`
-placeholders. Add `-strict` to exit 2 on any untranslatable construct, useful
-in CI-driven config generation.
+Storage credentials are emitted as `${CH_ADDR}` / `${CH_PASSWORD}` placeholders
+matching `.env.example`. Add `-strict` to exit 2 on any untranslatable
+construct, useful in CI-driven config generation.
 
 ## License
 
