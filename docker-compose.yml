@@ -1,0 +1,49 @@
+# gosmokeping single-service compose for hosts that already run
+# ClickHouse natively. The container shares the host network namespace
+# so:
+#   - the binary reaches ClickHouse over `127.0.0.1:9000` (no Docker
+#     networking in the path)
+#   - the UI / API binds `:8080` directly on the host
+#   - ICMP / traceroute probes see the host's real interfaces
+#
+# Workflow on the deploy host:
+#   git pull && make deploy
+# which rebuilds the image and rolls the service.
+#
+# First-time setup checklist:
+#   1. Copy config.example.json -> config.json and edit targets / probes
+#   2. Copy .env.example -> .env and fill in CH_PASSWORD + CLUSTER_TOKEN
+#      (note: storage.clickhouse.cluster in config.json stays "" unless
+#      you actually run a Keeper + ReplicatedMergeTree cluster — single-
+#      node CH wants it empty)
+#   3. In ClickHouse, create the bootstrap user once:
+#        CREATE USER gosmokeping IDENTIFIED BY '<CH_PASSWORD>';
+#        GRANT CREATE DATABASE, CREATE TABLE, ALTER, SELECT, INSERT
+#          ON gosmokeping.* TO gosmokeping;
+#        GRANT CREATE DATABASE ON *.* TO gosmokeping;
+#      (Bootstrap auto-creates the DB + four probe_* tables on first
+#      start; the CREATE DATABASE grant can be revoked afterwards.)
+#   4. make deploy
+
+services:
+  gosmokeping:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gosmokeping:latest
+    container_name: gosmokeping
+    restart: unless-stopped
+    # Host networking: reaches the host's ClickHouse on 127.0.0.1:9000
+    # without bridge NAT, and ICMP probes see real interfaces. Port
+    # mapping is implicit — the binary's `listen: ":8080"` binds on the
+    # host directly.
+    network_mode: host
+    volumes:
+      - ./config.json:/opt/smokeping/config.json:ro
+      - ./.env:/opt/smokeping/.env:ro
+    # The image already grants cap_net_raw+ep on the binary via setcap
+    # in the Dockerfile. Some kernels strip file caps from bind-mounted
+    # layers; uncomment if ICMP probes start failing with "operation
+    # not permitted":
+    # cap_add:
+    #   - NET_RAW
