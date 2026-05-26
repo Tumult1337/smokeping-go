@@ -1,7 +1,7 @@
 # Running a gosmokeping master node with Docker Compose
 
 This walks you through standing up a **master** (main) node in Docker
-Compose, including the InfluxDB v2 backend it writes to. Slaves are a
+Compose, including the ClickHouse backend it writes to. Slaves are a
 separate concern — see the *Adding slaves* section at the bottom.
 
 The repo ships a `Dockerfile` (multi-stage: Vite UI build → Go build →
@@ -22,10 +22,10 @@ the image from this repo.
         │    writes cycles, evaluates   │
         │    alerts, serves UI)         │
         └───────────────┬───────────────┘
-                        │ writes
+                        │ writes (native :9000)
                         ▼
         ┌───────────────────────────────┐
-        │   influxdb v2  (smokeping_*)  │
+        │   clickhouse (probe_* tables) │
         └───────────────────────────────┘
 ```
 
@@ -105,17 +105,20 @@ holding `--config`, then from cwd). Real shell env always wins, a
 missing file is a silent no-op.
 
 ```dotenv
-# --- InfluxDB ---------------------------------------------------------
-INFLUX_URL=http://influxdb:8086
-INFLUX_ORG=smokeping
-INFLUX_TOKEN=replace-with-a-long-random-admin-token
+# --- ClickHouse -------------------------------------------------------
+# The hostname `clickhouse` resolves to the service in the compose
+# network. 9000 is the native protocol port.
+CH_ADDR=clickhouse:9000
+CH_DATABASE=gosmokeping
+CH_USERNAME=gosmokeping
+CH_PASSWORD=replace-with-a-long-random-password
 
-# Used only by the influxdb container's first-boot setup. After the
+# Used only by the clickhouse container's first-boot setup. After the
 # initial `docker compose up`, the volume holds state and these values
 # are ignored.
-INFLUXDB_INIT_USERNAME=admin
-INFLUXDB_INIT_PASSWORD=replace-with-a-long-random-password
-INFLUXDB_INIT_BUCKET=smokeping_raw
+CLICKHOUSE_INIT_DB=gosmokeping
+CLICKHOUSE_INIT_USER=gosmokeping
+CLICKHOUSE_INIT_PASSWORD=replace-with-a-long-random-password
 
 # --- Cluster ----------------------------------------------------------
 # Shared bearer token for /api/v1/cluster/*. Slaves must send the same
@@ -127,9 +130,10 @@ DISCORD_WEBHOOK_URL=
 SLACK_WEBHOOK_URL=
 ```
 
-> The `INFLUX_TOKEN` you set here is what the master will use to write
-> to InfluxDB *and* what the InfluxDB container will provision as its
-> admin token on first boot. Keep them identical.
+> Keep `CH_PASSWORD` and `CLICKHOUSE_INIT_PASSWORD` identical — the
+> first is what the master authenticates with; the second is what the
+> ClickHouse container provisions on first boot. Same for the user and
+> database fields.
 
 ---
 
@@ -151,15 +155,23 @@ Everything else (targets, probes, alerts) is identical to standalone.
   },
 
   "storage": {
-    "backend": "influxv2",
-    "influxv2": {
-      "url":        "${INFLUX_URL}",
-      "token":      "${INFLUX_TOKEN}",
-      "org":        "${INFLUX_ORG}",
-      "bucket_raw": "smokeping_raw",
-      "bucket_5m":  "smokeping_5m",
-      "bucket_1h":  "smokeping_1h",
-      "bucket_1d":  "smokeping_1d"
+    "clickhouse": {
+      "addr":     "${CH_ADDR}",
+      "database": "${CH_DATABASE}",
+      "username": "${CH_USERNAME}",
+      "password": "${CH_PASSWORD}",
+      "tls":      false,
+      "cluster":  "",
+      "retention": {
+        "cycle_days": 365,
+        "rtt_days":   14,
+        "hop_days":   90,
+        "http_days":  14
+      },
+      "batch": {
+        "max_rows":     1000,
+        "max_interval": "1s"
+      }
     }
   },
 
@@ -207,11 +219,14 @@ To restrict a target to specific slaves only, add `"slaves":
 the master skips it locally, and other slaves never see it. Omit the
 field to let everyone (master + every registered slave) probe it.
 
-The rollup buckets (`smokeping_5m`, `smokeping_1h`, `smokeping_1d`) and
-their Flux tasks are created automatically by the master at startup; you
-only need `smokeping_raw` to exist on the InfluxDB side, which the init
-env vars below take care of. `bucket_5m` is optional — omit it and the
-v2 reader falls back to raw for ≤24h queries (slower, still correct).
+Storage bootstrap runs on every start: the master issues `CREATE
+DATABASE IF NOT EXISTS` and `CREATE TABLE IF NOT EXISTS` for the four
+`probe_*` tables (`probe_cycle`, `probe_rtt`, `probe_hop`, `probe_http`)
+and re-applies the retention TTLs via `ALTER TABLE … MODIFY TTL`, so a
+retention change takes effect on the next process restart. Replicated
+mode (set `storage.clickhouse.cluster` to a real `<remote_servers>`
+cluster name) requires Keeper/ZooKeeper and `{shard}`/`{replica}`
+macros on every replica.
 
 ---
 
@@ -219,26 +234,29 @@ v2 reader falls back to raw for ≤24h queries (slower, still correct).
 
 ```yaml
 services:
-  influxdb:
-    image: influxdb:2.7
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     volumes:
-      - influxdb-data:/var/lib/influxdb2
-      - influxdb-config:/etc/influxdb2
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
     environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_INIT_USERNAME}
-      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_INIT_PASSWORD}
-      DOCKER_INFLUXDB_INIT_ORG:      ${INFLUX_ORG}
-      DOCKER_INFLUXDB_INIT_BUCKET:   ${INFLUXDB_INIT_BUCKET}
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN}
-    # Expose the InfluxDB UI on the host only if you want to poke at it
+      CLICKHOUSE_DB:                    ${CLICKHOUSE_INIT_DB}
+      CLICKHOUSE_USER:                  ${CLICKHOUSE_INIT_USER}
+      CLICKHOUSE_PASSWORD:              ${CLICKHOUSE_INIT_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    # Expose ClickHouse on the host only if you want to query it
     # directly. Comment out otherwise — the master reaches it over the
-    # Compose network on `influxdb:8086`.
+    # Compose network on `clickhouse:9000`.
     ports:
-      - "127.0.0.1:8086:8086"
+      - "127.0.0.1:9000:9000"   # native protocol
+      - "127.0.0.1:8123:8123"   # HTTP / play UI
     healthcheck:
-      test: ["CMD", "influx", "ping"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
       interval: 10s
       timeout: 3s
       retries: 12
@@ -253,7 +271,7 @@ services:
     image: gosmokeping:latest
     restart: unless-stopped
     depends_on:
-      influxdb:
+      clickhouse:
         condition: service_healthy
     ports:
       - "8080:8080"
@@ -267,8 +285,8 @@ services:
     #   - NET_RAW
 
 volumes:
-  influxdb-data:
-  influxdb-config:
+  clickhouse-data:
+  clickhouse-logs:
 ```
 
 If you'd rather pin the prebuilt image published by this repo's CI,
@@ -295,9 +313,9 @@ docker compose logs -f gosmokeping
 ```
 
 You should see the master:
-1. Connect to InfluxDB and create the `smokeping_5m` / `smokeping_1h` /
-   `smokeping_1d` buckets + rollup tasks (logged as `bucket created` /
-   `task created`).
+1. Connect to ClickHouse, create the `gosmokeping` database and the
+   four `probe_*` tables (logged as `clickhouse.bootstrap database=…`),
+   and re-apply TTLs.
 2. Start the scheduler and probe its first cycle within `interval`
    seconds.
 3. Open the cluster ingest endpoints on `:8080`.
@@ -320,8 +338,9 @@ Then open `http://<host>:8080/` in a browser.
 | Reload config   | Edit `config.json`, then `docker compose kill -s HUP gosmokeping`.   |
 | Tail logs       | `docker compose logs -f gosmokeping`                                 |
 | Update binary   | `git pull && docker compose build && docker compose up -d gosmokeping` |
-| Backup metrics  | Snapshot the `influxdb-data` volume (or `influx backup` from inside the influxdb container). |
-| Inspect storage | `docker compose exec influxdb influx bucket list --org smokeping`    |
+| Backup metrics  | Snapshot the `clickhouse-data` volume, or use `clickhouse-backup` against a running container. |
+| Inspect storage | `docker compose exec clickhouse clickhouse-client --query "SELECT count() FROM gosmokeping.probe_cycle"` |
+| Change retention | Edit `storage.clickhouse.retention.*_days` in `config.json` and restart the master — `ALTER … MODIFY TTL` runs on every start. |
 
 Hot-reload caveat: the alert evaluator's per-target state lives in
 memory only. A full restart of the master returns every alert to OK
@@ -398,9 +417,9 @@ The slave name (`frankfurt-1` here) shows up as a chip in the master's
 UI. Use it in `target.slaves: ["frankfurt-1"]` on the master if you
 want a target probed only from that location.
 
-Slaves never touch InfluxDB; they buffer up to 600 cycles in memory if
-the master goes away (drop-oldest on overflow) and re-register once it
-comes back. A 401 from the master on any cluster endpoint will exit
+Slaves never touch ClickHouse; they buffer up to 600 cycles in memory
+if the master goes away (drop-oldest on overflow) and re-register once
+it comes back. A 401 from the master on any cluster endpoint will exit
 the slave with a non-zero status — rotate the token on both sides to
 recover.
 
@@ -410,8 +429,8 @@ recover.
 
 | Symptom                                                      | Likely cause |
 |--------------------------------------------------------------|--------------|
-| `bootstrap: 401 unauthorized` at master startup              | `INFLUX_TOKEN` doesn't match the value provisioned in the InfluxDB volume. Either reset it via the InfluxDB UI or wipe the `influxdb-data` volume to re-init. |
+| `bootstrap: create database: code 516, authentication failed` | `CH_USERNAME`/`CH_PASSWORD` don't match what ClickHouse provisioned. Either reset them inside the container with `clickhouse-client` or wipe the `clickhouse-data` volume to re-init. |
+| `bootstrap: create database: code 139, There is no Zookeeper configuration in server config` | You set `storage.clickhouse.cluster` but the container has no Keeper/ZooKeeper. Either run with `cluster: ""` (single-node MergeTree) or add `<keeper_server>` + `<remote_servers>` config under `/etc/clickhouse-server/config.d/`. |
 | ICMP probes all show 100% loss, logs say `operation not permitted` | Kernel stripped the binary's file caps. Add `cap_add: [NET_RAW]` to the `gosmokeping` service. |
-| `bootstrap: bucket already exists, task missing`             | You changed the rollup task version (`-vN` suffix in `storage/bootstrap.go`) without listing the old name in `deleteObsoleteTasks`. Not a Docker issue — fix in code. |
 | Slave logs `register: 401`                                   | `CLUSTER_TOKEN` mismatch between master and slave. They must be byte-identical. |
-| UI loads but charts are empty for a wide window              | Server echoes the resolved `from`/`to` on `/cycles` responses; the chart pins its x-axis to those. If they're missing or zero, the resolution layer rejected the query — check master logs for `resolve window`. |
+| UI loads but charts are empty for a wide window              | Server echoes the resolved `from`/`to` on `/cycles` responses; the chart pins its x-axis to those. If they're missing or zero, the tier-ladder picker rejected the window — check master logs for `query window` / `pick step`. |

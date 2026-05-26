@@ -1,9 +1,9 @@
 // Package storage defines the data types and read surface that the API
 // and scheduler consume, independent of which concrete backend persists
-// results. Backends live in subpackages (influxv2, influxv3) and implement
-// storage.Reader + scheduler.Sink; the Backend interface and factory live
-// at the composition root so this package stays a pure leaf and can be
-// imported by any backend without a cycle.
+// results. The active backend lives in the clickhouse subpackage and
+// implements storage.Reader + scheduler.Sink; the Backend interface and
+// factory live at the composition root so this package stays a pure leaf
+// and can be imported by any backend without a cycle.
 package storage
 
 import (
@@ -18,7 +18,7 @@ import (
 // narrow on purpose: adding a method forces every backend to implement it,
 // so new filter knobs belong on QueryFilter rather than as new parameters.
 type Reader interface {
-	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res Resolution, f QueryFilter) ([]CyclePoint, error)
+	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]CyclePoint, error)
 	QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]RTTPoint, error)
 	QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HTTPPoint, error)
 	QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) ([]HopPoint, error)
@@ -26,74 +26,16 @@ type Reader interface {
 	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HopPoint, error)
 }
 
-// QueryFilter narrows a query along orthogonal dimensions. Zero value = no
-// filtering; pre-cluster data (which carries no source tag) still returns.
-// Add new fields here instead of lengthening Reader method signatures.
+// QueryFilter narrows a query along orthogonal dimensions. Zero value =
+// no filtering, raw step (no bucketing). Add new fields here instead of
+// lengthening Reader method signatures.
 type QueryFilter struct {
-	// Source, when non-empty, limits rows to that exact `source` tag value.
+	// Source, when non-empty, limits rows to that exact source tag value.
 	Source string
-}
-
-// Resolution picks which retention tier to query. Backends that don't
-// rollup can treat every value as "raw".
-type Resolution string
-
-const (
-	ResolutionRaw Resolution = "raw"
-	Resolution5m  Resolution = "5m"
-	Resolution1h  Resolution = "1h"
-	Resolution1d  Resolution = "1d"
-)
-
-// PickResolution chooses a tier by requested span. Tiers are picked so the
-// per-tier point count tracks what the chart canvas can actually render
-// (~666 px wide); raw stays the default for narrow windows where per-cycle
-// detail is meaningful, the 5m tier covers the 24h overview, and the 1h /
-// 1d tiers handle multi-day spans. Operators can still force raw via
-// `?resolution=raw`, and the queryCyclesFrom fallback chain protects fresh
-// installs where a rollup task hasn't ticked yet — an empty tier
-// transparently falls back to a finer one. Loss is preserved across tiers
-// (the rollup sums loss_count + pings_sent, so the 5m bucket of a
-// 100%-loss cycle reads as ~8% loss, still visible in the median tick
-// color).
-func PickResolution(from, to time.Time) Resolution {
-	span := to.Sub(from)
-	switch {
-	case span <= 6*time.Hour:
-		return ResolutionRaw
-	case span <= 24*time.Hour:
-		return Resolution5m
-	case span <= 180*24*time.Hour:
-		return Resolution1h
-	default:
-		return Resolution1d
-	}
-}
-
-// BucketForHops returns the time-bucket size hops/timeline should aggregate
-// to for a query covering `span`, or 0 to mean "no aggregation, return raw
-// per-cycle rows". Hops do NOT have pre-baked rollups (only the raw bucket
-// stores per-cycle hop data), so wide-window timelines have to aggregate
-// at query time. The tiers are picked so the result row count tracks the
-// heatmap canvas width (~666 px in current UI):
-//
-//	span ≤ 6h:           raw      — fine detail at narrow zoom
-//	6h < span ≤ 24h:     1m       — 1440 cells max
-//	24h < span ≤ 7d:     15m      — 672 cells max for 7d
-//	span > 7d:           15m      — defensive; the API caps timeline at 7d
-//
-// A 7d view at 20s probe interval previously returned ~30k cycles × ~13
-// hops = ~600k rows / ~113MB JSON; at 15m buckets the same view returns
-// ~672 × ~13 = ~8.7k rows / ~1.5MB.
-func BucketForHops(span time.Duration) time.Duration {
-	switch {
-	case span <= 6*time.Hour:
-		return 0
-	case span <= 24*time.Hour:
-		return time.Minute
-	default:
-		return 15 * time.Minute
-	}
+	// Step, when > 0, asks the backend to bucket results by this width
+	// using toStartOfInterval (or equivalent). Zero = return raw rows.
+	// The server picks Step from window width before invoking the reader.
+	Step time.Duration
 }
 
 // CyclePoint is one row of aggregate per-cycle data. Source identifies the

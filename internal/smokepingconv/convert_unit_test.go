@@ -31,8 +31,8 @@ host = berlin.example.com
 	if cfg.Interval.Seconds() != 30 {
 		t.Errorf("interval: %v", cfg.Interval)
 	}
-	if cfg.Storage.Backend != "influxv2" {
-		t.Errorf("storage: %+v", cfg.Storage)
+	if cfg.Storage.ClickHouse.Addr == "" {
+		t.Errorf("expected ClickHouse.Addr to be set, got empty")
 	}
 	if _, ok := cfg.Actions["log"]; !ok {
 		t.Error("log action missing")
@@ -45,7 +45,7 @@ host = berlin.example.com
 	}
 	var sawStorageNote bool
 	for _, n := range notes {
-		if strings.Contains(n.Detail, "storage.influxv2 is a placeholder") {
+		if strings.Contains(n.Detail, "storage.clickhouse.addr is set to") {
 			sawStorageNote = true
 		}
 	}

@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/smokepingconv"
 )
 
@@ -147,4 +146,3 @@ func parseLogLevel(s string) slog.Level {
 	}
 }
 
-var _ = config.BackendInfluxV2 // ensure import is not dropped if Validate() stays commented

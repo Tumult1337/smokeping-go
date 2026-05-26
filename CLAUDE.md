@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 gosmokeping is a single-binary Go replacement for SmokePing. It probes network
-targets (ICMP/TCP/HTTP/DNS), writes results to InfluxDB v2, serves a React+uPlot
+targets (ICMP/TCP/HTTP/DNS), writes results to ClickHouse, serves a React+uPlot
 UI plus a JSON API, and can fire threshold alerts.
 
 ## Commands
@@ -18,7 +18,7 @@ make dev                # go run with -log-level debug
 make ui-dev             # vite dev server on :5173, proxies /api to :8080
 
 make test               # unit tests
-make test-integration   # needs INFLUX_URL/INFLUX_TOKEN/INFLUX_ORG
+make test-integration   # needs CLICKHOUSE_ADDR (see Integration tests section)
 make lint               # go vet
 make tidy               # go mod tidy
 go test ./internal/api -run TestHealth  # single test
@@ -56,39 +56,31 @@ Key points a reader can't derive from a single file:
   immediately without pointer-update races. When adding a consumer, do
   **not** cache the `*Config`.
 
-- **Storage tiering (v2 vs v3):** the `Resolution` abstraction is shared
-  but the two backends realise it differently:
-  - **influxv2** (default): four buckets (`smokeping_raw`, `smokeping_5m`,
-    `smokeping_1h`, `smokeping_1d`) populated by Flux tasks that
-    `influxv2.Bootstrap` installs at startup. The Writer only writes the
-    raw bucket; rollups are InfluxDB's job. Per-ping samples
-    (`probe_rtt` measurement) and MTR hops (`probe_hop`) only live in
-    the raw bucket — rollups cover `probe_cycle` only.
-  - **influxv3**: a single database. `influxv3.Reader` translates the
-    requested `Resolution` into a SQL `date_bin()` width at query time —
-    v3 has no Flux task equivalent and its columnar Parquet storage
-    makes wide aggregations cheap, so query-time bucketing is the right
-    trade. Pre-baked rollups via the Processing Engine downsampler plugin
-    are an operator-side option (not shipped from Go).
-  Either way `storage.PickResolution` is the single decision point — only
-  the realisation downstream changes. Tier breakpoints are picked so each
-  range button keeps its point count near the chart canvas width (~666
-  px): ≤6h → raw, ≤24h → 5m, ≤180d → 1h, >180d → 1d. The 5m tier is
-  optional in `InfluxV2.Bucket5m`; when unset the v2 reader's
-  `fallbackChain` walks down to raw automatically (slower, but correct).
+- **Storage backend:** single ClickHouse backend in `internal/storage/clickhouse/`.
+  Four `MergeTree` tables (`probe_cycle`, `probe_rtt`, `probe_hop`, `probe_http`)
+  with codec-stacked columns (Gorilla for floats, T64 for small ints,
+  DoubleDelta for timestamps, ZSTD as second pass). The reader buckets at
+  query time via `toStartOfInterval` — no materialised views, no rollup
+  tasks. `QueryFilter.Step` carries the bucket width; `pickCycleStep` and
+  `pickHopStep` in the CH reader are the single decision points. Tier ladders:
+  - cycles: ≤24h raw, ≤180d 1h, >180d 1d
+  - hops:   ≤24h raw, >24h 15m (API caps timeline at 7d)
+  Bucketed cycle percentiles are computed with `quantilesExactWeighted`
+  over the per-cycle percentile columns weighted by `sent` — information-
+  preserving relative to NULL. Bucketed hop queries keep `hop_addr` in
+  the `GROUP BY` so a path flap returns one row per distinct address
+  seen in the bucket.
 
-- **Hop write policy:** `storage.hop_policy.mode` ∈ `always`|`on_loss`|
-  `sampled` gates the `probe_hop` write loop in both v2 and v3 writers.
-  `always` (default) keeps the legacy behaviour; `on_loss` writes hops
-  only when the last hop in the trace reports `Lost > 0`; `sampled`
-  writes one cycle per `sample_every` window per `(target, source)` —
-  a loss cycle consumes the slot, otherwise a baseline snapshot does
-  (loss wins, baseline fills the gap). The gate lives in `internal/storage/hoppolicy.go`
-  and is consulted from both backend writers — adding a new writer means
-  threading the same `*storage.HopPolicy` through its constructor. The
-  policy is constructed once at startup in `cmd/gosmokeping/storage.go`
-  (`buildHopPolicy`) and not hot-reloaded, so a config change requires a
-  process restart to bind.
+- **Retention:** per-table TTL set at bootstrap from
+  `storage.clickhouse.retention.{cycle,rtt,hop,http}_days` (defaults
+  365/14/90/14). `Bootstrap` re-emits `ALTER TABLE … MODIFY TTL` on every
+  start so a config change takes effect on the next process restart. The
+  writer/reader bind the rest of the config once at startup.
+
+- **CH cluster mode:** `storage.clickhouse.cluster` empty = single-node
+  `MergeTree`. Non-empty = `ON CLUSTER <name>` + `ReplicatedMergeTree`
+  with conventional `{shard}/{replica}` paths. Independent of
+  gosmokeping's master/slave cluster.
 
 - **UI embed:** `internal/ui/ui.go` uses `//go:embed all:dist` against
   `internal/ui/dist/`. That directory must exist at build time, so the
@@ -129,11 +121,12 @@ Key points a reader can't derive from a single file:
   AAAA is the semantically correct reading; how the resolver reaches the
   upstream is left to the OS.
 
-- **Rollup task versioning:** `storage/bootstrap.go` names tasks with a
-  `-vN` suffix. Changing the aggregation Flux (new percentile fields, etc.)
-  requires bumping the suffix AND adding all prior names to
-  `deleteObsoleteTasks` so upgrades replace rather than duplicate. InfluxDB
-  doesn't diff task bodies — same name = skip.
+- **Schema versioning:** `internal/storage/clickhouse/bootstrap.go` issues
+  `CREATE TABLE IF NOT EXISTS` at startup, so adding new tables is safe
+  and idempotent. Column additions require `ALTER TABLE … ADD COLUMN` — the
+  bootstrap does not currently do this automatically. TTL changes are applied
+  on every start via `ALTER TABLE … MODIFY TTL`, so they take effect on the
+  next restart.
 
 - **UI time-axis contract:** `/api/v1/targets/{id}/cycles` echoes the `from`
   and `to` it resolved. The charts pin `scales.x.range` to those unix
@@ -144,7 +137,7 @@ Key points a reader can't derive from a single file:
 - **Cluster mode (master/slave):** `--slave` flips the binary into a
   runner that registers with a master, pulls the target list over HTTP,
   probes locally, and pushes cycle batches back. Slaves never touch
-  InfluxDB or the UI. The master's cluster endpoints live under
+  ClickHouse or the UI. The master's cluster endpoints live under
   `/api/v1/cluster/{register,config,cycles}` behind a shared bearer
   token; `master.Server` plugs into the existing API listener via
   `api.Options.ClusterHandler` so one listener serves both UI and
@@ -189,25 +182,17 @@ raw bytes before JSON parse (`${NAME}` form), so tokens can live in env vars.
 this is load-bearing under systemd where cwd is `/`. Real shell env always
 wins over `.env` (godotenv default); a missing `.env` is a silent no-op.
 
-`storage.backend` selects the persistence layer: `"influxv2"` (default;
-four-bucket tiered Flux rollups, Flux queries) or `"influxv3"` (single database,
-SQL/Flight queries, query-time `date_bin` aggregation). The UI and alert
-evaluator are backend-agnostic — they only see `storage.Reader` and
-`scheduler.Sink`. Pick v3 when slave fan-out is producing more write load
-than v2's TSM ingestion can keep up with; v2 is the right default for
-single-node and small-cluster deployments.
-
-The v3 backend's bootstrap creates the configured database via
-`POST /api/v3/configure/database` if missing, which **requires a token
-with admin scope**. A write-only token will fail bootstrap with a 401/403;
-either grant admin to the configured token or pre-create the database
-externally (e.g. via `influxdb3 create database`). The v3 writer wraps
-the official `influxdb3/batching.Batcher` with a 1s ticker so writes
-flush either at 1000 points or every second — sync per-cycle writes
-would defeat the point of picking v3 for write throughput.
+The `storage.clickhouse` block configures the single storage backend. The UI
+and alert evaluator are backend-agnostic — they only see `storage.Reader` and
+`scheduler.Sink`. Key fields: `addr` (required, e.g. `"127.0.0.1:9000"`),
+`database`, `username`, `password`, `cluster` (empty = single-node MergeTree;
+non-empty = ReplicatedMergeTree on that cluster name), and `retention` (see
+the Retention bullet in Architecture). Bootstrap runs at every startup and is
+idempotent — it creates missing tables and re-applies TTL settings.
 
 ## Integration tests
 
-Behind the `integration` build tag. Set `INFLUX_URL`, `INFLUX_TOKEN`, and
-`INFLUX_ORG`; the tests use dedicated `gosmokeping_test_*` buckets so they
-don't collide with production data.
+Behind the `integration` build tag. Set `CLICKHOUSE_ADDR` (required;
+e.g. `127.0.0.1:9000`); optionally `CLICKHOUSE_USERNAME` and
+`CLICKHOUSE_PASSWORD`. The tests create and drop a temporary database so
+they don't collide with production data.

@@ -21,6 +21,9 @@ test:
 	$(GO) test ./...
 
 test-integration:
+	@if [ -z "$$CLICKHOUSE_ADDR" ]; then \
+		echo "set CLICKHOUSE_ADDR=host:9000 (optionally CLICKHOUSE_USERNAME / CLICKHOUSE_PASSWORD / CLICKHOUSE_DATABASE)"; exit 1; \
+	fi
 	$(GO) test -tags=integration ./...
 
 ui:

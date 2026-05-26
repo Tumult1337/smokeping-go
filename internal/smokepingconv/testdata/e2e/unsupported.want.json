@@ -3,22 +3,24 @@
   "interval": "1m0s",
   "pings": 20,
   "storage": {
-    "backend": "influxv2",
-    "influxv2": {
-      "url": "${INFLUX_URL}",
-      "token": "${INFLUX_TOKEN}",
-      "org": "${INFLUX_ORG}",
-      "bucket_raw": "smokeping_raw",
-      "bucket_5m": "smokeping_5m",
-      "bucket_1h": "smokeping_1h",
-      "bucket_1d": "smokeping_1d"
-    },
-    "influxv3": {
-      "url": "",
-      "token": "",
-      "database": ""
-    },
-    "hop_policy": {}
+    "clickhouse": {
+      "addr": "127.0.0.1:9000",
+      "database": "gosmokeping",
+      "username": "",
+      "password": "",
+      "tls": false,
+      "cluster": "",
+      "retention": {
+        "cycle_days": 0,
+        "rtt_days": 0,
+        "hop_days": 0,
+        "http_days": 0
+      },
+      "batch": {
+        "max_rows": 0,
+        "max_interval": ""
+      }
+    }
   },
   "probes": {
     "fping": {

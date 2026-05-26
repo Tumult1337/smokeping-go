@@ -7,15 +7,16 @@ import "time"
 // adding an entry here AND a field to Summary; the closures make the binding
 // a compile-time check rather than a silent drift between them.
 type PercentileSpec struct {
-	Name  string // Influx field suffix ("p5", "p10", ... "p95"). No "rtt_" prefix.
+	Name  string // short label ("p5", "p10", ... "p95"); ClickHouse column is name + "_ms".
 	Ratio float64
 	Get   func(Summary) time.Duration
 	Set   func(*Summary, time.Duration)
 }
 
-// PercentileSet is the single source of truth for which percentiles this
-// backend tracks, in what order, and under what field name. The writer and
-// reader iterate this list, and the Flux rollup is generated from it.
+// PercentileSet is the single source of truth for which percentiles the
+// storage backend tracks, in what order, and under what field name. The
+// writer and reader iterate this list to build the ClickHouse column set
+// and the per-bucket quantilesExactWeighted rollup.
 //
 // P50 is intentionally absent — use Summary.Median.
 var PercentileSet = []PercentileSpec{

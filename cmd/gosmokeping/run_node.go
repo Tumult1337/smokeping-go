@@ -53,7 +53,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		defer backend.close()
 		sinks = append(sinks, backend.sink)
 		// Wrap the reader with two LRU caches so live UI auto-refresh and
-		// historical browsing don't re-query Influx for identical windows.
+		// historical browsing don't re-issue identical ClickHouse queries.
 		// Cycles entries are tiny (~hundreds of KB) so 256 is fine; hops
 		// timeline entries can be ~100MB at 7d, so we cap hops at 16 to
 		// keep worst-case resident memory bounded (~1.5GB upper bound vs.
@@ -62,9 +62,9 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		reader = storage.NewCachingReader(backend.reader, 256, 16)
 	case errors.Is(err, storage.ErrDisabled):
 		log.Warn("storage backend disabled, running without persistent storage",
-			"backend", cfg.Storage.Backend)
+			"storage", "clickhouse")
 	default:
-		log.Error("open storage", "backend", cfg.Storage.Backend, "err", err)
+		log.Error("open storage", "storage", "clickhouse", "err", err)
 		os.Exit(1)
 	}
 

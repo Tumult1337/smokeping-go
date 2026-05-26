@@ -110,11 +110,10 @@ func Serve(ctx context.Context, log *slog.Logger, addr string, handler http.Hand
 		// ReadTimeout is generous because /api/v1/cluster/cycles accepts up to
 		// 100 MiB from slaves over potentially slow links. WriteTimeout has to
 		// accommodate the slowest read path: a 7d hops/timeline query against
-		// the raw bucket can legitimately take 60-90s of Influx server time
-		// (see influxv2.NewReader, which sets a 90s HTTP timeout for that
-		// case). Anything tighter cancels the response before Influx can
-		// finish, surfaces as 502 to the UI, and prevents CachingReader from
-		// ever warming the entry.
+		// the raw tier can legitimately take tens of seconds against
+		// ClickHouse on large datasets. Anything tighter cancels the response
+		// before ClickHouse can finish, surfaces as 502 to the UI, and
+		// prevents CachingReader from ever warming the entry.
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -259,24 +258,22 @@ func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res := pickResolution(r.URL.Query().Get("resolution"), from, to)
-	filter := storage.QueryFilter{Source: r.URL.Query().Get("source")}
+	step := pickStep(r.URL.Query().Get("step"), from, to)
 
 	if s.reader == nil {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
 		return
 	}
-	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, res, filter)
+	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source"), Step: step})
 	if err != nil {
 		s.log.Warn("query cycles", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"resolution": res,
-		"from":       from,
-		"to":         to,
-		"points":     points,
+		"from":   from,
+		"to":     to,
+		"points": points,
 	})
 }
 
@@ -392,7 +389,11 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "hops/timeline window limited to 7d")
 		return
 	}
-	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
+	hopStep := time.Duration(0)
+	if to.Sub(from) > 24*time.Hour {
+		hopStep = 15 * time.Minute
+	}
+	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source"), Step: hopStep})
 	if err != nil {
 		s.log.Warn("query hops timeline", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
@@ -418,7 +419,7 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	// Show the last 50 cycles from the raw bucket.
 	to := time.Now()
 	from := to.Add(-24 * time.Hour)
-	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.ResolutionRaw, storage.QueryFilter{Source: r.URL.Query().Get("source")})
+	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "query failed")
 		return
@@ -526,18 +527,30 @@ func parseRelativeDuration(s string) (time.Duration, error) {
 	return 0, fmt.Errorf("invalid duration %q", s)
 }
 
-func pickResolution(override string, from, to time.Time) storage.Resolution {
+// pickStep returns the toStartOfInterval width for a cycles query
+// covering [from, to]. Returns 0 to mean "no bucketing, raw rows".
+// The override is a back-compat query string knob:
+//
+//	?step=raw|1h|1d → forces a specific tier
+//	anything else   → derived from window width.
+func pickStep(override string, from, to time.Time) time.Duration {
 	switch override {
 	case "raw":
-		return storage.ResolutionRaw
-	case "5m":
-		return storage.Resolution5m
+		return 0
 	case "1h":
-		return storage.Resolution1h
+		return time.Hour
 	case "1d":
-		return storage.Resolution1d
+		return 24 * time.Hour
 	}
-	return storage.PickResolution(from, to)
+	span := to.Sub(from)
+	switch {
+	case span <= 24*time.Hour:
+		return 0
+	case span <= 180*24*time.Hour:
+		return time.Hour
+	default:
+		return 24 * time.Hour
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

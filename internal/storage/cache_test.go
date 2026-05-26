@@ -20,7 +20,7 @@ type fakeReader struct {
 	err          error
 }
 
-func (f *fakeReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, res Resolution, q QueryFilter) ([]CyclePoint, error) {
+func (f *fakeReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, q QueryFilter) ([]CyclePoint, error) {
 	f.cycles.Add(1)
 	if f.err != nil {
 		return nil, f.err
@@ -71,7 +71,7 @@ type slowFakeReader struct {
 	cyclePts []CyclePoint
 }
 
-func (s *slowFakeReader) QueryCycles(context.Context, config.TargetRef, time.Time, time.Time, Resolution, QueryFilter) ([]CyclePoint, error) {
+func (s *slowFakeReader) QueryCycles(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) ([]CyclePoint, error) {
 	s.calls.Add(1)
 	<-s.gate
 	return s.cyclePts, nil
@@ -109,10 +109,10 @@ func TestCachingReader_HitsCacheWithinTTL(t *testing.T) {
 	from := now.Add(-7 * 24 * time.Hour)
 	to := now
 
-	if _, err := c.QueryCycles(context.Background(), ref, from, to, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.QueryCycles(context.Background(), ref, from, to, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	if got := inner.cycles.Load(); got != 1 {
@@ -131,11 +131,11 @@ func TestCachingReader_RefetchesAfterTTL(t *testing.T) {
 	from := now.Add(-7 * 24 * time.Hour)
 	to := now
 
-	if _, err := c.QueryCycles(context.Background(), ref, from, to, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	clock = now.Add(cacheTTLLive + time.Second)
-	if _, err := c.QueryCycles(context.Background(), ref, from, to, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	if got := inner.cycles.Load(); got != 2 {
@@ -154,11 +154,11 @@ func TestCachingReader_HistoricalGetsLongerTTL(t *testing.T) {
 	to := now.Add(-7 * 24 * time.Hour)
 	from := to.Add(-24 * time.Hour)
 
-	if _, err := c.QueryCycles(context.Background(), ref, from, to, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	clock = now.Add(2 * time.Minute)
-	if _, err := c.QueryCycles(context.Background(), ref, from, to, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	if got := inner.cycles.Load(); got != 1 {
@@ -179,11 +179,11 @@ func TestCachingReader_QuantizesKey(t *testing.T) {
 	c.nowFn = func() time.Time { return clock }
 
 	ref := newRef("g", "t")
-	if _, err := c.QueryCycles(context.Background(), ref, now1.Add(-7*24*time.Hour), now1, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, now1.Add(-7*24*time.Hour), now1, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	clock = now2
-	if _, err := c.QueryCycles(context.Background(), ref, now2.Add(-7*24*time.Hour), now2, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, now2.Add(-7*24*time.Hour), now2, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	if got := inner.cycles.Load(); got != 1 {
@@ -200,10 +200,10 @@ func TestCachingReader_DifferentSourcesAreSeparate(t *testing.T) {
 	ref := newRef("g", "t")
 	from := now.Add(-7 * 24 * time.Hour)
 
-	if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{Source: "master"}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Source: "master", Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{Source: "slave-a"}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Source: "slave-a", Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	if got := inner.cycles.Load(); got != 2 {
@@ -219,12 +219,12 @@ func TestCachingReader_LRUEvicts(t *testing.T) {
 
 	from := now.Add(-7 * 24 * time.Hour)
 	for _, name := range []string{"a", "b", "c"} {
-		if _, err := c.QueryCycles(context.Background(), newRef("g", name), from, now, Resolution1h, QueryFilter{}); err != nil {
+		if _, err := c.QueryCycles(context.Background(), newRef("g", name), from, now, QueryFilter{Step: time.Hour}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// Re-query "a" — it was evicted when "c" was inserted, so this should miss.
-	if _, err := c.QueryCycles(context.Background(), newRef("g", "a"), from, now, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), newRef("g", "a"), from, now, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	if got := inner.cycles.Load(); got != 4 {
@@ -243,7 +243,7 @@ func TestCachingReader_ErrorBypassesCache(t *testing.T) {
 	from := now.Add(-7 * 24 * time.Hour)
 
 	for i := range 3 {
-		_, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+		_, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour})
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("call %d: got err %v want %v", i, err, wantErr)
 		}
@@ -462,7 +462,7 @@ func TestCachingReader_Cycles_SingleflightsConcurrentMisses(t *testing.T) {
 	errs := make(chan error, N)
 	for range N {
 		go func() {
-			_, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+			_, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour})
 			errs <- err
 		}()
 	}
@@ -481,8 +481,8 @@ func TestCachingReader_Cycles_SingleflightsConcurrentMisses(t *testing.T) {
 func TestCachingReader_HopsTimeline_SingleflightsConcurrentMisses(t *testing.T) {
 	// 8 goroutines hit the same cold key in parallel. A naive cache fires 8
 	// inner queries; with singleflight, exactly one runs and the rest wait
-	// for its result. Each Influx query at 7d for a real target is ~13s and
-	// allocates ~113MB of JSON, so this matters.
+	// for its result. A 7d hops query against ClickHouse scans millions of
+	// rows, so collapsing the stampede matters.
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	gate := make(chan struct{})
 	inner := &slowFakeReader{gate: gate, hops: []HopPoint{{Time: now, Index: 1}}}
@@ -606,7 +606,7 @@ func TestCachingReader_IndependentCapsForCyclesAndHops(t *testing.T) {
 	from := now.Add(-7 * 24 * time.Hour)
 	for _, name := range []string{"a", "b", "c"} {
 		ref := newRef("g", name)
-		if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{}); err != nil {
+		if _, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{}); err != nil {
@@ -615,7 +615,7 @@ func TestCachingReader_IndependentCapsForCyclesAndHops(t *testing.T) {
 	}
 
 	// cyclesMax=2: re-querying "a" must miss (evicted by "c").
-	if _, err := c.QueryCycles(context.Background(), newRef("g", "a"), from, now, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), newRef("g", "a"), from, now, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	if got := inner.cycles.Load(); got != 4 {
@@ -641,11 +641,11 @@ func TestCachingReader_Stats_TracksCyclesHitsAndMisses(t *testing.T) {
 	from := now.Add(-7 * 24 * time.Hour)
 
 	// First call: miss → fills the cache.
-	if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	// Second call within TTL: hit.
-	if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	stats := c.Stats()
@@ -664,7 +664,7 @@ func TestCachingReader_Stats_ErrorsCountAsMissNotHit(t *testing.T) {
 	from := now.Add(-7 * 24 * time.Hour)
 
 	for range 3 {
-		_, _ = c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+		_, _ = c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour})
 	}
 	stats := c.Stats()
 	if stats.CyclesHits != 0 || stats.CyclesMisses != 3 {
@@ -694,7 +694,6 @@ func TestCachingReader_Cycles_NoRedundantLeaderAfterRace(t *testing.T) {
 	key := cycleCacheKey{
 		group:    "g",
 		name:     "t",
-		res:      Resolution1h,
 		fromUnix: floorUnix(from, cacheKeyFromQuantum),
 		toUnix:   ceilUnix(now, cacheKeyToQuantum),
 	}
@@ -703,7 +702,7 @@ func TestCachingReader_Cycles_NoRedundantLeaderAfterRace(t *testing.T) {
 		c.store(key, []CyclePoint{{Time: now, Median: 42}}, time.Hour)
 	}
 
-	pts, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+	pts, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -794,7 +793,7 @@ func TestCachingReader_HopsTimeline_ServesStaleCacheOnError(t *testing.T) {
 	// Advance past the TTL so the entry is stale.
 	clock = now.Add(cacheTTLLive + time.Second)
 	// Inject a failure into the inner reader.
-	inner.err = errors.New("influx down")
+	inner.err = errors.New("clickhouse down")
 
 	// Stale data must be served silently — no error, correct index.
 	hops, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{})
@@ -821,14 +820,14 @@ func TestCachingReader_Cycles_ServesStaleCacheOnError(t *testing.T) {
 	from := now.Add(-7 * 24 * time.Hour)
 
 	// Warm the cache.
-	if _, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	// Expire the entry.
 	clock = now.Add(cacheTTLLive + time.Second)
-	inner.err = errors.New("influx down")
+	inner.err = errors.New("clickhouse down")
 
-	pts, err := c.QueryCycles(context.Background(), ref, from, now, Resolution1h, QueryFilter{})
+	pts, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour})
 	if err != nil {
 		t.Fatalf("got error %v; want stale data served silently", err)
 	}
@@ -853,19 +852,19 @@ func TestCachingReader_Cycles_ErrorPropagatesWhenStaleEvicted(t *testing.T) {
 	from := now.Add(-7 * 24 * time.Hour)
 
 	// Warm "a".
-	if _, err := c.QueryCycles(context.Background(), refA, from, now, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), refA, from, now, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	// Insert "b", which evicts "a" from the LRU.
-	if _, err := c.QueryCycles(context.Background(), refB, from, now, Resolution1h, QueryFilter{}); err != nil {
+	if _, err := c.QueryCycles(context.Background(), refB, from, now, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	// Advance past TTL and inject failure.
 	clock = now.Add(cacheTTLLive + time.Second)
-	inner.err = errors.New("influx down")
+	inner.err = errors.New("clickhouse down")
 
 	// "a" was evicted — no stale entry exists, so the error must propagate.
-	_, err := c.QueryCycles(context.Background(), refA, from, now, Resolution1h, QueryFilter{})
+	_, err := c.QueryCycles(context.Background(), refA, from, now, QueryFilter{Step: time.Hour})
 	if err == nil {
 		t.Fatal("got nil error; want propagated error (no stale entry after eviction)")
 	}

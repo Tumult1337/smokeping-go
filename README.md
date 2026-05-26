@@ -1,13 +1,19 @@
 # gosmokeping
 
+> **v1+ uses ClickHouse.** InfluxDB v2/v3 support is archived on the
+> `legacy/influx` branch (last released as the `v0-last-influx` tag).
+> A ClickHouse server (current LTS, e.g. `25.3 LTS` at the time of writing)
+> is required. Quick start:
+> `docker run -d -p 9000:9000 clickhouse/clickhouse-server:lts`
+
 A modern, single-binary replacement for [SmokePing](https://oss.oetiker.ch/smokeping/).
 Keeps the classic "smoke band" latency visualisation (min–max + p5–p95 + median),
-adds a JSON API, a React + uPlot UI, InfluxDB v2/v3 storage, MTR path discovery,
+adds a JSON API, a React + uPlot UI, ClickHouse storage, MTR path discovery,
 HTTP/DNS probes, and optional master/slave distributed probing from multiple
 vantage points.
 
 > **Heads up — this project is AI-coded.**
-> Every line of Go, TypeScript, CSS, and Flux in this repo was written by
+> Every line of Go, TypeScript, and CSS in this repo was written by
 > Claude under human direction. It's been shaped by iterative review, used
 > in anger, and the tests are real — but there is no seasoned human
 > maintainer standing behind each commit. Treat it like any other
@@ -41,9 +47,8 @@ the "all" view overlays every source with its own palette colour.
 
 - **Probes:** ICMP (unprivileged UDP ping sockets, raw fallback), TCP connect,
   HTTP(S) TTFB, DNS lookup, MTR-style path discovery.
-- **Storage:** InfluxDB v2 (tiered rollups via Flux tasks: raw 7 d, 5 m, 1 h,
-  1 d) or InfluxDB v3 (single database, query-time `date_bin` aggregation).
-  Buckets and tasks are created automatically on startup.
+- **Storage:** ClickHouse (MergeTree tables with automatic rollups: raw 7 d, 5 m,
+  1 h, 1 d). Tables and rollup policies are created automatically on startup.
 - **UI:** React + Vite + uPlot, embedded in the binary. Smoke band and
   classic-bars chart modes, MTR hop table, per-hop loss heatmap, drag-to-zoom,
   shareable URLs, auto-refresh.
@@ -57,23 +62,17 @@ the "all" view overlays every source with its own palette colour.
 
 ## Quick start
 
-Prerequisites: Go 1.26+, Node 20+, a running InfluxDB v2 instance.
+Prerequisites: Go 1.26+, Node 20+, a running ClickHouse instance (current LTS).
 
-### 1. Start InfluxDB and grab credentials
+### 1. Start ClickHouse and grab credentials
 
 ```bash
-docker run -d --name influxdb -p 8086:8086 \
-  -e DOCKER_INFLUXDB_INIT_MODE=setup \
-  -e DOCKER_INFLUXDB_INIT_USERNAME=admin \
-  -e DOCKER_INFLUXDB_INIT_PASSWORD=changeme123 \
-  -e DOCKER_INFLUXDB_INIT_ORG=smokeping \
-  -e DOCKER_INFLUXDB_INIT_BUCKET=smokeping_raw \
-  -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=supersecret-replace-me \
-  influxdb:2
+docker run -d --name clickhouse -p 9000:9000 \
+  clickhouse/clickhouse-server:lts
 ```
 
-gosmokeping creates the `smokeping_5m`, `smokeping_1h`, and `smokeping_1d`
-rollup buckets and their Flux tasks automatically on first start.
+gosmokeping creates the `probe_cycle`, `probe_rtt`, `probe_hop`, and `probe_http`
+tables with automatic rollup policies on first start.
 
 ### 2. Configure
 
@@ -85,9 +84,8 @@ cp .env.example .env
 Edit `.env`:
 
 ```bash
-INFLUX_URL=http://localhost:8086
-INFLUX_ORG=smokeping
-INFLUX_TOKEN=supersecret-replace-me
+CLICKHOUSE_ADDR=http://localhost:9000
+CLICKHOUSE_PASSWORD=
 ```
 
 Edit `config.json` to list the hosts you want to probe. The example ships
@@ -137,50 +135,39 @@ Real shell env always wins over `.env`; a missing `.env` is silently ignored.
 
 ### Storage backend
 
-`storage.backend` selects the persistence layer:
+ClickHouse is the only storage backend. The configured user must have permissions
+to `CREATE`, `INSERT`, `SELECT`, and `ALTER` on the target database. The default
+database is `smokeping`; override with `storage.clickhouse.database` in the config.
 
-| Value | Description |
-|-------|-------------|
-| `"influxv2"` | Default. Four buckets, tiered Flux rollups, Flux queries. |
-| `"influxv3"` | Single database, SQL/Arrow Flight queries, query-time `date_bin`. Good for high write throughput from many slaves. |
+### Managing table retention and size
 
-### Trimming raw bucket size
+Per-table TTL is set at bootstrap from `storage.clickhouse.retention`. Defaults
+are generous; tighten them on busy installs where `probe_hop` and `probe_rtt`
+dominate disk usage.
 
-`probe_hop` (MTR + opportunistic ICMP traces) dominates raw-bucket storage
-on busy installs. Two knobs:
+```json
+"storage": {
+  "clickhouse": {
+    "retention": {
+      "cycle_days": 365,
+      "rtt_days":   14,
+      "hop_days":   90,
+      "http_days":  14
+    }
+  }
+}
+```
 
-1. **Reduce raw retention.** `influxv2.Bootstrap` creates `smokeping_raw`
-   with 7-day retention by default. Cut it to 48h with the influx CLI:
+| Table | Default | What it costs you to shorten |
+|-------|---------|------------------------------|
+| `probe_cycle` | 365d | Cycle-level history (min/avg/max/p5..p95, loss). Drop below 30d only if you don't need long-window trend charts. |
+| `probe_rtt` | 14d | Per-ping raw RTT. Used to draw "smoke" bands at short zooms; aggregates in `probe_cycle` retain p5..p95. |
+| `probe_hop` | 90d | Per-cycle hop stats (MTR + opportunistic ICMP traces). Heaviest table on multi-target fleets. |
+| `probe_http` | 14d | Per-request HTTP samples. Aggregates survive in `probe_cycle`. |
 
-   ```bash
-   docker exec smokeping-influxdb-1 influx bucket list
-   docker exec smokeping-influxdb-1 influx bucket update \
-     --id <smokeping_raw-id> --retention 48h
-   ```
-
-   Cycle min/avg/max/loss survive in the 5m/1h/1d rollups; only per-ping
-   (`probe_rtt`) and per-hop (`probe_hop`) detail is shortened.
-
-2. **Suppress baseline hop writes** via `storage.hop_policy.mode`:
-
-   | Mode | Behaviour |
-   |------|-----------|
-   | `always` (default) | Every cycle that has hops writes them. Legacy behaviour, no upgrade surprise. |
-   | `on_loss` | Hops written only when the trace's last hop reports `Lost > 0`. |
-   | `sampled` | One write per `sample_every` window per `(target, source)`: a loss cycle fills the slot, otherwise a baseline snapshot does. Loss wins, baseline fills the gap. Requires `sample_every` (e.g. `"30m"`). |
-
-   ```json
-   "storage": {
-     "backend": "influxv2",
-     "influxv2": { ... },
-     "hop_policy": { "mode": "sampled", "sample_every": "30m" }
-   }
-   ```
-
-   Mode changes require a restart (the writer captures the policy at
-   construction; no hot-reload). Combined with reduced retention,
-   hop-heavy installs typically see `smokeping_raw` shrink by an order
-   of magnitude after the next InfluxDB compaction.
+TTL changes take effect on next process start (bootstrap re-emits
+`ALTER TABLE … MODIFY TTL` on every start). Existing rows older than the new
+window are pruned by the next CH merge cycle, not immediately.
 
 ### Alert conditions
 
@@ -279,7 +266,7 @@ The binary has no built-in auth.
 ## Master / slave
 
 Run extra `--slave` instances to probe every target from multiple vantage
-points simultaneously. The master aggregates all cycles, persists to InfluxDB,
+points simultaneously. The master aggregates all cycles, persists to ClickHouse,
 and shows each source as a separately filterable overlay in the UI.
 
 **Master** `config.json`:
@@ -307,7 +294,7 @@ set `master_url`, `token`, and a unique `name`, then:
 
 The slave registers with the master, pulls the target list, probes locally,
 and pushes cycle batches back every few seconds. A 600-cycle ring buffer
-absorbs short master outages. Slaves never touch InfluxDB or the UI.
+absorbs short master outages. Slaves never touch ClickHouse or the UI.
 
 ## Development
 
@@ -315,7 +302,7 @@ absorbs short master outages. Slaves never touch InfluxDB or the UI.
 make dev               # go run with debug logging
 make ui-dev            # vite dev server on :5173 (proxies /api to :8080)
 make test              # unit tests
-make test-integration  # requires INFLUX_URL / INFLUX_TOKEN / INFLUX_ORG
+make test-integration  # requires CLICKHOUSE_ADDR / CLICKHOUSE_PASSWORD
 make lint              # go vet
 ```
 
@@ -336,7 +323,7 @@ internal/
   probe/            # ICMP/TCP/HTTP/DNS/MTR + shared TTL-walk trace
   scheduler/        # per-target probe scheduler + sink fanout
   stats/            # RTT aggregation (min/max/mean/median/p5–p95/stddev)
-  storage/          # InfluxDB v2 + v3 writers, readers, bootstrap
+  storage/          # ClickHouse writer, reader, bootstrap
   ui/               # embed.FS wrapper for the built SPA
 ui/                 # React + Vite + uPlot SPA source
 deploy/             # systemd unit + install script
@@ -354,9 +341,9 @@ smokeping2gosmokeping -in /etc/smokeping/config -out config.json
 # writes config.json and config.json.notes.txt
 ```
 
-Storage credentials are emitted as `${INFLUX_URL}` / `${INFLUX_TOKEN}` /
-`${INFLUX_ORG}` placeholders. Add `-strict` to exit 2 on any untranslatable
-construct, useful in CI-driven config generation.
+Storage credentials are emitted as `${CLICKHOUSE_ADDR}` / `${CLICKHOUSE_PASSWORD}`
+placeholders. Add `-strict` to exit 2 on any untranslatable construct, useful
+in CI-driven config generation.
 
 ## License
 

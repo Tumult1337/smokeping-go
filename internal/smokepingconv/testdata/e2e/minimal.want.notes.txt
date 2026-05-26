@@ -1,1 +1,1 @@
-warn general: storage.influxv2 is a placeholder — edit URL/token/org before running gosmokeping
+warn general: storage.clickhouse.addr is set to 127.0.0.1:9000 — edit to point at your ClickHouse instance before running gosmokeping

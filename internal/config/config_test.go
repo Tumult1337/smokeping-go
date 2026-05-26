@@ -12,13 +12,10 @@ const minimalConfig = `{
   "listen": ":8080",
   "interval": "30s",
   "pings": 10,
-  "influxdb": {
-    "url": "http://localhost:8086",
-    "token": "t",
-    "org": "o",
-    "bucket_raw": "raw",
-    "bucket_1h": "h",
-    "bucket_1d": "d"
+  "storage": {
+    "clickhouse": {
+      "addr": "ch:9000"
+    }
   },
   "probes": {
     "icmp": { "type": "icmp", "timeout": "2s" }
@@ -44,6 +41,12 @@ func writeTmp(t *testing.T, body string) string {
 	return p
 }
 
+// loadBytes is a test helper that loads a config from raw JSON bytes.
+func loadBytes(t *testing.T, b []byte) (*Config, error) {
+	t.Helper()
+	return Load(writeTmp(t, string(b)))
+}
+
 func TestLoadMinimal(t *testing.T) {
 	cfg, err := Load(writeTmp(t, minimalConfig))
 	if err != nil {
@@ -66,7 +69,7 @@ func TestLoadMinimal(t *testing.T) {
 
 func TestLoadDefaults(t *testing.T) {
 	body := `{
-      "influxdb": { "url": "http://x", "bucket_raw": "raw" },
+      "storage": {"clickhouse": {"addr": "ch:9000"}},
       "probes": { "icmp": { "type": "icmp" } },
       "targets": [{
         "group": "g", "targets": [{ "name": "t", "host": "h", "probe": "icmp" }]
@@ -90,60 +93,16 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadLegacyInfluxdbKey(t *testing.T) {
-	// Pre-Storage configs used a top-level "influxdb" block; existing
-	// installs must keep loading without an edit.
-	cfg, err := Load(writeTmp(t, minimalConfig))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Storage.Backend != BackendInfluxV2 {
-		t.Errorf("backend = %q, want %q", cfg.Storage.Backend, BackendInfluxV2)
-	}
-	got := cfg.Storage.InfluxV2
-	want := InfluxV2{URL: "http://localhost:8086", Token: "t", Org: "o",
-		BucketRaw: "raw", Bucket1h: "h", Bucket1d: "d"}
-	if got != want {
-		t.Errorf("legacy influxdb fold mismatch:\n got: %+v\nwant: %+v", got, want)
-	}
-}
-
-func TestLoadStorageNewShape(t *testing.T) {
-	body := `{
-      "listen": ":8080",
-      "interval": "30s",
-      "pings": 10,
-      "storage": {
-        "backend": "influxv2",
-        "influxv2": { "url": "http://x", "token": "tok", "org": "o",
-                      "bucket_raw": "raw", "bucket_1h": "h", "bucket_1d": "d" }
-      },
-      "probes": { "icmp": { "type": "icmp", "timeout": "2s" } },
-      "targets": [{
-        "group": "g", "targets": [{ "name": "t", "host": "h", "probe": "icmp" }]
-      }]
-    }`
-	cfg, err := Load(writeTmp(t, body))
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Storage.Backend != BackendInfluxV2 {
-		t.Errorf("backend = %q, want %q", cfg.Storage.Backend, BackendInfluxV2)
-	}
-	if cfg.Storage.InfluxV2.URL != "http://x" {
-		t.Errorf("url = %q", cfg.Storage.InfluxV2.URL)
-	}
-}
-
 func TestLoadEnvExpansion(t *testing.T) {
-	t.Setenv("INFLUX_TOKEN", "secret123")
-	body := strings.Replace(minimalConfig, `"token": "t"`, `"token": "${INFLUX_TOKEN}"`, 1)
+	t.Setenv("CH_PASSWORD", "secret123")
+	body := strings.Replace(minimalConfig, `"addr": "ch:9000"`,
+		`"addr": "ch:9000", "password": "${CH_PASSWORD}"`, 1)
 	cfg, err := Load(writeTmp(t, body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Storage.InfluxV2.Token != "secret123" {
-		t.Errorf("token = %q, want secret123", cfg.Storage.InfluxV2.Token)
+	if cfg.Storage.ClickHouse.Password != "secret123" {
+		t.Errorf("password = %q, want secret123", cfg.Storage.ClickHouse.Password)
 	}
 }
 
@@ -153,8 +112,6 @@ func TestValidateErrors(t *testing.T) {
 		mutate  func(*Config)
 		wantSub string
 	}{
-		{"missing influx url", func(c *Config) { c.Storage.InfluxV2.URL = "" }, "influxv2.url"},
-		{"missing raw bucket", func(c *Config) { c.Storage.InfluxV2.BucketRaw = "" }, "bucket_raw"},
 		{"unknown probe ref", func(c *Config) {
 			g := c.Targets[0]
 			g.Targets[0].Probe = "nope"
@@ -178,6 +135,14 @@ func TestValidateErrors(t *testing.T) {
 		}, `alert "missing" not defined`},
 		{"zero pings", func(c *Config) { c.Pings = 0 }, "pings must be positive"},
 		{"zero interval", func(c *Config) { c.Interval = 0 }, "interval must be positive"},
+		{"missing clickhouse addr", func(c *Config) { c.Storage.ClickHouse.Addr = "" },
+			"storage.clickhouse.addr is required"},
+		{"bad clickhouse database", func(c *Config) { c.Storage.ClickHouse.Database = "with-hyphen" },
+			"storage.clickhouse.database"},
+		{"bad clickhouse database injection", func(c *Config) { c.Storage.ClickHouse.Database = "x; DROP TABLE y" },
+			"storage.clickhouse.database"},
+		{"bad clickhouse cluster", func(c *Config) { c.Storage.ClickHouse.Cluster = "ch-prod-01" },
+			"storage.clickhouse.cluster"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -197,42 +162,68 @@ func TestValidateErrors(t *testing.T) {
 	}
 }
 
-func TestStorageHopPolicyValidate(t *testing.T) {
-	cases := []struct {
-		name    string
-		policy  HopPolicy
-		wantErr bool
-	}{
-		{"empty defaults ok", HopPolicy{}, false},
-		{"always ok", HopPolicy{Mode: "always"}, false},
-		{"on_loss ok", HopPolicy{Mode: "on_loss"}, false},
-		{"sampled requires sample_every", HopPolicy{Mode: "sampled"}, true},
-		{"sampled with duration ok", HopPolicy{Mode: "sampled", SampleEvery: "30m"}, false},
-		{"sampled with bad duration", HopPolicy{Mode: "sampled", SampleEvery: "garbage"}, true},
-		{"sampled with zero duration", HopPolicy{Mode: "sampled", SampleEvery: "0s"}, true},
-		{"unknown mode", HopPolicy{Mode: "wat"}, true},
-		// SampleEvery on a non-sampled mode is silently ignored, matching
-		// how InfluxV3.RetentionPeriod is ignored when the backend is v2.
-		{"always with sample_every ignored", HopPolicy{Mode: "always", SampleEvery: "30m"}, false},
+func TestStorageClickHouseDefaults(t *testing.T) {
+	raw := []byte(`{
+		"targets": [{"group":"g","targets":[{"name":"t","host":"1.1.1.1","probe":"icmp"}]}],
+		"probes": {"icmp": {"type": "icmp"}},
+		"storage": {"clickhouse": {"addr": "ch:9000"}}
+	}`)
+	cfg, err := loadBytes(t, raw)
+	if err != nil {
+		t.Fatalf("load: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.policy.Validate()
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Validate(%+v): err=%v, wantErr=%v", tc.policy, err, tc.wantErr)
-			}
-		})
+	ch := cfg.Storage.ClickHouse
+	if ch.Database != "gosmokeping" {
+		t.Errorf("database default: got %q", ch.Database)
+	}
+	if ch.Username != "default" {
+		t.Errorf("username default: got %q", ch.Username)
+	}
+	if ch.Retention.CycleDays != 365 {
+		t.Errorf("cycle_days default: got %d", ch.Retention.CycleDays)
+	}
+	if ch.Retention.RTTDays != 14 {
+		t.Errorf("rtt_days default: got %d", ch.Retention.RTTDays)
+	}
+	if ch.Retention.HopDays != 90 {
+		t.Errorf("hop_days default: got %d", ch.Retention.HopDays)
+	}
+	if ch.Retention.HTTPDays != 14 {
+		t.Errorf("http_days default: got %d", ch.Retention.HTTPDays)
+	}
+	if ch.Batch.MaxRows != 1000 {
+		t.Errorf("batch.max_rows default: got %d", ch.Batch.MaxRows)
+	}
+	if ch.Batch.MaxInterval != "1s" {
+		t.Errorf("batch.max_interval default: got %q", ch.Batch.MaxInterval)
 	}
 }
 
-func TestStorageHopPolicyParsedDuration(t *testing.T) {
-	hp := HopPolicy{Mode: "sampled", SampleEvery: "45m"}
-	d, err := hp.ParsedSampleEvery()
-	if err != nil {
-		t.Fatalf("ParsedSampleEvery: %v", err)
+func TestStorageClickHouseAddrRequired(t *testing.T) {
+	raw := []byte(`{
+		"targets": [{"group":"g","targets":[{"name":"t","host":"1.1.1.1","probe":"icmp"}]}],
+		"probes": {"icmp": {"type": "icmp"}},
+		"storage": {"clickhouse": {}}
+	}`)
+	if _, err := loadBytes(t, raw); err == nil {
+		t.Fatal("expected error for missing addr")
 	}
-	if d != 45*time.Minute {
-		t.Fatalf("got %s want 45m", d)
+}
+
+func TestStorageClickHouseBadInterval(t *testing.T) {
+	raw := []byte(`{
+		"targets": [{"group":"g","targets":[{"name":"t","host":"1.1.1.1","probe":"icmp"}]}],
+		"probes": {"icmp": {"type": "icmp"}},
+		"storage": {"clickhouse": {"addr":"ch:9000","batch":{"max_interval":"nonsense"}}}
+	}`)
+	if _, err := loadBytes(t, raw); err == nil {
+		t.Fatal("expected error for bad max_interval")
+	}
+}
+
+func TestExampleConfigLoads(t *testing.T) {
+	if _, err := Load("../../config.example.json"); err != nil {
+		t.Fatalf("example config: %v", err)
 	}
 }
 

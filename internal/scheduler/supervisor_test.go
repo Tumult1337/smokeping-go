@@ -124,6 +124,7 @@ func writeConfig(t *testing.T, path string, targets []config.Target) {
 		"listen":   "127.0.0.1:0",
 		"interval": "30ms",
 		"pings":    1,
+		"storage":  map[string]any{"clickhouse": map[string]any{"addr": "ch:9000"}},
 		"probes": map[string]any{
 			"fake": map[string]any{"type": "icmp", "timeout": "1s"},
 		},
