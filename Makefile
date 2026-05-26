@@ -1,4 +1,4 @@
-.PHONY: build test ui ui-dev dev clean tidy lint smokeping2gosmokeping build-all
+.PHONY: build test ui ui-dev dev clean tidy lint smokeping2gosmokeping build-all deploy
 
 GO         ?= go
 BIN        ?= gosmokeping
@@ -54,3 +54,19 @@ smokeping2gosmokeping:
 	$(GO) build -ldflags="$(LDFLAGS)" -o smokeping2gosmokeping ./cmd/smokeping2gosmokeping
 
 build-all: build smokeping2gosmokeping
+
+# Rebuild the container image from the current working tree and roll the
+# service. Intended for the host that already has ClickHouse running
+# natively; see docker-compose.yml for the one-time setup checklist.
+# Typical usage on the deploy VM:
+#     git pull && make deploy
+deploy:
+	@if [ ! -f config.json ]; then \
+		echo "config.json not found — copy config.example.json and edit it first"; exit 1; \
+	fi
+	@if [ ! -f .env ]; then \
+		echo ".env not found — copy .env.example and fill in CH_PASSWORD + CLUSTER_TOKEN"; exit 1; \
+	fi
+	docker compose build
+	docker compose up -d
+	docker compose ps
