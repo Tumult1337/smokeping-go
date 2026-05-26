@@ -53,10 +53,29 @@ func testDSN(t *testing.T) (config.ClickHouse, func()) {
 			return
 		}
 		defer conn.Close()
-		if err := conn.Exec(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS %s", db)); err != nil {
+		drop := fmt.Sprintf("DROP DATABASE IF EXISTS %s", db)
+		if cfg.Cluster != "" {
+			drop = fmt.Sprintf("DROP DATABASE IF EXISTS %s ON CLUSTER %s SYNC", db, cfg.Cluster)
+		}
+		if err := conn.Exec(context.Background(), drop); err != nil {
 			t.Logf("cleanup drop: %v", err)
 		}
 	}
+	return cfg, cleanup
+}
+
+// testDSNCluster mirrors testDSN but pins cfg.Cluster from the
+// CLICKHOUSE_CLUSTER env var, skipping when it's unset. Lets a single
+// invocation of the integration suite cover both single-node MergeTree
+// and ReplicatedMergeTree code paths without duplicating the schema.
+func testDSNCluster(t *testing.T) (config.ClickHouse, func()) {
+	t.Helper()
+	cluster := os.Getenv("CLICKHOUSE_CLUSTER")
+	if cluster == "" {
+		t.Skip("CLICKHOUSE_CLUSTER not set")
+	}
+	cfg, cleanup := testDSN(t)
+	cfg.Cluster = cluster
 	return cfg, cleanup
 }
 
@@ -465,6 +484,70 @@ func TestReaderQueryHopsTimelineRawAndBucketed(t *testing.T) {
 	}
 	if ttl2 != 2 {
 		t.Fatalf("expected 2 rows for ttl=2 (path flap), got %d (full: %+v)", ttl2, pts)
+	}
+}
+
+// TestBootstrapClusterMode runs the full bootstrap path with
+// ON CLUSTER injected, verifying:
+//   - CREATE DATABASE … ON CLUSTER lands the DB everywhere (not just on
+//     the connection node, which was the bug previously masked by
+//     single-node testing).
+//   - CREATE TABLE … ON CLUSTER … ReplicatedMergeTree succeeds (engine
+//     substitution + {shard}/{replica} macro resolution).
+//   - ALTER TABLE … ON CLUSTER MODIFY TTL succeeds against the just-
+//     created replicated tables.
+//   - The engine reported by system.tables is ReplicatedMergeTree, not
+//     MergeTree.
+//
+// Skipped unless CLICKHOUSE_CLUSTER is set; a single-node CH that still
+// has the implicit `default` cluster can run this with CLICKHOUSE_CLUSTER=default
+// to exercise the DDL syntax (no real replication, but full DDL coverage).
+//
+// Limitation: the assertions below only query system.tables on the
+// connection node. Against a true multi-replica cluster, this catches
+// the DDL succeeding at-large but not "node A succeeded, node B failed
+// silently" — the Go client surfaces per-replica errors from ON CLUSTER
+// statements as a non-nil Exec error, so the Bootstrap call itself is
+// the real assertion; the post-check is a smoke test.
+func TestBootstrapClusterMode(t *testing.T) {
+	cfg, cleanup := testDSNCluster(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap (cluster=%q): %v", cfg.Cluster, err)
+	}
+
+	// Idempotency under cluster mode — second Bootstrap re-issues all the
+	// ON CLUSTER DDLs and must still succeed.
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("re-bootstrap (cluster=%q): %v", cfg.Cluster, err)
+	}
+
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{cfg.Addr},
+		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // test cleanup
+
+	for _, tbl := range []string{"probe_cycle", "probe_rtt", "probe_hop", "probe_http"} {
+		var engine string
+		err := conn.QueryRow(ctx,
+			"SELECT engine FROM system.tables WHERE database = ? AND name = ?",
+			cfg.Database, tbl,
+		).Scan(&engine)
+		if err != nil {
+			t.Errorf("query engine for %s: %v", tbl, err)
+			continue
+		}
+		if engine != "ReplicatedMergeTree" {
+			t.Errorf("table %s: engine = %q, want ReplicatedMergeTree", tbl, engine)
+		}
 	}
 }
 

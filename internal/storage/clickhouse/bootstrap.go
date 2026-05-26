@@ -25,7 +25,14 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 	}
 	defer root.Close() //nolint:errcheck // connection teardown; error not actionable
 
-	if err := root.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.Database)); err != nil {
+	createDB := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.Database)
+	if cfg.Cluster != "" {
+		// In cluster mode every replica needs the database before the
+		// subsequent CREATE TABLE … ON CLUSTER fans out via the DDL queue,
+		// otherwise replicas without the DB fail their leg of the DDL.
+		createDB = fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s ON CLUSTER %s", cfg.Database, cfg.Cluster)
+	}
+	if err := root.Exec(ctx, createDB); err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
 	log.Info("clickhouse.bootstrap", "database", cfg.Database, "cluster", cfg.Cluster)
