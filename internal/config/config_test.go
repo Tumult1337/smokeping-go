@@ -137,6 +137,12 @@ func TestValidateErrors(t *testing.T) {
 		{"zero interval", func(c *Config) { c.Interval = 0 }, "interval must be positive"},
 		{"missing clickhouse addr", func(c *Config) { c.Storage.ClickHouse.Addr = "" },
 			"storage.clickhouse.addr is required"},
+		{"bad clickhouse database", func(c *Config) { c.Storage.ClickHouse.Database = "with-hyphen" },
+			"storage.clickhouse.database"},
+		{"bad clickhouse database injection", func(c *Config) { c.Storage.ClickHouse.Database = "x; DROP TABLE y" },
+			"storage.clickhouse.database"},
+		{"bad clickhouse cluster", func(c *Config) { c.Storage.ClickHouse.Cluster = "ch-prod-01" },
+			"storage.clickhouse.cluster"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

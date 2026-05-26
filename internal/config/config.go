@@ -156,6 +156,14 @@ type rawProbe struct {
 
 var envVar = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
 
+// chIdent matches a ClickHouse identifier safe to interpolate raw into
+// DDL (no backtick-quoting needed). Database name and cluster name are
+// both interpolated this way in internal/storage/clickhouse/{schema,bootstrap}.go.
+// Restricting to this character set means a typo with a hyphen, dot, or
+// SQL-syntax payload fails fast at config-load instead of producing a
+// confusing CH syntax error mid-bootstrap.
+var chIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 func Load(path string) (*Config, error) {
 	cfg, err := loadUnvalidated(path)
 	if err != nil {
@@ -284,6 +292,12 @@ func (c *Config) Validate() error {
 	}
 	if ch.Database == "" {
 		ch.Database = "gosmokeping"
+	}
+	if !chIdent.MatchString(ch.Database) {
+		return fmt.Errorf("storage.clickhouse.database %q: must match %s", ch.Database, chIdent.String())
+	}
+	if ch.Cluster != "" && !chIdent.MatchString(ch.Cluster) {
+		return fmt.Errorf("storage.clickhouse.cluster %q: must match %s", ch.Cluster, chIdent.String())
 	}
 	if ch.Username == "" {
 		ch.Username = "default"
