@@ -409,3 +409,61 @@ func TestReaderQueryLatestHops(t *testing.T) {
 		}
 	}
 }
+
+func TestReaderQueryHopsTimelineRawAndBucketed(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+
+	start := time.Now().UTC().Truncate(time.Hour).Add(-26 * time.Hour) // forces bucketed tier
+	// Two cycles, second one's hop 2 addr flips (path flap).
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time:   start,
+		Target: config.TargetRef{Target: config.Target{Name: "tht"}, Group: "g"},
+		Source: "master",
+		Sent:   3,
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{1 * time.Millisecond}},
+			{Index: 2, IP: "10.0.0.2", Sent: 3, Lost: 0, RTTs: []time.Duration{2 * time.Millisecond}},
+		},
+	})
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time:   start.Add(5 * time.Minute),
+		Target: config.TargetRef{Target: config.Target{Name: "tht"}, Group: "g"},
+		Source: "master",
+		Sent:   3,
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{1 * time.Millisecond}},
+			{Index: 2, IP: "10.0.0.99", Sent: 3, Lost: 1, RTTs: []time.Duration{4 * time.Millisecond}}, // flipped
+		},
+	})
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close()
+
+	// Bucketed query (span > 24h triggers 15m tier).
+	pts, err := r.QueryHopsTimeline(ctx,
+		config.TargetRef{Target: config.Target{Name: "tht"}, Group: "g"},
+		start.Add(-time.Hour), start.Add(48*time.Hour),
+		storage.QueryFilter{Step: 15 * time.Minute},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// Same bucket (within 15m): ttl=1 collapses to 1 row (stable addr).
+	// ttl=2 has two distinct addrs in the same bucket: expect 2 rows.
+	var ttl2 int
+	for _, p := range pts {
+		if p.Index == 2 {
+			ttl2++
+		}
+	}
+	if ttl2 != 2 {
+		t.Fatalf("expected 2 rows for ttl=2 (path flap), got %d (full: %+v)", ttl2, pts)
+	}
+}

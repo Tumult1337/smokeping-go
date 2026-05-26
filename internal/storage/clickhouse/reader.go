@@ -334,7 +334,66 @@ func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 	return out, rows.Err()
 }
 
-// QueryHopsTimeline is implemented in Task 15.
 func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
-	return nil, fmt.Errorf("not implemented")
+	step := f.Step
+	if step == 0 {
+		return r.queryHopsRaw(ctx, ref, from, to, f.Source)
+	}
+	return r.queryHopsBucketed(ctx, ref, from, to, f.Source, step)
+}
+
+func (r *Reader) queryHopsRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {
+	const q = `
+SELECT timestamp, source, ttl, hop_addr,
+       rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
+       loss_pct, lost, sent
+FROM probe_hop
+WHERE target_id = ?
+  AND timestamp >= ? AND timestamp < ?
+  AND (? = '' OR source = ?)
+ORDER BY timestamp, ttl`
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, source, source)
+	if err != nil {
+		return nil, fmt.Errorf("query hops raw: %w", err)
+	}
+	defer rows.Close()
+	return scanHopRows(rows)
+}
+
+func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
+	q := fmt.Sprintf(`
+SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
+       any(source)                                       AS src,
+       ttl,
+       hop_addr,
+       sum(sent)                                         AS total_sent,
+       sum(lost)                                         AS total_lost,
+       100.0 * sum(lost) / nullIf(sum(sent), 0)          AS loss_pct
+FROM probe_hop
+WHERE target_id = ?
+  AND timestamp >= ? AND timestamp < ?
+  AND (? = '' OR source = ?)
+GROUP BY bucket_ts, ttl, hop_addr
+ORDER BY bucket_ts, ttl`, int(step.Seconds()))
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, from, to, source, source)
+	if err != nil {
+		return nil, fmt.Errorf("query hops bucketed: %w", err)
+	}
+	defer rows.Close()
+	var out []storage.HopPoint
+	for rows.Next() {
+		var p storage.HopPoint
+		var ttl uint8
+		var sent, lost uint64
+		var lossPct float64
+		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &sent, &lost, &lossPct); err != nil {
+			return nil, err
+		}
+		p.Index = int64(ttl)
+		p.Sent = int64(sent)
+		p.LossCount = int64(lost)
+		p.LossPct = lossPct
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
