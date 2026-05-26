@@ -49,6 +49,11 @@ const dropLogEvery = 10000
 // NewWriter opens a connection and starts one consumer goroutine per
 // table. Returns an error if the initial Ping fails.
 func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) (*Writer, error) {
+	// Pool must be at least numTables so all four flushers can run
+	// concurrently on the ticker without queueing on the connection
+	// pool. On larger hosts GOMAXPROCS wins; on 1-2 vCPU containers
+	// numTables (4) wins.
+	maxConns := max(runtime.GOMAXPROCS(0), numTables)
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{cfg.Addr},
 		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
@@ -57,7 +62,7 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) (*W
 			"async_insert":          0,
 			"wait_for_async_insert": 0,
 		},
-		MaxOpenConns:    runtime.GOMAXPROCS(0),
+		MaxOpenConns:    maxConns,
 		BlockBufferSize: 10,
 		Compression: &clickhouse.Compression{
 			Method: clickhouse.CompressionLZ4,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -19,10 +20,16 @@ type Reader struct {
 
 // NewReader opens a connection. Caller must Close.
 func NewReader(ctx context.Context, cfg config.ClickHouse) (*Reader, error) {
+	// The UI fires concurrent requests (cycles + rtts + hops for the
+	// active target plus latest-hops for the sidebar). Size the pool
+	// for at least 2x GOMAXPROCS, floored at 8 so 1-2 vCPU containers
+	// can still serve a burst.
+	maxConns := max(2*runtime.GOMAXPROCS(0), 8)
 	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{cfg.Addr},
-		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
-		TLS:  tlsForReader(cfg.TLS),
+		Addr:         []string{cfg.Addr},
+		Auth:         clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
+		TLS:          tlsForReader(cfg.TLS),
+		MaxOpenConns: maxConns,
 	})
 	if err != nil {
 		return nil, err
