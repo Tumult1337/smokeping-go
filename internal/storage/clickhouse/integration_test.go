@@ -429,6 +429,70 @@ func TestReaderQueryLatestHops(t *testing.T) {
 	}
 }
 
+// TestReaderQueryLatestHopsPerSource asserts the all-source path returns
+// one cycle per source — not the single global most-recent cycle. The
+// previous implementation used max(timestamp) without GROUP BY source,
+// so whichever source flushed most recently won and every other source
+// disappeared from the all-view.
+func TestReaderQueryLatestHopsPerSource(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg)
+	base := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Minute)
+	// Two sources, each with multiple cycles. Source "slave-eu" gets its
+	// most-recent cycle written *after* "master"'s most-recent — the bug
+	// shape was "global max wins" so without per-source grouping master
+	// would disappear from the response.
+	for _, src := range []string{"master", "slave-eu"} {
+		offset := time.Duration(0)
+		if src == "slave-eu" {
+			offset = 5 * time.Second
+		}
+		for i := 0; i < 3; i++ {
+			w.OnCycle(ctx, scheduler.Cycle{
+				Time:   base.Add(time.Duration(i)*time.Minute + offset),
+				Target: config.TargetRef{Target: config.Target{Name: "tlhp"}, Group: "g"},
+				Source: src,
+				Sent:   3,
+				Hops: []probe.Hop{
+					{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{1 * time.Millisecond}},
+					{Index: 2, IP: "10.0.0.2", Sent: 3, Lost: 0, RTTs: []time.Duration{2 * time.Millisecond}},
+				},
+			})
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("writer close: %v", err)
+	}
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+	pts, err := r.QueryLatestHops(ctx,
+		config.TargetRef{Target: config.Target{Name: "tlhp"}, Group: "g"},
+		storage.QueryFilter{}, // unfiltered: expect both sources
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 4 {
+		t.Fatalf("expected 4 rows (2 sources × 2 ttls), got %d: %+v", len(pts), pts)
+	}
+	bySource := map[string]int{}
+	for _, p := range pts {
+		bySource[p.Source]++
+	}
+	for _, want := range []string{"master", "slave-eu"} {
+		if bySource[want] != 2 {
+			t.Errorf("source %q: expected 2 hop rows, got %d", want, bySource[want])
+		}
+	}
+}
+
 // TestReaderQueryHopsAtSingleCycle writes three cycles inside the query
 // window and asserts QueryHopsAt returns exactly the hops from the cycle
 // nearest `at`, not a windowed mix. Regression for the bug where the

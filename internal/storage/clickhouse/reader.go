@@ -277,20 +277,27 @@ ORDER BY timestamp, seq`
 
 func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	srcClause, srcArgs := sourceFilter(f.Source)
+	// Latest cycle PER SOURCE, not a single global max(timestamp). Without
+	// GROUP BY source, the CTE returns whichever source happened to flush
+	// most recently and every other source's path disappears from the
+	// all-view — the UI then renders one randomly-chosen source's latest
+	// cycle. With the per-source group the response carries one cycle per
+	// origin, matching what QueryHopsAt does for the historical-pin path.
 	q := `
 WITH latest AS (
-  SELECT max(timestamp) AS ts
+  SELECT source, max(timestamp) AS ts
   FROM probe_hop
   WHERE target_id = ?` + srcClause + `
+  GROUP BY source
 )
 SELECT timestamp, source, ttl, hop_addr,
        rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
        loss_pct, lost, sent
 FROM probe_hop
 WHERE target_id = ?` + srcClause + `
-  AND timestamp = (SELECT ts FROM latest)
-ORDER BY ttl`
-	// args layout: CTE filter (target + opt source), outer filter (target + opt source)
+  AND (source, timestamp) IN (SELECT source, ts FROM latest)
+ORDER BY source, ttl`
+	// args layout: CTE filter (target + opt source), outer filter (target + opt source).
 	args := []any{ref.Target.Name}
 	args = append(args, srcArgs...)
 	args = append(args, ref.Target.Name)
