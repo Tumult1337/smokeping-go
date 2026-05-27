@@ -18,13 +18,19 @@
 #   git pull && make deploy-slave
 #
 # First-time setup checklist:
-#   1. Copy config.slave.example.json -> config.slave.json and fill in
-#      master_url, token (must match the master's CLUSTER_TOKEN), and
-#      a unique name (this is how the master and the UI label this
-#      vantage point — pick something stable like "frankfurt-1").
-#   2. Make sure the slave can reach the master's UI/API URL (DNS,
+#   1. Copy .env.example -> .env and set CLUSTER_TOKEN (must match the
+#      master's). The binary auto-loads .env from the directory holding
+#      --config, which inside the container is /opt/smokeping/, so the
+#      mount below has to be present for ${CLUSTER_TOKEN} in config to
+#      get substituted. Without it the literal string "${CLUSTER_TOKEN}"
+#      ships as the bearer and /register returns 401.
+#   2. Copy config.slave.example.json -> config.slave.json and fill in
+#      master_url, name (this is how the master and the UI label this
+#      vantage point — pick something stable like "frankfurt-1"). Keep
+#      "token": "${CLUSTER_TOKEN}" untouched; .env does the interpolation.
+#   3. Make sure the slave can reach the master's UI/API URL (DNS,
 #      firewall, TLS cert if you're behind a proxy that terminates).
-#   3. make deploy-slave
+#   4. make deploy-slave
 
 services:
   gosmokeping-slave:
@@ -41,6 +47,10 @@ services:
     command: ["--slave", "-config", "/opt/smokeping/config.json"]
     volumes:
       - ./config.slave.json:/opt/smokeping/config.json:ro
+      # Required for ${CLUSTER_TOKEN} (and any other ${VAR}) inside
+      # config.slave.json to resolve — the binary reads .env from the
+      # directory of --config before applying env-var expansion.
+      - ./.env:/opt/smokeping/.env:ro
     # If ICMP probes start failing with "operation not permitted"
     # (some kernels strip file caps from bind-mounted layers):
     # cap_add:

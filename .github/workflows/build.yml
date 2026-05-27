@@ -57,16 +57,28 @@ jobs:
           name: smokeping2gosmokeping-linux-amd64
           path: build/smokeping2gosmokeping-linux-amd64
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            ./build/gosmokeping-linux-amd64 \
-            ./build/smokeping2gosmokeping-linux-amd64
+          # If the release was pre-created manually (e.g. with hand-written
+          # notes), `gh release create` errors with "release already exists".
+          # Detect that and fall back to uploading assets to the existing
+          # release — operator-curated notes win over auto-generated ones.
+          # GITHUB_REF_NAME is a runner-provided env var, constrained by
+          # the `tags: ["v*"]` trigger above; not user input.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" --clobber \
+              ./build/gosmokeping-linux-amd64 \
+              ./build/smokeping2gosmokeping-linux-amd64
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              ./build/gosmokeping-linux-amd64 \
+              ./build/smokeping2gosmokeping-linux-amd64
+          fi
 
   docker:
     runs-on: ubuntu-latest

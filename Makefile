@@ -78,7 +78,10 @@ deploy:
 #     git pull && make deploy-slave
 deploy-slave:
 	@if [ ! -f config.slave.json ]; then \
-		echo "config.slave.json not found — copy config.slave.example.json and fill in master_url, token, name"; exit 1; \
+		echo "config.slave.json not found — copy config.slave.example.json and fill in master_url + name"; exit 1; \
+	fi
+	@if [ ! -f .env ]; then \
+		echo ".env not found — copy .env.example and set CLUSTER_TOKEN (\$${CLUSTER_TOKEN} in config.slave.json gets substituted from here)"; exit 1; \
 	fi
 	docker compose -f docker-compose.slave.yml build
 	docker compose -f docker-compose.slave.yml up -d
