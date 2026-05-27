@@ -1,4 +1,4 @@
-.PHONY: build test ui ui-dev dev clean tidy lint smokeping2gosmokeping build-all deploy
+.PHONY: build test ui ui-dev dev clean tidy lint smokeping2gosmokeping build-all deploy deploy-slave
 
 GO         ?= go
 BIN        ?= gosmokeping
@@ -70,3 +70,16 @@ deploy:
 	docker compose build
 	docker compose up -d
 	docker compose ps
+
+# Rebuild the slave container from the current working tree and roll it.
+# Slaves never touch ClickHouse, so the only prerequisite is a populated
+# config.slave.json pointing at the master. Typical usage on a remote
+# vantage point host:
+#     git pull && make deploy-slave
+deploy-slave:
+	@if [ ! -f config.slave.json ]; then \
+		echo "config.slave.json not found — copy config.slave.example.json and fill in master_url, token, name"; exit 1; \
+	fi
+	docker compose -f docker-compose.slave.yml build
+	docker compose -f docker-compose.slave.yml up -d
+	docker compose -f docker-compose.slave.yml ps

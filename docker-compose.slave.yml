@@ -1,0 +1,47 @@
+# gosmokeping slave compose for a remote vantage point. Mirrors
+# docker-compose.yml (the master) but:
+#
+#   - No ClickHouse — slaves never persist; they push cycles back to
+#     the master over HTTP(S) under cluster.token auth.
+#   - Different command: `--slave -config /opt/smokeping/config.json`
+#     flips the binary into slave mode.
+#   - Different volume: mounts config.slave.json instead of config.json.
+#   - No port mapping — slaves only make outbound requests to the
+#     master, they don't serve the UI or API.
+#
+# Host networking again, for the same reasons as the master:
+#   - ICMP probes see the host's real interfaces (no NAT).
+#   - File capabilities on the binary (cap_net_raw+ep set by Dockerfile)
+#     survive across the namespace boundary.
+#
+# Workflow on the slave host:
+#   git pull && make deploy-slave
+#
+# First-time setup checklist:
+#   1. Copy config.slave.example.json -> config.slave.json and fill in
+#      master_url, token (must match the master's CLUSTER_TOKEN), and
+#      a unique name (this is how the master and the UI label this
+#      vantage point — pick something stable like "frankfurt-1").
+#   2. Make sure the slave can reach the master's UI/API URL (DNS,
+#      firewall, TLS cert if you're behind a proxy that terminates).
+#   3. make deploy-slave
+
+services:
+  gosmokeping-slave:
+    # Builds the image from the local source tree. To pin the prebuilt
+    # image published by CI instead, comment out `build:` and use:
+    #   image: ghcr.io/tumult1337/gosmokeping:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gosmokeping:latest
+    container_name: gosmokeping-slave
+    restart: unless-stopped
+    network_mode: host
+    command: ["--slave", "-config", "/opt/smokeping/config.json"]
+    volumes:
+      - ./config.slave.json:/opt/smokeping/config.json:ro
+    # If ICMP probes start failing with "operation not permitted"
+    # (some kernels strip file caps from bind-mounted layers):
+    # cap_add:
+    #   - NET_RAW
