@@ -3,8 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
+	"sort"
 	"time"
 )
 
@@ -196,6 +198,17 @@ func loadUnvalidated(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	data = expandEnv(data)
+	// Any `${VAR}` placeholders left after expansion are placeholders whose
+	// env vars weren't set in either .env or the shell — the JSON will
+	// ship the literal "${VAR}" string into fields like cluster.token,
+	// where the master will reject it as a bad bearer and the slave will
+	// 401-loop forever. Surface the names at startup so the operator can
+	// fix .env without guessing at the symptom.
+	if missing := unresolvedVars(data); len(missing) > 0 {
+		slog.Warn("config: unresolved ${...} placeholders — env vars not set",
+			"vars", missing,
+			"hint", "set them in .env (next to your config file) or in the shell before starting")
+	}
 
 	var raw rawConfig
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -258,6 +271,26 @@ func expandEnv(data []byte) []byte {
 		}
 		return match
 	})
+}
+
+// unresolvedVars returns the sorted unique names of `${VAR}` placeholders
+// that survived expandEnv — i.e. env vars referenced by the config but
+// not actually set when the binary started.
+func unresolvedVars(data []byte) []string {
+	matches := envVar.FindAllSubmatch(data, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	for _, m := range matches {
+		seen[string(m[1])] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ValidateMinimal is a relaxed Validate used for a slave's local config. A
