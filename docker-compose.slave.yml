@@ -18,12 +18,11 @@
 #   git pull && make deploy-slave
 #
 # First-time setup checklist:
-#   1. Copy .env.example -> .env and set CLUSTER_TOKEN (must match the
-#      master's). The binary auto-loads .env from the directory holding
-#      --config, which inside the container is /opt/smokeping/, so the
-#      mount below has to be present for ${CLUSTER_TOKEN} in config to
-#      get substituted. Without it the literal string "${CLUSTER_TOKEN}"
-#      ships as the bearer and /register returns 401.
+#   1. Copy .env.example -> .env and set CLUSTER_TOKEN to the value of
+#      the master's CLUSTER_TOKEN (byte-identical). Docker compose
+#      reads this file via the env_file: directive below and passes
+#      the variables into the container as real env vars; the binary
+#      then substitutes ${CLUSTER_TOKEN} in config.slave.json.
 #   2. Copy config.slave.example.json -> config.slave.json and fill in
 #      master_url, name (this is how the master and the UI label this
 #      vantage point — pick something stable like "frankfurt-1"). Keep
@@ -45,12 +44,18 @@ services:
     restart: unless-stopped
     network_mode: host
     command: ["--slave", "-config", "/opt/smokeping/config.json"]
+    # env_file passes every KEY=VALUE from .env into the container as a
+    # real environment variable. The binary's expandEnv() then picks
+    # them up via os.LookupEnv when substituting ${VAR} placeholders in
+    # config.slave.json. Used instead of bind-mounting .env because the
+    # single-file mount has too many failure modes — if .env didn't
+    # exist when Docker first created the container it creates an empty
+    # directory at the mount path, host UID/perm mismatch against the
+    # container's gosmokeping user can hide the file, etc.
+    env_file:
+      - .env
     volumes:
       - ./config.slave.json:/opt/smokeping/config.json:ro
-      # Required for ${CLUSTER_TOKEN} (and any other ${VAR}) inside
-      # config.slave.json to resolve — the binary reads .env from the
-      # directory of --config before applying env-var expansion.
-      - ./.env:/opt/smokeping/.env:ro
     # If ICMP probes start failing with "operation not permitted"
     # (some kernels strip file caps from bind-mounted layers):
     # cap_add:

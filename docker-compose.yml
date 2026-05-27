@@ -38,9 +38,19 @@ services:
     # mapping is implicit — the binary's `listen: ":8080"` binds on the
     # host directly.
     network_mode: host
+    # env_file passes every KEY=VALUE from .env into the container as a
+    # real environment variable. The binary's expandEnv() then picks
+    # them up via os.LookupEnv when substituting ${CH_PASSWORD},
+    # ${DISCORD_WEBHOOK_URL}, etc. in config.json. Used instead of
+    # bind-mounting .env because the single-file mount has too many
+    # failure modes — if .env didn't exist when Docker first created
+    # the container it creates an empty directory at the mount path,
+    # host UID/perm mismatch against the container's gosmokeping user
+    # can hide the file, etc.
+    env_file:
+      - .env
     volumes:
       - ./config.json:/opt/smokeping/config.json:ro
-      - ./.env:/opt/smokeping/.env:ro
     # The image already grants cap_net_raw+ep on the binary via setcap
     # in the Dockerfile. Some kernels strip file caps from bind-mounted
     # layers; uncomment if ICMP probes start failing with "operation
