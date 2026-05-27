@@ -256,10 +256,14 @@ function MultiSourceLayout({
       <div className="mtr-sections">
         {groups.map((g) => {
           const isCollapsed = collapsed.has(g.source);
-          const worstLoss = g.hops.reduce(
-            (m, h) => (h.LossPct > m ? h.LossPct : m),
-            0,
+          // End-to-end loss = deepest TTL row's loss. Matches the cycle
+          // metric in mtr.go (last reached hop) and ignores intermediate
+          // routers that rate-limit TTL-expired ICMP.
+          const lastHop = g.hops.reduce(
+            (m, h) => (h.Index > m.Index ? h : m),
+            g.hops[0],
           );
+          const endToEndLoss = lastHop?.LossPct ?? 0;
           const scale = Math.max(1, ...g.hops.map((h) => h.Max));
           return (
             <div key={g.source || "(unspecified)"} className="mtr-section">
@@ -280,9 +284,9 @@ function MultiSourceLayout({
                   {countDistinct(g.hops) === 1 ? "" : "s"}
                   <span
                     className="mtr-section-worst"
-                    style={{ color: lossColor(worstLoss, "#4a5160") }}
+                    style={{ color: lossColor(endToEndLoss, "#4a5160") }}
                   >
-                    max {worstLoss.toFixed(1)}%
+                    loss {endToEndLoss.toFixed(1)}%
                   </span>
                 </span>
               </button>
