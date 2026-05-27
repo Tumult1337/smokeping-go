@@ -119,7 +119,7 @@ function groupBySource(hops: HopPoint[]): HopsGroup[] {
   return order.map((s) => byKey.get(s)!);
 }
 
-function HopsPath({
+export function HopsPath({
   source,
   time,
   rows,

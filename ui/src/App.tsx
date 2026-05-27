@@ -9,8 +9,7 @@ import {
 import { SmokeChart } from "./SmokeChart";
 import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
-import { HopsTable } from "./HopsTable";
-import { MtrHeatmap } from "./MtrHeatmap";
+import { MtrSection } from "./MtrSection";
 import { paletteForSorted, lossColor } from "./palette";
 
 type Range = "-1h" | "-6h" | "-24h" | "-7d" | "-30d" | "-180d" | "-365d";
@@ -652,39 +651,20 @@ export default function App() {
               </div>
             )}
             {(selected.probe_type === "mtr" || selected.probe_type === "icmp") && (
-              <>
-                <div className="chart-wrap">
-                  <div className="chart-title">
-                    Path {pickedSec != null ? "— historical MTR" : "(latest MTR)"}
-                  </div>
-                  <HopsTable
-                    targetId={selected.id}
-                    refreshTick={refreshTick}
-                    atSec={pickedSec ?? undefined}
-                    onResetAt={() => {
-                      setPickedSec(null);
-                      setPickedSource(null);
-                    }}
-                    source={pickedSource ?? sourceParam}
-                    hideZeroLoss={false}
-                  />
-                </div>
-                {fromSec != null && toSec != null && (
-                  <div className="chart-wrap">
-                    <div className="chart-title">MTR history — per-hop loss</div>
-                    <MtrHeatmap
-                      targetId={selected.id}
-                      refreshTick={refreshTick}
-                      fromSec={fromSec}
-                      toSec={toSec}
-                      onCyclePick={handleCyclePick}
-                      selectedSec={pickedSec ?? undefined}
-                      source={sourceParam}
-                      hideZeroLoss={hideZeroLossHops}
-                    />
-                  </div>
-                )}
-              </>
+              <MtrSection
+                targetId={selected.id}
+                refreshTick={refreshTick}
+                fromSec={fromSec ?? null}
+                toSec={toSec ?? null}
+                atSec={pickedSec}
+                onResetAt={() => {
+                  setPickedSec(null);
+                  setPickedSource(null);
+                }}
+                onCyclePick={handleCyclePick}
+                sourceParam={pickedSource ?? sourceParam ?? null}
+                hideZeroLossHeatmap={hideZeroLossHops}
+              />
             )}
           </>
         )}
