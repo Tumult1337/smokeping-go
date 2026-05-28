@@ -694,6 +694,106 @@ func TestReaderQueryHopsTimelineRawAndBucketed(t *testing.T) {
 	}
 }
 
+// TestReaderQueryHopsTimelineSpikePreservation pins the bucketed-query
+// contract that brief loss spikes survive averaging.
+//
+// Regression: the bucketed SELECT projects both an averaged loss
+// (`avg_loss_pct = 100*sum(lost)/sum(sent)`) and the per-cycle maximum
+// (`max_loss_pct = max(loss_pct)`). A prior revision aliased the
+// averaged value as `loss_pct`, which shadowed the underlying column
+// and turned `max(loss_pct)` into max-of-an-aggregate — ClickHouse
+// returns a 500 ("aggregate function inside aggregate function"). The
+// API surfaced that as a 502. This test runs the bucketed query and
+// asserts the value semantics, so any reintroduction of the shadowing
+// (or any other SQL break that swallows the row) trips it before
+// deploy.
+//
+// Scenario: one bucket-sized window with 10 hops at ttl=1, IP fixed.
+// Nine cycles are clean (loss_pct=0); one cycle drops every packet
+// (loss_pct=100). The bucket's averaged loss is 10%, but the spike
+// max stays 100%. The heatmap colors by MaxLossPct so the spike
+// remains visible — the test enforces both numbers.
+func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg)
+
+	// All 10 cycles inside the same 15-min bucket. Truncate to the bucket
+	// boundary so all writes land in the same toStartOfInterval slot.
+	start := time.Now().UTC().Truncate(15 * time.Minute).Add(-26 * time.Hour)
+	for i := 0; i < 10; i++ {
+		lost := 0
+		if i == 5 {
+			lost = 3 // one 100%-loss cycle in the middle of the bucket
+		}
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:   start.Add(time.Duration(i) * 30 * time.Second),
+			Target: config.TargetRef{Target: config.Target{Name: "thsp"}, Group: "g"},
+			Source: "master",
+			Sent:   3,
+			Hops: []probe.Hop{
+				{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: lost, RTTs: []time.Duration{1 * time.Millisecond}},
+			},
+		})
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("writer close: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	// Bucketed query — this is the SQL path that broke when the alias
+	// shadowed the column. A regression here surfaces as a query error
+	// (Fatalf below), not a wrong value.
+	pts, err := r.QueryHopsTimeline(ctx,
+		config.TargetRef{Target: config.Target{Name: "thsp"}, Group: "g"},
+		start.Add(-time.Hour), start.Add(time.Hour),
+		storage.QueryFilter{Step: 15 * time.Minute},
+	)
+	if err != nil {
+		t.Fatalf("bucketed query: %v", err)
+	}
+	if len(pts) != 1 {
+		t.Fatalf("expected 1 bucketed row (single bucket × ttl=1 × one IP), got %d: %+v", len(pts), pts)
+	}
+	got := pts[0]
+	// 1 lossy cycle × 3 packets out of 10 cycles × 3 packets = 10% average.
+	if got.LossPct < 9 || got.LossPct > 11 {
+		t.Errorf("LossPct: got %.2f, want ~10 (1 of 10 cycles at 100%%)", got.LossPct)
+	}
+	// max(loss_pct) over the bucket: the lossy cycle's per-cycle loss = 100%.
+	if got.MaxLossPct < 99.9 {
+		t.Errorf("MaxLossPct: got %.2f, want 100 (the 100%%-loss spike must survive bucketing)", got.MaxLossPct)
+	}
+
+	// Raw path must mirror LossPct into MaxLossPct so the UI can read
+	// MaxLossPct uniformly without branching.
+	rawPts, err := r.QueryHopsTimeline(ctx,
+		config.TargetRef{Target: config.Target{Name: "thsp"}, Group: "g"},
+		start.Add(-time.Hour), start.Add(time.Hour),
+		storage.QueryFilter{Step: 0}, // raw
+	)
+	if err != nil {
+		t.Fatalf("raw query: %v", err)
+	}
+	if len(rawPts) != 10 {
+		t.Fatalf("raw: expected 10 rows (one per cycle), got %d", len(rawPts))
+	}
+	for _, p := range rawPts {
+		if p.MaxLossPct != p.LossPct {
+			t.Errorf("raw row at %v: MaxLossPct=%.2f, LossPct=%.2f — raw rows must mirror",
+				p.Time, p.MaxLossPct, p.LossPct)
+		}
+	}
+}
+
 // TestBootstrapClusterMode runs the full bootstrap path with
 // ON CLUSTER injected, verifying:
 //   - CREATE DATABASE … ON CLUSTER lands the DB everywhere (not just on
