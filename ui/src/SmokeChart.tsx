@@ -42,6 +42,10 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
   const onSoloChangeRef = useRef(onSoloChange);
   onSoloChangeRef.current = onSoloChange;
   const internalScaleRef = useRef(false);
+  // Live mirrors of build state for the draw hook (captured at uPlot
+  // construction time; would otherwise see stale data after each rebuild).
+  const builtRef = useRef<Built | null>(null);
+  const soloSourceRef = useRef<string | null>(null);
   // Track the requested window so the setScale hook can tell "drag-zoom inside
   // the pinned range" from "scale already matches the pin" without relying on
   // data extent (sparse data would collapse the zoom check to a false reset).
@@ -53,6 +57,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
   const [plotOffsets, setPlotOffsets] = useState({ left: 34, right: 0 });
 
   const built = useMemo(() => buildAligned(points), [points]);
+  builtRef.current = built;
   // Stable signature of the source set. Only when this changes do we have to
   // tear down uPlot — series/bands topology depends on the source count, but
   // in-place setData handles value updates.
@@ -71,6 +76,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
   const [hidden, setHidden] = useState<Set<number>>(new Set());
   // Which source name is soloed (others hidden in chart). null = show all.
   const [soloSource, setSoloSource] = useState<string | null>(null);
+  soloSourceRef.current = soloSource;
   useEffect(() => {
     setHidden(new Set());
     setSoloSource(null);
@@ -96,6 +102,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
           grid: { stroke: "#1f2430" },
           label: "ms",
           labelSize: 30,
+          // One tick per decade in log mode — uPlot's default minor ticks
+          // (2/3/5/7 within each decade) make the grid look noisy.
+          ...(yScale === "log" ? { splits: decadeSplits } : {}),
         },
       ],
       series: built.series,
@@ -115,6 +124,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
             const left = Math.round(u.bbox.left / dpr);
             const right = Math.round(u.width - (u.bbox.left + u.bbox.width) / dpr);
             setPlotOffsets((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+            drawBandPeakLabel(u, builtRef.current, soloSourceRef.current);
           },
         ],
         setCursor: [
@@ -237,7 +247,11 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
       }
       u.setData(built.data, false);
     });
-  }, [built, fromSec, toSec]);
+    // yScale is a dep so a lin↔log toggle (which rebuilds uPlot via the
+    // construction effect and clears pinRef in its cleanup) re-enters this
+    // effect, sees pinChanged=true on the empty pin, and pins the new
+    // uPlot's x scale before the first draw.
+  }, [built, fromSec, toSec, yScale]);
 
   // Apply the hidden-series set (individual toggles) and soloSource (show one
   // source only) to uPlot. sourcesKey in deps covers built.sources changes.
@@ -374,6 +388,70 @@ type Built = {
 
 const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
 const PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max"] as const;
+const MAX_COL_OFFSET = 6; // 0=min, 1=p5, 2=p25, 3=median, 4=p75, 5=p95, 6=max
+
+// decadeSplits returns one tick per power-of-ten across the visible y range.
+// Replaces uPlot's default log splits (which add minor 2/3/5/7 ticks per
+// decade) so the grid stays readable at log10.
+function decadeSplits(_u: uPlot, _axisIdx: number, scaleMin: number, scaleMax: number): number[] {
+  const lo = Math.floor(Math.log10(Math.max(scaleMin, LOG_Y_FLOOR)));
+  const hi = Math.ceil(Math.log10(Math.max(scaleMax, LOG_Y_FLOOR * 10)));
+  const out: number[] = [];
+  for (let i = lo; i <= hi; i++) out.push(Math.pow(10, i));
+  return out;
+}
+
+// drawBandPeakLabel annotates the visible window's peak Max across all bands
+// with a small dot + numeric label. Walks built.data's Max columns (offset
+// MAX_COL_OFFSET within each source's 7-column block) so we get the true
+// per-cycle max rather than re-deriving it from the cycle points array.
+function drawBandPeakLabel(u: uPlot, built: Built | null, soloSource: string | null) {
+  if (!built || built.sources.length === 0) return;
+  const xs = built.data[0] as number[] | undefined;
+  if (!xs || xs.length === 0) return;
+  let bestVal = -Infinity;
+  let bestT = 0;
+  let bestSrcIdx = 0;
+  for (let si = 0; si < built.sources.length; si++) {
+    if (soloSource != null && built.sources[si] !== soloSource) continue;
+    const col = built.data[1 + si * PCT_KEYS.length + MAX_COL_OFFSET] as (number | null)[] | undefined;
+    if (!col) continue;
+    for (let i = 0; i < col.length; i++) {
+      const v = col[i];
+      if (v == null) continue;
+      if (v > bestVal) {
+        bestVal = v;
+        bestT = xs[i];
+        bestSrcIdx = si;
+      }
+    }
+  }
+  if (!isFinite(bestVal) || bestVal <= 0) return;
+  const xPos = u.valToPos(bestT, "x", true);
+  const yPos = u.valToPos(bestVal, "y", true);
+  if (!isFinite(xPos) || !isFinite(yPos)) return;
+  const ctx = u.ctx;
+  ctx.save();
+  ctx.fillStyle = PALETTE[bestSrcIdx % PALETTE.length].stroke;
+  ctx.beginPath();
+  ctx.arc(xPos, yPos, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.font = "11px ui-sans-serif, system-ui, -apple-system, sans-serif";
+  ctx.textBaseline = "bottom";
+  ctx.textAlign = "center";
+  const label = bestVal >= 100 ? `${bestVal.toFixed(0)}ms` : `${bestVal.toFixed(1)}ms`;
+  const labelW = ctx.measureText(label).width;
+  const minX = u.bbox.left + labelW / 2 + 4;
+  const maxX = u.bbox.left + u.bbox.width - labelW / 2 - 4;
+  const cx = Math.min(Math.max(xPos, minX), maxX);
+  if (yPos - 6 > u.bbox.top + 12) {
+    ctx.fillText(label, cx, yPos - 6);
+  } else {
+    ctx.textBaseline = "top";
+    ctx.fillText(label, cx, yPos + 6);
+  }
+  ctx.restore();
+}
 
 function buildAligned(points: CyclePoint[]): Built {
   const xSeries: Series = {};

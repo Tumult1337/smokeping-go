@@ -150,6 +150,10 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
           grid: { stroke: "#1f2430" },
           label: "ms",
           labelSize: 30,
+          // Default log splits land on every 2/3/5/7 inside each decade;
+          // collapse to one tick per decade so the grid reads cleanly.
+          // Linear mode keeps uPlot's default linear-distance splits.
+          ...(yScale === "log" ? { splits: decadeSplits } : {}),
         },
       ],
       series,
@@ -185,6 +189,11 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
               drawStack(u, ctx, stacks[si], hiddenRef.current);
             }
             ctx.restore();
+            // Peak callout: label the window's max value so a smoothed/
+            // log-compressed outlier still shows its numeric height.
+            // Drawn after the clip restore so the label can render in
+            // the gutter when the peak sits at the chart edge.
+            drawPeakLabel(u, stacks, soloIdx, hiddenRef.current);
           },
         ],
         setCursor: [
@@ -673,6 +682,78 @@ function clampRangeForScale(
 ): [number, number] {
   if (yScale !== "log") return range;
   return [Math.max(LOG_Y_FLOOR, range[0]), Math.max(range[1], LOG_Y_FLOOR * 10)];
+}
+
+// decadeSplits returns one tick per power-of-ten across the visible y range.
+// Replaces uPlot's default log splits (which densely fill each decade with
+// 2/3/5/7-scaled minor ticks) for a calmer grid that still conveys the
+// orders-of-magnitude scale at a glance.
+function decadeSplits(_u: uPlot, _axisIdx: number, scaleMin: number, scaleMax: number): number[] {
+  const lo = Math.floor(Math.log10(Math.max(scaleMin, LOG_Y_FLOOR)));
+  const hi = Math.ceil(Math.log10(Math.max(scaleMax, LOG_Y_FLOOR * 10)));
+  const out: number[] = [];
+  for (let i = lo; i <= hi; i++) out.push(Math.pow(10, i));
+  return out;
+}
+
+// drawPeakLabel annotates the visible window's max value with a small dot +
+// numeric label. Drawn after the per-bar drawStack pass so the label can sit
+// in the gutter above the chart when the peak hugs the top of the plot. Skips
+// when "max" is hidden in the legend or when the visible value is non-finite
+// (100%-loss-only window).
+function drawPeakLabel(
+  u: uPlot,
+  stacks: SourceStack[],
+  soloIdx: number | null,
+  hidden: Set<string>,
+) {
+  if (hidden.has("max")) return;
+  let bestVal = -Infinity;
+  let bestT = 0;
+  let bestColor = "#e6ebf2";
+  for (let si = 0; si < stacks.length; si++) {
+    if (soloIdx != null && si !== soloIdx) continue;
+    const stack = stacks[si];
+    for (let i = 0; i < stack.bands.length; i++) {
+      const cb = stack.bands[i];
+      if (cb.length === 0) continue;
+      // Outer min-max band's `hi` carries the per-cycle max.
+      const m = cb[0].hi;
+      if (m > bestVal) {
+        bestVal = m;
+        bestT = stack.ts[i];
+        bestColor = stack.medianColor;
+      }
+    }
+  }
+  if (!isFinite(bestVal) || bestVal <= 0) return;
+  const xPos = u.valToPos(bestT, "x", true);
+  const yPos = u.valToPos(bestVal, "y", true);
+  if (!isFinite(xPos) || !isFinite(yPos)) return;
+  const ctx = u.ctx;
+  ctx.save();
+  ctx.fillStyle = bestColor;
+  // Small dot at the peak so the label has a clear anchor.
+  ctx.beginPath();
+  ctx.arc(xPos, yPos, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.font = "11px ui-sans-serif, system-ui, -apple-system, sans-serif";
+  ctx.textBaseline = "bottom";
+  ctx.textAlign = "center";
+  const label = bestVal >= 100 ? `${bestVal.toFixed(0)}ms` : `${bestVal.toFixed(1)}ms`;
+  // Keep the label inside the chart horizontally so it doesn't get clipped.
+  const labelW = ctx.measureText(label).width;
+  const minX = u.bbox.left + labelW / 2 + 4;
+  const maxX = u.bbox.left + u.bbox.width - labelW / 2 - 4;
+  const cx = Math.min(Math.max(xPos, minX), maxX);
+  // Prefer above the dot; flip below when there's no headroom.
+  if (yPos - 6 > u.bbox.top + 12) {
+    ctx.fillText(label, cx, yPos - 6);
+  } else {
+    ctx.textBaseline = "top";
+    ctx.fillText(label, cx, yPos + 6);
+  }
+  ctx.restore();
 }
 
 // Labels that toggle each drawStack band. Index lines up with the filtered
