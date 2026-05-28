@@ -396,6 +396,12 @@ func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, fr
 	// rows, a single 100%-loss cycle averages to 10% and disappears against
 	// the heatmap's loss palette. The heatmap colors cells by this max so
 	// the spike survives bucketing.
+	//
+	// Aliases use `avg_loss_pct` / `max_loss_pct` (not `loss_pct`) to avoid
+	// shadowing the underlying `loss_pct` column: a select-list alias of
+	// `loss_pct` would make `max(loss_pct)` aggregate the alias (an aggregate
+	// itself) and ClickHouse rejects "aggregate function inside aggregate
+	// function" with a 500.
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        any(source)                                       AS src,
@@ -403,7 +409,7 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        hop_addr,
        sum(sent)                                         AS total_sent,
        sum(lost)                                         AS total_lost,
-       100.0 * sum(lost) / nullIf(sum(sent), 0)          AS loss_pct,
+       100.0 * sum(lost) / nullIf(sum(sent), 0)          AS avg_loss_pct,
        max(loss_pct)                                     AS max_loss_pct
 FROM probe_hop
 WHERE target_id = ?
