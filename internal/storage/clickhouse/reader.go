@@ -50,29 +50,6 @@ func tlsForReader(enabled bool) *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS12}
 }
 
-// pickCycleStep returns the toStartOfInterval width to use for a cycle
-// query covering `span`. Returns 0 to mean "no bucketing, return raw rows".
-// Tiers: ≤24h raw, ≤180d 1h, >180d 1d.
-func pickCycleStep(span time.Duration) time.Duration {
-	switch {
-	case span <= 24*time.Hour:
-		return 0
-	case span <= 180*24*time.Hour:
-		return time.Hour
-	default:
-		return 24 * time.Hour
-	}
-}
-
-// pickHopStep returns the toStartOfInterval width for hop timeline queries.
-// Tiers: ≤24h raw, >24h 15m.
-func pickHopStep(span time.Duration) time.Duration {
-	if span <= 24*time.Hour {
-		return 0
-	}
-	return 15 * time.Minute
-}
-
 func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.CyclePoint, error) {
 	step := f.Step
 	if step == 0 {
@@ -353,7 +330,9 @@ ORDER BY source, ttl`
 
 // scanHopRows is shared by QueryLatestHops, QueryHopsAt, and the raw
 // path of QueryHopsTimeline (added in T15). Returns rows in the order
-// they came from the cursor.
+// they came from the cursor. Raw rows are one cycle each, so MaxLossPct
+// is just a mirror of LossPct — set here so consumers can read the field
+// uniformly without branching on bucketed vs raw.
 func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 	var out []storage.HopPoint
 	for rows.Next() {
@@ -375,6 +354,7 @@ func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 		p.Mean = mean
 		p.Median = median
 		p.LossPct = float64(lossPct)
+		p.MaxLossPct = p.LossPct
 		p.LossCount = int64(lost)
 		p.Sent = int64(sent)
 		out = append(out, p)
@@ -411,6 +391,11 @@ ORDER BY timestamp, ttl`
 
 func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
 	srcClause, srcArgs := sourceFilter(source)
+	// max(loss_pct) preserves brief 100%-loss spikes that the bucket-average
+	// (sum(lost)/sum(sent)) dilutes — at a 5-min bucket with 10 per-cycle
+	// rows, a single 100%-loss cycle averages to 10% and disappears against
+	// the heatmap's loss palette. The heatmap colors cells by this max so
+	// the spike survives bucketing.
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        any(source)                                       AS src,
@@ -418,7 +403,8 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        hop_addr,
        sum(sent)                                         AS total_sent,
        sum(lost)                                         AS total_lost,
-       100.0 * sum(lost) / nullIf(sum(sent), 0)          AS loss_pct
+       100.0 * sum(lost) / nullIf(sum(sent), 0)          AS loss_pct,
+       max(loss_pct)                                     AS max_loss_pct
 FROM probe_hop
 WHERE target_id = ?
   AND timestamp >= ? AND timestamp < ?%s
@@ -436,13 +422,15 @@ ORDER BY bucket_ts, ttl`, int(step.Seconds()), srcClause)
 		var ttl uint8
 		var sent, lost uint64
 		var lossPct float64
-		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &sent, &lost, &lossPct); err != nil {
+		var maxLossPct float32
+		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &sent, &lost, &lossPct, &maxLossPct); err != nil {
 			return nil, err
 		}
 		p.Index = int64(ttl)
 		p.Sent = int64(sent)
 		p.LossCount = int64(lost)
 		p.LossPct = lossPct
+		p.MaxLossPct = float64(maxLossPct)
 		out = append(out, p)
 	}
 	return out, rows.Err()

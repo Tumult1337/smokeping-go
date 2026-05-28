@@ -17,7 +17,6 @@ interface Props {
   // down to one source-filtered (path + heatmap) pair instead of the
   // multi-source list of collapsibles.
   sourceParam: string | null;
-  hideZeroLossHeatmap: boolean;
 }
 
 // Persists between page loads. Keyed by source name; missing = expanded.
@@ -46,7 +45,6 @@ export function MtrSection({
   onResetAt,
   onCyclePick,
   sourceParam,
-  hideZeroLossHeatmap,
 }: Props) {
   // Single-source path stays on the existing components — HopsTable's
   // own fetch + render is simpler than re-implementing it here, and the
@@ -62,7 +60,6 @@ export function MtrSection({
         onResetAt={onResetAt}
         onCyclePick={onCyclePick}
         source={sourceParam}
-        hideZeroLossHeatmap={hideZeroLossHeatmap}
       />
     );
   }
@@ -75,7 +72,6 @@ export function MtrSection({
       atSec={atSec}
       onResetAt={onResetAt}
       onCyclePick={onCyclePick}
-      hideZeroLossHeatmap={hideZeroLossHeatmap}
     />
   );
 }
@@ -89,7 +85,6 @@ function SingleSourceLayout({
   onResetAt,
   onCyclePick,
   source,
-  hideZeroLossHeatmap,
 }: {
   targetId: string;
   refreshTick: number;
@@ -99,7 +94,6 @@ function SingleSourceLayout({
   onResetAt: () => void;
   onCyclePick: (timeSec: number, source?: string) => void;
   source: string;
-  hideZeroLossHeatmap: boolean;
 }) {
   return (
     <>
@@ -127,7 +121,6 @@ function SingleSourceLayout({
             onCyclePick={onCyclePick}
             selectedSec={atSec ?? undefined}
             source={source}
-            hideZeroLoss={hideZeroLossHeatmap}
           />
         </div>
       )}
@@ -143,7 +136,6 @@ function MultiSourceLayout({
   atSec,
   onResetAt,
   onCyclePick,
-  hideZeroLossHeatmap,
 }: {
   targetId: string;
   refreshTick: number;
@@ -152,7 +144,6 @@ function MultiSourceLayout({
   atSec: number | null;
   onResetAt: () => void;
   onCyclePick: (timeSec: number, source?: string) => void;
-  hideZeroLossHeatmap: boolean;
 }) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -235,7 +226,6 @@ function MultiSourceLayout({
         onResetAt={onResetAt}
         onCyclePick={onCyclePick}
         source={groups[0].source}
-        hideZeroLossHeatmap={hideZeroLossHeatmap}
       />
     );
   }
@@ -313,7 +303,6 @@ function MultiSourceLayout({
                       onCyclePick={(t) => onCyclePick(t)}
                       selectedSec={atSec ?? undefined}
                       source={g.source}
-                      hideZeroLoss={hideZeroLossHeatmap}
                     />
                   )}
                 </div>
@@ -336,12 +325,16 @@ function groupBySource(hops: HopPoint[]): HopsGroup[] {
   const order: string[] = [];
   const byKey = new Map<string, HopsGroup>();
   for (const h of hops) {
-    const existing = byKey.get(h.Source);
+    // Coerce missing Source to "" so a pre-cluster (untagged) row doesn't
+    // key under undefined. Distinct from mtrUtils.groupBySource because
+    // this variant also carries the group's representative timestamp.
+    const s = h.Source ?? "";
+    const existing = byKey.get(s);
     if (existing) {
       existing.hops.push(h);
     } else {
-      order.push(h.Source);
-      byKey.set(h.Source, { source: h.Source, time: h.Time, hops: [h] });
+      order.push(s);
+      byKey.set(s, { source: s, time: h.Time, hops: [h] });
     }
   }
   return order.map((s) => byKey.get(s)!);

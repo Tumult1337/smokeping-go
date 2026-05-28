@@ -19,11 +19,16 @@ interface Props {
   // Filter to a single source. When set, only that source's heatmap is
   // requested and the collapsible UI is skipped (one section, no chevron).
   source?: string;
-  // Drop hops whose loss is 0% across the whole window. At wide ranges a
-  // long path reduces to 1-2 problem hops, so hiding the clean rows keeps
-  // each per-source heatmap readable.
-  hideZeroLoss?: boolean;
 }
+
+// PATH_LEN_AUTO_HIDE_THRESHOLD is the minimum total hop count at which
+// auto-hide of zero-loss hops kicks in. Below this, the whole path renders
+// even when several hops are clean — short paths benefit from full context
+// more than they suffer from clutter. Tuned so a Hetzner → 1.1.1.1 path
+// (8 TTLs, 2 lossy because of ICMP rate-limiting upstream) still renders
+// every hop, while a 28-hop transit path with half a dozen quiet routers
+// gets the declutter.
+const PATH_LEN_AUTO_HIDE_THRESHOLD = 12;
 
 const COLLAPSED_SOURCES_KEY = "gosmokeping.collapsedHopSources";
 
@@ -40,7 +45,6 @@ export function MtrHeatmap({
   onCyclePick,
   selectedSec,
   source,
-  hideZeroLoss,
 }: Props) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -116,7 +120,6 @@ export function MtrHeatmap({
         fromSec={fromSec}
         toSec={toSec}
         selectedSec={selectedSec}
-        hideZeroLoss={hideZeroLoss}
         onPick={onCyclePick}
         stale={err != null}
       />
@@ -130,7 +133,10 @@ export function MtrHeatmap({
     <div className="mtr-heatmap-stack">
       {groups.map((g) => {
         const isCollapsed = collapsed.has(g.source);
-        const worstLoss = g.hops.reduce((m, h) => (h.LossPct > m ? h.LossPct : m), 0);
+        const worstLoss = g.hops.reduce((m, h) => {
+          const w = (h as { MaxLossPct?: number }).MaxLossPct ?? h.LossPct;
+          return w > m ? w : m;
+        }, 0);
         const hopCount = countDistinct(g.hops);
         return (
           <div key={g.source || "(unspecified)"} className="mtr-heatmap-source">
@@ -161,7 +167,6 @@ export function MtrHeatmap({
                 fromSec={fromSec}
                 toSec={toSec}
                 selectedSec={selectedSec}
-                hideZeroLoss={hideZeroLoss}
                 onPick={onCyclePick}
                 stale={err != null}
               />
@@ -209,7 +214,6 @@ function PathHeatmap({
   fromSec,
   toSec,
   selectedSec,
-  hideZeroLoss,
   onPick,
   stale,
 }: {
@@ -218,7 +222,6 @@ function PathHeatmap({
   fromSec: number;
   toSec: number;
   selectedSec?: number;
-  hideZeroLoss?: boolean;
   onPick?: (timeSec: number, source?: string) => void;
   stale: boolean;
 }) {
@@ -228,8 +231,8 @@ function PathHeatmap({
 
   // rows: hop index → (cycleSec → HopPoint).
   // cycles: distinct cycle timestamps in this source.
-  // visibleHops: hop indices to draw, in ascending order; with hideZeroLoss,
-  // hops that never lost a packet are dropped.
+  // visibleHops: hop indices to draw, in ascending order; on a long, mostly
+  // clean path the hop-count heuristic drops the clean rows.
   const { rows, cycles, visibleHops } = useMemo(() => {
     const byHop = new Map<number, Map<number, HopPoint>>();
     const cycleSet = new Set<number>();
@@ -239,7 +242,11 @@ function PathHeatmap({
       const t = Math.floor(new Date(h.Time).getTime() / 1000);
       cycleSet.add(t);
       if (h.Index > maxIdx) maxIdx = h.Index;
-      if (h.LossPct > 0) lossyHops.add(h.Index);
+      // MaxLossPct (worst single cycle in the bucket) catches brief spikes
+      // that bucket-avg LossPct dilutes to ~0%. Falls back to LossPct for
+      // raw rows where the server didn't compute a max.
+      const worst = (h as { MaxLossPct?: number }).MaxLossPct ?? h.LossPct;
+      if (worst > 0) lossyHops.add(h.Index);
       let row = byHop.get(h.Index);
       if (!row) {
         row = new Map();
@@ -249,17 +256,25 @@ function PathHeatmap({
       // a path flap (see QueryHopsTimeline). Keep the worst-loss-wins
       // entry — the heatmap is a loss view, not a path-topology view.
       const existing = row.get(t);
-      if (!existing || h.LossPct > existing.LossPct) row.set(t, h);
+      const existingWorst =
+        existing && ((existing as { MaxLossPct?: number }).MaxLossPct ?? existing.LossPct);
+      if (!existing || worst > (existingWorst ?? 0)) row.set(t, h);
     }
     const all: number[] = [];
     for (let i = 1; i <= maxIdx; i++) if (byHop.has(i)) all.push(i);
-    const visible = hideZeroLoss ? all.filter((i) => lossyHops.has(i)) : all;
+    // Hop-count-driven auto-hide: only collapse clean rows when the path is
+    // long enough that the clutter actually hurts readability AND at least
+    // half the path is clean (so we don't hide most of a noisy path).
+    const cleanCount = all.length - lossyHops.size;
+    const shouldHide =
+      all.length >= PATH_LEN_AUTO_HIDE_THRESHOLD && cleanCount * 2 >= all.length;
+    const visible = shouldHide ? all.filter((i) => lossyHops.has(i)) : all;
     return {
       rows: byHop,
       cycles: Array.from(cycleSet).sort((a, b) => a - b),
       visibleHops: visible,
     };
-  }, [hops, hideZeroLoss]);
+  }, [hops]);
 
   // Adaptive height: at least 14px per hop row, plus a fixed bottom axis
   // strip. Clamped so a 30-hop path doesn't push the page to 500+px.
@@ -322,7 +337,11 @@ function PathHeatmap({
           const p = row.get(t);
           if (!p) continue;
           const x = xForSec(t) - colW / 2;
-          ctx.fillStyle = lossColor(p.LossPct, "#5eead4");
+          // Color by MaxLossPct so a brief 100% loss event inside a 5-min
+          // bucket stays visible — averaging it (LossPct) to ~3% would make
+          // it disappear into the clean background.
+          const worst = (p as { MaxLossPct?: number }).MaxLossPct ?? p.LossPct;
+          ctx.fillStyle = lossColor(worst, "#5eead4");
           ctx.fillRect(x, y, Math.max(1, colW), actualRowH - 1);
         }
       }

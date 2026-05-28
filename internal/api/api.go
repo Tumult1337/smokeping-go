@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/storage"
@@ -73,6 +74,18 @@ func New(opts Options) *Server {
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(logRequests(s.log))
+	// gzip JSON responses. A 24h all-sources hops/timeline is ~28 MB raw
+	// JSON; gzip cuts that to ~3 MB. A reverse proxy (Cloudflare, nginx)
+	// may already compress, but we can't assume one — direct origin
+	// access regresses badly without this. Level 5 is the sweet spot for
+	// JSON: ≥80% of the size win at ~half the CPU of level 9. Negotiates
+	// only when the client sent Accept-Encoding, so non-gzip clients are
+	// unaffected.
+	//
+	// Cluster ingest (/cluster/cycles) accepts large POST bodies but
+	// returns trivially small responses — gzip on the response path is
+	// effectively a no-op for it.
+	r.Use(middleware.Compress(5, "application/json"))
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", s.health)
@@ -389,22 +402,55 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "hops/timeline window limited to 7d")
 		return
 	}
-	hopStep := time.Duration(0)
-	if to.Sub(from) > 24*time.Hour {
-		hopStep = 15 * time.Minute
-	}
-	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source"), Step: hopStep})
+	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{
+		Source: r.URL.Query().Get("source"),
+		Step:   storage.PickHopStep(to.Sub(from)),
+	})
 	if err != nil {
 		s.log.Warn("query hops timeline", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
 		return
 	}
+	// Slim DTO: the heatmap renders only LossPct + MaxLossPct, so the
+	// per-row RTT fields (Min/Max/Mean/Median) the storage row carries
+	// for the path-table view get dropped here. Saves ~40% of the JSON
+	// payload over the wire — multiplicative with bucketing for wide
+	// windows. Path table at /hops?at= keeps the full HopPoint shape.
+	dtos := make([]hopTimelineDTO, len(hops))
+	for i, h := range hops {
+		dtos[i] = hopTimelineDTO{
+			Time:       h.Time,
+			Source:     h.Source,
+			Index:      h.Index,
+			IP:         h.IP,
+			LossPct:    h.LossPct,
+			MaxLossPct: h.MaxLossPct,
+			LossCount:  h.LossCount,
+			Sent:       h.Sent,
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"target": ref.ID(),
 		"from":   from,
 		"to":     to,
-		"hops":   hops,
+		"hops":   dtos,
 	})
+}
+
+// hopTimelineDTO is the wire shape returned by /hops/timeline. Distinct
+// from storage.HopPoint because the heatmap consumer only needs loss
+// fields — shipping RTT min/max/mean/median per row balloons a 24h
+// all-sources response by ~40% for no rendering gain. Field names stay
+// PascalCase to match HopPoint so the TS client treats them identically.
+type hopTimelineDTO struct {
+	Time       time.Time `json:"Time"`
+	Source     string    `json:"Source"`
+	Index      int64     `json:"Index"`
+	IP         string    `json:"IP"`
+	LossPct    float64   `json:"LossPct"`
+	MaxLossPct float64   `json:"MaxLossPct"`
+	LossCount  int64     `json:"LossCount"`
+	Sent       int64     `json:"Sent"`
 }
 
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
@@ -528,8 +574,9 @@ func parseRelativeDuration(s string) (time.Duration, error) {
 }
 
 // pickStep returns the toStartOfInterval width for a cycles query
-// covering [from, to]. Returns 0 to mean "no bucketing, raw rows".
-// The override is a back-compat query string knob:
+// covering [from, to]. The window-derived path delegates to
+// storage.PickCycleStep so the tier table stays single-sourced; this
+// wrapper exists solely to apply the back-compat `?step=` override:
 //
 //	?step=raw|1h|1d → forces a specific tier
 //	anything else   → derived from window width.
@@ -542,15 +589,7 @@ func pickStep(override string, from, to time.Time) time.Duration {
 	case "1d":
 		return 24 * time.Hour
 	}
-	span := to.Sub(from)
-	switch {
-	case span <= 24*time.Hour:
-		return 0
-	case span <= 180*24*time.Hour:
-		return time.Hour
-	default:
-		return 24 * time.Hour
-	}
+	return storage.PickCycleStep(to.Sub(from))
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

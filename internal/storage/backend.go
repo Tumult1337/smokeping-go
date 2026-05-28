@@ -26,6 +26,40 @@ type Reader interface {
 	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HopPoint, error)
 }
 
+// PickCycleStep returns the toStartOfInterval width for cycle queries.
+// Tiers: ≤24h raw, ≤180d 1h, >180d 1d. Lives next to PickHopStep so the
+// API layer can pick a step from window width without depending on a
+// specific storage backend.
+func PickCycleStep(span time.Duration) time.Duration {
+	switch {
+	case span <= 24*time.Hour:
+		return 0
+	case span <= 180*24*time.Hour:
+		return time.Hour
+	default:
+		return 24 * time.Hour
+	}
+}
+
+// PickHopStep returns the toStartOfInterval width for hop timeline queries.
+// Tiers: ≤2h raw, ≤24h 5m, >24h 15m. The 2h floor preserves per-cycle
+// granularity for the live debug view; wider windows bucket aggressively
+// because the heatmap canvas is at most ~1500 px wide — a 5-min bucket at
+// 24h yields ~288 columns × N hops × N sources, comfortably below that.
+//
+// Lives in the storage package (not the CH reader) so the API layer can
+// pick the step from window width without importing a backend implementation.
+func PickHopStep(span time.Duration) time.Duration {
+	switch {
+	case span <= 2*time.Hour:
+		return 0
+	case span <= 24*time.Hour:
+		return 5 * time.Minute
+	default:
+		return 15 * time.Minute
+	}
+}
+
 // QueryFilter narrows a query along orthogonal dimensions. Zero value =
 // no filtering, raw step (no bucketing). Add new fields here instead of
 // lengthening Reader method signatures.
@@ -98,17 +132,23 @@ type HTTPPoint struct {
 // target — without it a click on a slave's lossy bucket would silently
 // return the master's clean cycle for the same timestamp.
 type HopPoint struct {
-	Time      time.Time
-	Source    string
-	Index     int64
-	IP        string
-	Min       float64
-	Max       float64
-	Mean      float64
-	Median    float64
-	LossPct   float64
-	LossCount int64
-	Sent      int64
+	Time   time.Time
+	Source string
+	Index  int64
+	IP     string
+	Min    float64
+	Max    float64
+	Mean   float64
+	Median float64
+	// LossPct is the bucket-average loss when the row was bucketed, the
+	// per-cycle loss when raw. MaxLossPct is the worst single cycle within
+	// the bucket — equal to LossPct for raw rows. The heatmap colors by
+	// MaxLossPct so a brief 100% loss event inside a 5-min bucket survives
+	// instead of being averaged down to ~3% and visually disappearing.
+	LossPct    float64
+	MaxLossPct float64
+	LossCount  int64
+	Sent       int64
 }
 
 // ErrDisabled is returned by Open when the config selects a backend but

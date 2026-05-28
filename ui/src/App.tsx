@@ -57,10 +57,6 @@ function readUrlState(): UrlState {
   };
 }
 
-// Ranges wide enough that long MTR paths become visual clutter; we drop
-// clean hops so the table + heatmap stay readable.
-const WIDE_RANGES: Range[] = ["-6h", "-24h", "-7d", "-30d", "-180d", "-365d"];
-
 const RANGES: { label: string; value: Range }[] = [
   { label: "1h", value: "-1h" },
   { label: "6h", value: "-6h" },
@@ -344,8 +340,6 @@ export default function App() {
   const fromSec = cycles?.from ? Math.floor(new Date(cycles.from).getTime() / 1000) : undefined;
   const toSec = cycles?.to ? Math.floor(new Date(cycles.to).getTime() / 1000) : undefined;
 
-  // Wide time ranges collapse long MTR paths to a handful of lossy hops.
-  const hideZeroLossHops = WIDE_RANGES.includes(range);
   const sourceParam = selectedSource ?? undefined;
 
   // Mirror the chart's palette assignment so the chip text reads in the same
@@ -663,7 +657,6 @@ export default function App() {
                 }}
                 onCyclePick={handleCyclePick}
                 sourceParam={pickedSource ?? sourceParam ?? null}
-                hideZeroLossHeatmap={hideZeroLossHops}
               />
             )}
           </>
