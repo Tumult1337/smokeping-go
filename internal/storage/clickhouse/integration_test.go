@@ -321,6 +321,76 @@ func TestReaderQueryCyclesBucketed(t *testing.T) {
 	}
 }
 
+// TestReaderBucketedPercentilesMonotone seeds cycles with a fixed per-cycle
+// percentile distribution and verifies the bucketed aggregation keeps the
+// canonical p5 ≤ p25 ≤ median ≤ p75 ≤ p95 ordering. Regression for the
+// avgWeighted(rtt_median_ms) bug that produced median < p25 because median
+// used a different aggregation than the other percentile bands.
+func TestReaderBucketedPercentilesMonotone(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+
+	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	// Mix two RTT profiles so per-cycle medians differ across the bucket —
+	// this is the shape that surfaced the bug in production (a stable target
+	// at ~5ms where individual cycle medians occasionally landed at 4.0ms).
+	profiles := [][]time.Duration{
+		makeRTTs(20, 4900*time.Microsecond, 5000*time.Microsecond),
+		makeRTTs(20, 4000*time.Microsecond, 5000*time.Microsecond),
+	}
+	for i := 0; i < 60; i++ {
+		rtts := profiles[i%len(profiles)]
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:    start.Add(time.Duration(i) * time.Minute),
+			Target:  config.TargetRef{Target: config.Target{Name: "tm"}, Group: "g"},
+			Source:  "master",
+			Sent:    len(rtts),
+			Summary: stats.Compute(rtts),
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close()
+
+	pts, err := r.QueryCycles(ctx,
+		config.TargetRef{Target: config.Target{Name: "tm"}, Group: "g"},
+		start, start.Add(time.Hour+time.Minute),
+		storage.QueryFilter{Step: time.Hour},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) == 0 {
+		t.Fatalf("expected ≥ 1 bucket, got 0")
+	}
+	for i, p := range pts {
+		if !(p.Min <= p.P5 && p.P5 <= p.P25 && p.P25 <= p.Median &&
+			p.Median <= p.P75 && p.P75 <= p.P95 && p.P95 <= p.Max) {
+			t.Errorf("bucket %d: percentiles not monotone: min=%g p5=%g p25=%g median=%g p75=%g p95=%g max=%g",
+				i, p.Min, p.P5, p.P25, p.Median, p.P75, p.P95, p.Max)
+		}
+	}
+}
+
+// makeRTTs returns n samples linearly spaced from lo to hi inclusive.
+func makeRTTs(n int, lo, hi time.Duration) []time.Duration {
+	out := make([]time.Duration, n)
+	if n == 1 {
+		out[0] = lo
+		return out
+	}
+	for i := 0; i < n; i++ {
+		out[i] = lo + time.Duration(int64(hi-lo)*int64(i)/int64(n-1))
+	}
+	return out
+}
+
 func TestReaderQueryRTTs(t *testing.T) {
 	cfg, cleanup := testDSN(t)
 	defer cleanup()
