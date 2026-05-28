@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getHops, type HopPoint } from "./api";
 import { HopsPath } from "./HopsTable";
 import { HopsTable } from "./HopsTable";
 import { MtrHeatmap } from "./MtrHeatmap";
+import { countDistinct, useCollapsedSources } from "./mtrUtils";
 import { lossColor } from "./palette";
 
 interface Props {
@@ -18,12 +19,6 @@ interface Props {
   // multi-source list of collapsibles.
   sourceParam: string | null;
 }
-
-// Persists between page loads. Keyed by source name; missing = expanded.
-// Note: this is the same key MtrHeatmap previously used for its in-stack
-// collapse — keeping it means a user who had collapsed sources before
-// keeps them collapsed under the new unified section layout.
-const COLLAPSED_SOURCES_KEY = "gosmokeping.collapsedHopSources";
 
 // MtrSection owns the MTR view for the active target. Two modes:
 //
@@ -166,31 +161,7 @@ function MultiSourceLayout({
 
   const groups = useMemo(() => groupBySource(hops ?? []), [hops]);
 
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
-    try {
-      const raw = typeof localStorage !== "undefined"
-        ? localStorage.getItem(COLLAPSED_SOURCES_KEY)
-        : null;
-      if (!raw) return new Set();
-      const arr = JSON.parse(raw);
-      return new Set(Array.isArray(arr) ? arr : []);
-    } catch {
-      return new Set();
-    }
-  });
-  const toggle = useCallback((src: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(src)) next.delete(src);
-      else next.add(src);
-      try {
-        localStorage.setItem(COLLAPSED_SOURCES_KEY, JSON.stringify([...next]));
-      } catch {
-        // localStorage unavailable — ignore
-      }
-      return next;
-    });
-  }, []);
+  const { collapsed, toggle } = useCollapsedSources();
 
   if (err) return <div className="error">{err}</div>;
   if (hops === null) return <div className="empty">Loading MTR data…</div>;
@@ -338,10 +309,4 @@ function groupBySource(hops: HopPoint[]): HopsGroup[] {
     }
   }
   return order.map((s) => byKey.get(s)!);
-}
-
-function countDistinct(hops: HopPoint[]): number {
-  const seen = new Set<number>();
-  for (const h of hops) seen.add(h.Index);
-  return seen.size;
 }

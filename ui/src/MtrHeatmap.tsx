@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getHopsTimeline, type HopPoint } from "./api";
 import { lossColor } from "./palette";
+import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
 
 interface Props {
   targetId: string;
@@ -29,8 +30,6 @@ interface Props {
 // every hop, while a 28-hop transit path with half a dozen quiet routers
 // gets the declutter.
 const PATH_LEN_AUTO_HIDE_THRESHOLD = 12;
-
-const COLLAPSED_SOURCES_KEY = "gosmokeping.collapsedHopSources";
 
 // Per-hop packet-loss heatmap over a time window. With one source (filtered
 // view or single-origin target) renders a single heatmap. With N sources
@@ -78,31 +77,7 @@ export function MtrHeatmap({
   // one per-source heatmap with its own hop set.
   const groups = useMemo(() => groupBySource(hops ?? []), [hops]);
 
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
-    try {
-      const raw = typeof localStorage !== "undefined"
-        ? localStorage.getItem(COLLAPSED_SOURCES_KEY)
-        : null;
-      if (!raw) return new Set();
-      const arr = JSON.parse(raw);
-      return new Set(Array.isArray(arr) ? arr : []);
-    } catch {
-      return new Set();
-    }
-  });
-  const toggleCollapsed = useCallback((src: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(src)) next.delete(src);
-      else next.add(src);
-      try {
-        localStorage.setItem(COLLAPSED_SOURCES_KEY, JSON.stringify([...next]));
-      } catch {
-        // localStorage unavailable — ignore
-      }
-      return next;
-    });
-  }, []);
+  const { collapsed, toggle: toggleCollapsed } = useCollapsedSources();
 
   if (err && (hops === null || hops.length === 0)) return <div className="error">{err}</div>;
   if (hops === null) return <div className="empty">Loading MTR history…</div>;
@@ -176,33 +151,6 @@ export function MtrHeatmap({
       })}
     </div>
   );
-}
-
-interface HopsGroup {
-  source: string;
-  hops: HopPoint[];
-}
-
-function groupBySource(hops: HopPoint[]): HopsGroup[] {
-  const order: string[] = [];
-  const byKey = new Map<string, HopPoint[]>();
-  for (const h of hops) {
-    const s = h.Source ?? "";
-    const existing = byKey.get(s);
-    if (existing) {
-      existing.push(h);
-    } else {
-      order.push(s);
-      byKey.set(s, [h]);
-    }
-  }
-  return order.map((s) => ({ source: s, hops: byKey.get(s)! }));
-}
-
-function countDistinct(hops: HopPoint[]): number {
-  const seen = new Set<number>();
-  for (const h of hops) seen.add(h.Index);
-  return seen.size;
 }
 
 // PathHeatmap renders one source's hop-loss matrix. Owns its own canvas,
