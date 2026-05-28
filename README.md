@@ -250,8 +250,9 @@ the master's counter for the same target.
 
 `from` / `to` accept RFC3339, unix seconds, or relative durations like `-24h`.
 The bucket width on `/cycles` and `/hops/timeline` is picked server-side from
-the window (≤24h raw, ≤180d 1h, >180d 1d for cycles; ≤24h raw, >24h 15m for
-hops). Cycles also accepts a back-compat `step=raw|1h|1d` override.
+the window. Cycles ladder: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h,
+>180d 1d. Hops ladder: ≤2h raw, ≤24h 5m, >24h 15m (timeline capped at 7d).
+Cycles also accepts a back-compat `step=raw|1h|1d` override.
 
 All endpoints accept `source=<name>` to filter by probe origin in master/slave
 deployments. `/cycles` and `/hops/timeline` echo the resolved `from`/`to` in

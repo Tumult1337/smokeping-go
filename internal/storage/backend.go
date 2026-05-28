@@ -27,15 +27,28 @@ type Reader interface {
 }
 
 // PickCycleStep returns the toStartOfInterval width for cycle queries.
-// Tiers: ≤24h raw, ≤180d 1h, >180d 1d. Lives next to PickHopStep so the
-// API layer can pick a step from window width without depending on a
-// specific storage backend.
+// Tiers: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h, >180d 1d. The
+// ladder targets ~500–1000 buckets per window so point density stays
+// roughly constant as the user zooms out — at a 60s cycle interval no
+// transition drops more than ~7× across a boundary, which keeps the
+// min/median/max band readable without per-cycle wiggle. Bucketing is
+// information-preserving via the weighted-percentile aggregation in the
+// CH reader; client-side smoothing would hide outliers in the p95/max
+// band, which is the chart's whole point. Lives next to PickHopStep so
+// the API layer can pick a step from window width without depending on
+// a specific storage backend.
 func PickCycleStep(span time.Duration) time.Duration {
 	switch {
-	case span <= 24*time.Hour:
+	case span <= 2*time.Hour:
 		return 0
-	case span <= 180*24*time.Hour:
+	case span <= 24*time.Hour:
+		return 2 * time.Minute
+	case span <= 7*24*time.Hour:
+		return 15 * time.Minute
+	case span <= 30*24*time.Hour:
 		return time.Hour
+	case span <= 180*24*time.Hour:
+		return 6 * time.Hour
 	default:
 		return 24 * time.Hour
 	}

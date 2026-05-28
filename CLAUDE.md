@@ -61,10 +61,17 @@ Key points a reader can't derive from a single file:
   with codec-stacked columns (Gorilla for floats, T64 for small ints,
   DoubleDelta for timestamps, ZSTD as second pass). The reader buckets at
   query time via `toStartOfInterval` — no materialised views, no rollup
-  tasks. `QueryFilter.Step` carries the bucket width; `pickCycleStep` and
-  `pickHopStep` in the CH reader are the single decision points. Tier ladders:
-  - cycles: ≤24h raw, ≤180d 1h, >180d 1d
-  - hops:   ≤24h raw, >24h 15m (API caps timeline at 7d)
+  tasks. `QueryFilter.Step` carries the bucket width; `storage.PickCycleStep`
+  and `storage.PickHopStep` (in `internal/storage/backend.go`) are the
+  single decision points, called from the API layer. Tier ladders:
+  - cycles: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h, >180d 1d
+  - hops:   ≤2h raw, ≤24h 5m, >24h 15m (API caps timeline at 7d)
+  The cycle ladder targets ~500–1000 buckets per window so point density
+  stays roughly constant as the user zooms out — no >7× cliff at any
+  boundary. Smoothing happens server-side via the weighted percentile
+  aggregation; client-side smoothing is intentionally avoided so the
+  p95/max band keeps showing real outliers rather than averaging them
+  away.
   Bucketed cycle percentiles are computed with `quantilesExactWeighted`
   over the per-cycle percentile columns weighted by `sent` — information-
   preserving relative to NULL. Bucketed hop queries keep `hop_addr` in
