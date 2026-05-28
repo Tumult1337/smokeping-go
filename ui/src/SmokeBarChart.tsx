@@ -286,6 +286,13 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
       over.removeEventListener("dblclick", onDblClick);
       plotRef.current?.destroy();
       plotRef.current = null;
+      // Clear the pin record so the setData effect re-pins the x scale on
+      // the freshly-constructed uPlot. Without this, a yScale toggle (which
+      // tears down + recreates uPlot but doesn't change fromSec/toSec)
+      // leaves the new uPlot's x scale uninitialised — bars then draw at
+      // valToPos returns of NaN/Infinity and stay invisible until the next
+      // window change repaints.
+      pinRef.current = {};
     };
     // sourcesKey rebuilds the chart when the set of sources changes; data-only
     // updates flow through the setData effect below. yScale is in deps because

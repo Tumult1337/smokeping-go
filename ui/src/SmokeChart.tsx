@@ -205,6 +205,10 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
       over.removeEventListener("dblclick", onDblClick);
       plotRef.current?.destroy();
       plotRef.current = null;
+      // Clear the window pin so the setData effect re-pins x on the freshly
+      // constructed uPlot. Without this a yScale toggle (rebuild without
+      // window change) leaves the new uPlot's x scale uninitialised.
+      pinRef.current = {};
     };
     // sourcesKey rebuilds the chart when the set of sources changes; data-only
     // updates flow through the setData effect below so refreshes don't flash.
