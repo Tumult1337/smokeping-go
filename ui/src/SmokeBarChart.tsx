@@ -189,10 +189,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
               drawStack(u, ctx, stacks[si], hiddenRef.current);
             }
             ctx.restore();
-            // Peak callout: label the window's max value so a smoothed/
-            // log-compressed outlier still shows its numeric height.
-            // Drawn after the clip restore so the label can render in
-            // the gutter when the peak sits at the chart edge.
+            // Peak callout: small dot in the plot at the peak's (t, max),
+            // plus the numeric value rendered in the y-axis gutter at the
+            // peak's y-pixel so it reads like an extra axis tick.
             drawPeakLabel(u, stacks, soloIdx, hiddenRef.current);
           },
         ],
@@ -696,11 +695,10 @@ function decadeSplits(_u: uPlot, _axisIdx: number, scaleMin: number, scaleMax: n
   return out;
 }
 
-// drawPeakLabel annotates the visible window's max value with a small dot +
-// numeric label. Drawn after the per-bar drawStack pass so the label can sit
-// in the gutter above the chart when the peak hugs the top of the plot. Skips
-// when "max" is hidden in the legend or when the visible value is non-finite
-// (100%-loss-only window).
+// drawPeakLabel annotates the visible window's peak: a small dot inside the
+// plot at the (t, max) coordinate, plus the numeric value drawn in the
+// y-axis gutter at the peak's y-pixel so it reads like an extra labeled
+// tick. Skips when "max" is hidden in the legend or no valid peak exists.
 function drawPeakLabel(
   u: uPlot,
   stacks: SourceStack[],
@@ -726,33 +724,41 @@ function drawPeakLabel(
       }
     }
   }
-  if (!isFinite(bestVal) || bestVal <= 0) return;
-  const xPos = u.valToPos(bestT, "x", true);
-  const yPos = u.valToPos(bestVal, "y", true);
+  drawPeakAt(u, bestVal, bestT, bestColor);
+}
+
+// drawPeakAt paints the dot + gutter label for a known peak. Shared between
+// the bars and band paths so the on-axis tick looks identical regardless of
+// which chart style is showing.
+function drawPeakAt(u: uPlot, value: number, t: number, color: string) {
+  if (!isFinite(value) || value <= 0) return;
+  const xPos = u.valToPos(t, "x", true);
+  const yPos = u.valToPos(value, "y", true);
   if (!isFinite(xPos) || !isFinite(yPos)) return;
   const ctx = u.ctx;
   ctx.save();
-  ctx.fillStyle = bestColor;
-  // Small dot at the peak so the label has a clear anchor.
+  // Anchor dot at the peak inside the plot area.
+  ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(xPos, yPos, 2.5, 0, Math.PI * 2);
   ctx.fill();
-  ctx.font = "11px ui-sans-serif, system-ui, -apple-system, sans-serif";
-  ctx.textBaseline = "bottom";
-  ctx.textAlign = "center";
-  const label = bestVal >= 100 ? `${bestVal.toFixed(0)}ms` : `${bestVal.toFixed(1)}ms`;
-  // Keep the label inside the chart horizontally so it doesn't get clipped.
-  const labelW = ctx.measureText(label).width;
-  const minX = u.bbox.left + labelW / 2 + 4;
-  const maxX = u.bbox.left + u.bbox.width - labelW / 2 - 4;
-  const cx = Math.min(Math.max(xPos, minX), maxX);
-  // Prefer above the dot; flip below when there's no headroom.
-  if (yPos - 6 > u.bbox.top + 12) {
-    ctx.fillText(label, cx, yPos - 6);
-  } else {
-    ctx.textBaseline = "top";
-    ctx.fillText(label, cx, yPos + 6);
-  }
+  // Gutter label: right-aligned just inside the plot bbox, at the peak's
+  // y-pixel. Lives where the regular axis tick labels do — feels like an
+  // extra labeled tick rather than a chart annotation.
+  const label = value >= 100 ? `${value.toFixed(0)}` : `${value.toFixed(1)}`;
+  ctx.font = "12px ui-sans-serif, system-ui, -apple-system, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "right";
+  const labelX = u.bbox.left - 6;
+  // Background swatch masks any underlying axis tick that happens to share
+  // the y-pixel — without it the two numbers would visually overlap.
+  const padX = 3;
+  const padY = 2;
+  const w = ctx.measureText(label).width;
+  ctx.fillStyle = "#0f1218";
+  ctx.fillRect(labelX - w - padX, yPos - 8 - padY, w + padX * 2, 16 + padY * 2);
+  ctx.fillStyle = color;
+  ctx.fillText(label, labelX, yPos);
   ctx.restore();
 }
 

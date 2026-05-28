@@ -401,10 +401,11 @@ function decadeSplits(_u: uPlot, _axisIdx: number, scaleMin: number, scaleMax: n
   return out;
 }
 
-// drawBandPeakLabel annotates the visible window's peak Max across all bands
-// with a small dot + numeric label. Walks built.data's Max columns (offset
-// MAX_COL_OFFSET within each source's 7-column block) so we get the true
-// per-cycle max rather than re-deriving it from the cycle points array.
+// drawBandPeakLabel finds the visible window's peak Max across all bands
+// (per-source palette colour of whichever source owns it) and renders a dot
+// at (t, value) inside the plot with the numeric value in the y-axis gutter
+// at the peak's y-pixel. Walks built.data's Max columns (offset MAX_COL_OFFSET
+// within each source's 7-column block) so we get the per-cycle max directly.
 function drawBandPeakLabel(u: uPlot, built: Built | null, soloSource: string | null) {
   if (!built || built.sources.length === 0) return;
   const xs = built.data[0] as number[] | undefined;
@@ -431,25 +432,28 @@ function drawBandPeakLabel(u: uPlot, built: Built | null, soloSource: string | n
   const yPos = u.valToPos(bestVal, "y", true);
   if (!isFinite(xPos) || !isFinite(yPos)) return;
   const ctx = u.ctx;
+  const color = PALETTE[bestSrcIdx % PALETTE.length].stroke;
   ctx.save();
-  ctx.fillStyle = PALETTE[bestSrcIdx % PALETTE.length].stroke;
+  // Anchor dot at the peak inside the plot area.
+  ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(xPos, yPos, 2.5, 0, Math.PI * 2);
   ctx.fill();
-  ctx.font = "11px ui-sans-serif, system-ui, -apple-system, sans-serif";
-  ctx.textBaseline = "bottom";
-  ctx.textAlign = "center";
-  const label = bestVal >= 100 ? `${bestVal.toFixed(0)}ms` : `${bestVal.toFixed(1)}ms`;
-  const labelW = ctx.measureText(label).width;
-  const minX = u.bbox.left + labelW / 2 + 4;
-  const maxX = u.bbox.left + u.bbox.width - labelW / 2 - 4;
-  const cx = Math.min(Math.max(xPos, minX), maxX);
-  if (yPos - 6 > u.bbox.top + 12) {
-    ctx.fillText(label, cx, yPos - 6);
-  } else {
-    ctx.textBaseline = "top";
-    ctx.fillText(label, cx, yPos + 6);
-  }
+  // Gutter label: right-aligned just inside the plot bbox at the peak's
+  // y-pixel — reads like an extra labeled axis tick.
+  const label = bestVal >= 100 ? `${bestVal.toFixed(0)}` : `${bestVal.toFixed(1)}`;
+  ctx.font = "12px ui-sans-serif, system-ui, -apple-system, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "right";
+  const labelX = u.bbox.left - 6;
+  const padX = 3;
+  const padY = 2;
+  const w = ctx.measureText(label).width;
+  // Background swatch hides any underlying axis tick at the same y-pixel.
+  ctx.fillStyle = "#0f1218";
+  ctx.fillRect(labelX - w - padX, yPos - 8 - padY, w + padX * 2, 16 + padY * 2);
+  ctx.fillStyle = color;
+  ctx.fillText(label, labelX, yPos);
   ctx.restore();
 }
 
