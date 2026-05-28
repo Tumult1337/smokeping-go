@@ -378,6 +378,58 @@ func TestReaderBucketedPercentilesMonotone(t *testing.T) {
 	}
 }
 
+// TestReaderBucketedSourcesPreserved seeds cycles from multiple sources in
+// the same bucket and asserts the bucketed query returns one row per
+// (bucket, source) — regression for `GROUP BY bucket_ts` (without source)
+// which collapsed all sources into a single row per bucket with
+// `any(source)` picking an arbitrary label.
+func TestReaderBucketedSourcesPreserved(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+
+	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	sources := []string{"master", "slave-a", "slave-b"}
+	rtts := makeRTTs(20, time.Millisecond, 2*time.Millisecond)
+	for i := 0; i < 60; i++ {
+		for _, src := range sources {
+			w.OnCycle(ctx, scheduler.Cycle{
+				Time:    start.Add(time.Duration(i) * time.Minute),
+				Target:  config.TargetRef{Target: config.Target{Name: "ts"}, Group: "g"},
+				Source:  src,
+				Sent:    len(rtts),
+				Summary: stats.Compute(rtts),
+			})
+		}
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close()
+
+	pts, err := r.QueryCycles(ctx,
+		config.TargetRef{Target: config.Target{Name: "ts"}, Group: "g"},
+		start, start.Add(time.Hour+time.Minute),
+		storage.QueryFilter{Step: time.Hour},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	gotSources := make(map[string]struct{})
+	for _, p := range pts {
+		gotSources[p.Source] = struct{}{}
+	}
+	for _, want := range sources {
+		if _, ok := gotSources[want]; !ok {
+			t.Errorf("source %q missing from bucketed result; got sources %v", want, gotSources)
+		}
+	}
+}
+
 // makeRTTs returns n samples linearly spaced from lo to hi inclusive.
 func makeRTTs(n int, lo, hi time.Duration) []time.Duration {
 	out := make([]time.Duration, n)

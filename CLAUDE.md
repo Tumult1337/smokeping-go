@@ -74,9 +74,12 @@ Key points a reader can't derive from a single file:
   away.
   Bucketed cycle percentiles are computed with `quantilesExactWeighted`
   over the per-cycle percentile columns weighted by `sent` — information-
-  preserving relative to NULL. Bucketed hop queries keep `hop_addr` in
-  the `GROUP BY` so a path flap returns one row per distinct address
-  seen in the bucket.
+  preserving relative to NULL. Both bucketed queries keep `source` in
+  the `GROUP BY` so each (bucket, source) tuple stays a distinct row —
+  without it, master/slave data would be mixed together with `any(source)`
+  picking an arbitrary label and the UI would lose per-source bands.
+  Bucketed hop queries additionally keep `hop_addr` in the `GROUP BY` so
+  a path flap returns one row per distinct address seen in the bucket.
 
 - **Retention:** per-table TTL set at bootstrap from
   `storage.clickhouse.retention.{cycle,rtt,hop,http}_days` (defaults

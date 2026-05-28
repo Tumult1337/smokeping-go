@@ -127,7 +127,7 @@ func (r *Reader) queryCyclesBucketed(ctx context.Context, ref config.TargetRef, 
 	srcClause, srcArgs := sourceFilter(source)
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
-       any(source)                                         AS src,
+       source                                              AS src,
        min(rtt_min_ms), max(rtt_max_ms),
        avgWeighted(rtt_mean_ms, sent),
        quantilesExactWeighted(0.50)(rtt_median_ms, sent)[1] AS rtt_median_ms,
@@ -155,8 +155,8 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
 FROM probe_cycle
 WHERE target_id = ?
   AND timestamp >= ? AND timestamp < ?%s
-GROUP BY bucket_ts
-ORDER BY bucket_ts`, int(step.Seconds()), srcClause)
+GROUP BY bucket_ts, source
+ORDER BY bucket_ts, source`, int(step.Seconds()), srcClause)
 	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
@@ -404,7 +404,7 @@ func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, fr
 	// function" with a 500.
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
-       any(source)                                       AS src,
+       source                                            AS src,
        ttl,
        hop_addr,
        sum(sent)                                         AS total_sent,
@@ -414,8 +414,8 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
 FROM probe_hop
 WHERE target_id = ?
   AND timestamp >= ? AND timestamp < ?%s
-GROUP BY bucket_ts, ttl, hop_addr
-ORDER BY bucket_ts, ttl`, int(step.Seconds()), srcClause)
+GROUP BY bucket_ts, source, ttl, hop_addr
+ORDER BY bucket_ts, source, ttl`, int(step.Seconds()), srcClause)
 	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
