@@ -584,9 +584,7 @@ export default function App() {
             ) : (
               <div className="chart-wrap">
                 <div className="chart-title">Latency</div>
-                {cycles === null ? (
-                  <div className="empty">Fetching data…</div>
-                ) : chartStyle === "band" ? (
+                {chartStyle === "band" ? (
                   <SmokeChart
                     points={points}
                     fromSec={fromSec}
@@ -594,6 +592,7 @@ export default function App() {
                     onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
                     onSoloChange={setChartSoloSource}
+                    loading={cycles === null}
                   />
                 ) : (
                   <SmokeBarChart
@@ -603,6 +602,7 @@ export default function App() {
                     onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
                     onSoloChange={setChartSoloSource}
+                    loading={cycles === null}
                   />
                 )}
                 {windowStats && (

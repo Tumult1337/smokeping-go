@@ -12,6 +12,7 @@ interface Props {
   onCyclePick?: (timeSec: number) => void;
   onZoomChange?: (window: { from: number; to: number } | null) => void;
   onSoloChange?: (source: string | null) => void;
+  loading?: boolean;
 }
 
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
@@ -22,7 +23,7 @@ interface Props {
 // sharing a single x-axis. Each source gets its own colour from the palette
 // and its own set of 7 series; nulls at timestamps where that source didn't
 // probe are bridged with spanGaps so fills don't break across the interleave.
-export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSoloChange }: Props) {
+export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const onCyclePickRef = useRef(onCyclePick);
@@ -248,7 +249,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
   return (
     <div className="chart-host" style={{ minHeight: height }}>
       <div ref={divRef} style={{ width: "100%" }} />
-      {points.length === 0 && <div className="chart-empty">No data in range</div>}
+      {points.length === 0 && (
+        <div className="chart-empty">{loading ? "Loading…" : "No data in range"}</div>
+      )}
       {points.length > 0 && built.anyLoss && (
         <LossStripCanvas
           lossSeries={soloSource != null

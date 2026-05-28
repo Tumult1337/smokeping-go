@@ -19,6 +19,7 @@ interface Props {
   onCyclePick?: (timeSec: number) => void;
   onZoomChange?: (window: { from: number; to: number } | null) => void;
   onSoloChange?: (source: string | null) => void;
+  loading?: boolean;
 }
 
 type Band = { lo: number; hi: number; alpha: number };
@@ -42,7 +43,7 @@ type SourceStack = {
 // smooth smoke gradient that darkens around the median. The median tick on
 // top is colour-coded by per-cycle loss percentage. In multi-source "all"
 // view, each source gets its own palette entry and is drawn independently.
-export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSoloChange }: Props) {
+export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   // Keep onCyclePick in a ref so swapping the callback doesn't force a full
@@ -325,7 +326,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   return (
     <div className="chart-host" style={{ minHeight: height }}>
       <div ref={divRef} style={{ width: "100%" }} />
-      {points.length === 0 && <div className="chart-empty">No data in range</div>}
+      {points.length === 0 && (
+        <div className="chart-empty">{loading ? "Loading…" : "No data in range"}</div>
+      )}
       {points.length > 0 && built.anyLoss && (
         <LossStripCanvas
           lossSeries={soloSource != null
