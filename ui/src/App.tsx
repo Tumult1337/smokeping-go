@@ -14,7 +14,9 @@ import { paletteForSorted, lossColor } from "./palette";
 
 type Range = "-1h" | "-6h" | "-24h" | "-7d" | "-30d" | "-180d" | "-365d";
 type ChartStyle = "band" | "bars";
+type YScale = "lin" | "log";
 const CHART_STYLE_KEY = "gosmokeping.chartStyle";
+const Y_SCALE_KEY = "gosmokeping.yScale";
 const COLLAPSED_GROUPS_KEY = "gosmokeping.collapsedGroups";
 
 const VALID_RANGES: Range[] = ["-1h", "-6h", "-24h", "-7d", "-30d", "-180d", "-365d"];
@@ -26,17 +28,19 @@ type UrlState = {
   target: string | null;
   range: Range | null;
   mode: ChartStyle | null;
+  scale: YScale | null;
   source: string | null;
   pickedSec: number | null;
   zoom: { from: number; to: number } | null;
 };
 function readUrlState(): UrlState {
   if (typeof window === "undefined") {
-    return { target: null, range: null, mode: null, source: null, pickedSec: null, zoom: null };
+    return { target: null, range: null, mode: null, scale: null, source: null, pickedSec: null, zoom: null };
   }
   const p = new URLSearchParams(window.location.search);
   const range = p.get("range") as Range | null;
   const mode = p.get("mode");
+  const scale = p.get("scale");
   const tRaw = p.get("t");
   const t = tRaw ? Number(tRaw) : NaN;
   const z0Raw = p.get("z0");
@@ -51,6 +55,7 @@ function readUrlState(): UrlState {
     target: p.get("target"),
     range: range && VALID_RANGES.includes(range) ? range : null,
     mode: mode === "bars" || mode === "band" ? mode : null,
+    scale: scale === "log" || scale === "lin" ? scale : null,
     source: p.get("source"),
     pickedSec: Number.isFinite(t) ? t : null,
     zoom,
@@ -91,6 +96,11 @@ export default function App() {
     if (initialUrl.mode) return initialUrl.mode;
     const saved = typeof localStorage !== "undefined" ? localStorage.getItem(CHART_STYLE_KEY) : null;
     return saved === "bars" ? "bars" : "band";
+  });
+  const [yScale, setYScale] = useState<YScale>(() => {
+    if (initialUrl.scale) return initialUrl.scale;
+    const saved = typeof localStorage !== "undefined" ? localStorage.getItem(Y_SCALE_KEY) : null;
+    return saved === "log" ? "log" : "lin";
   });
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
     try {
@@ -137,6 +147,14 @@ export default function App() {
       // localStorage unavailable — ignore
     }
   }, [chartStyle]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(Y_SCALE_KEY, yScale);
+    } catch {
+      // localStorage unavailable — ignore
+    }
+  }, [yScale]);
 
   useEffect(() => {
     try {
@@ -230,6 +248,7 @@ export default function App() {
     if (selectedId) p.set("target", selectedId);
     if (range !== "-24h") p.set("range", range);
     if (chartStyle !== "band") p.set("mode", chartStyle);
+    if (yScale !== "lin") p.set("scale", yScale);
     if (selectedSource) p.set("source", selectedSource);
     if (pickedSec != null) p.set("t", String(pickedSec));
     if (zoom) {
@@ -241,7 +260,7 @@ export default function App() {
     if (url !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
       window.history.replaceState(null, "", url);
     }
-  }, [selectedId, range, chartStyle, selectedSource, pickedSec, zoom]);
+  }, [selectedId, range, chartStyle, yScale, selectedSource, pickedSec, zoom]);
 
   const refresh = useCallback(() => {
     setRefreshTick((n) => n + 1);
@@ -496,6 +515,14 @@ export default function App() {
                   >
                     bars
                   </button>
+                  <div className="toolbar-sep" />
+                  <button
+                    className={yScale === "log" ? "active" : ""}
+                    onClick={() => setYScale(yScale === "log" ? "lin" : "log")}
+                    title="Toggle log-scale y-axis (useful when outliers compress the band)"
+                  >
+                    log
+                  </button>
                 </>
               )}
               {zoom && (
@@ -589,6 +616,7 @@ export default function App() {
                     points={points}
                     fromSec={fromSec}
                     toSec={toSec}
+                    yScale={yScale}
                     onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
                     onSoloChange={setChartSoloSource}
@@ -599,6 +627,7 @@ export default function App() {
                     points={points}
                     fromSec={fromSec}
                     toSec={toSec}
+                    yScale={yScale}
                     onCyclePick={handleCyclePick}
                     onZoomChange={setZoom}
                     onSoloChange={setChartSoloSource}

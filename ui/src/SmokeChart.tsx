@@ -9,11 +9,20 @@ interface Props {
   height?: number;
   fromSec?: number;
   toSec?: number;
+  // "log" switches the y-axis to log10. Useful when a stable target's
+  // signal (~1ms) coexists with rare spikes (~300ms) — linear autoscale
+  // pins to the spike and squashes the band into a flat line near zero.
+  yScale?: "lin" | "log";
   onCyclePick?: (timeSec: number) => void;
   onZoomChange?: (window: { from: number; to: number } | null) => void;
   onSoloChange?: (source: string | null) => void;
   loading?: boolean;
 }
+
+// uPlot log scales reject ≤ 0; cycles may legitimately store min=0 for
+// sub-millisecond replies. Floor at 0.01ms so the band has somewhere to
+// land without obliterating the actual lower extent of the data.
+const LOG_Y_FLOOR = 0.01;
 
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
 // median line on top. uPlot's native "band" feature fills the area between
@@ -23,7 +32,7 @@ interface Props {
 // sharing a single x-axis. Each source gets its own colour from the palette
 // and its own set of 7 series; nulls at timestamps where that source didn't
 // probe are bridged with spanGaps so fills don't break across the interleave.
-export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
+export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin", onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const onCyclePickRef = useRef(onCyclePick);
@@ -76,10 +85,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       height,
       scales: {
         x: { time: true },
-        y: {
-          auto: true,
-          range: { min: { pad: 0.1 }, max: { pad: 0.1 } },
-        },
+        y: yScale === "log"
+          ? { auto: true, distr: 3, log: 10 }
+          : { auto: true, range: { min: { pad: 0.1 }, max: { pad: 0.1 } } },
       },
       axes: [
         { stroke: "#8a93a6", grid: { stroke: "#1f2430" } },
@@ -200,7 +208,10 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
     };
     // sourcesKey rebuilds the chart when the set of sources changes; data-only
     // updates flow through the setData effect below so refreshes don't flash.
-  }, [height, sourcesKey]);
+    // yScale forces a rebuild because uPlot's scale `distr` is read once at
+    // construction time — setScale("y", …) can't switch a scale from lin to
+    // log after the fact.
+  }, [height, sourcesKey, yScale]);
 
   // Pin the x scale when the requested window changes (range button, new
   // target). On a plain data refresh within the same window we skip the pin
@@ -242,9 +253,10 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, onCyclePick, 
       ? (built.sourceYRanges.get(soloSource) ?? built.globalYRange)
       : built.globalYRange;
     if (range) {
-      u.setScale("y", { min: range[0], max: range[1] });
+      const min = yScale === "log" ? Math.max(LOG_Y_FLOOR, range[0]) : range[0];
+      u.setScale("y", { min, max: range[1] });
     }
-  }, [hidden, soloSource, sourcesKey, built.sourceYRanges, built.globalYRange]);
+  }, [hidden, soloSource, sourcesKey, built.sourceYRanges, built.globalYRange, yScale]);
 
   return (
     <div className="chart-host" style={{ minHeight: height }}>

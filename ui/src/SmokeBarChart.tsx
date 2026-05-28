@@ -14,6 +14,9 @@ interface Props {
   // clicking 1y vs 30d is otherwise indistinguishable when coverage is thin.
   fromSec?: number;
   toSec?: number;
+  // "log" switches the y-axis to log10. Useful when a stable target's
+  // signal coexists with rare spikes that compress linear autoscale.
+  yScale?: "lin" | "log";
   // Invoked when the user clicks a bar; receives that cycle's unix timestamp.
   // Used by the MTR cycle-picker to swap the HopsTable to that moment.
   onCyclePick?: (timeSec: number) => void;
@@ -21,6 +24,10 @@ interface Props {
   onSoloChange?: (source: string | null) => void;
   loading?: boolean;
 }
+
+// uPlot log scales reject ≤ 0; cycles may store min=0 for sub-millisecond
+// replies. Floor at 0.01ms so the band has somewhere to land.
+const LOG_Y_FLOOR = 0.01;
 
 type Band = { lo: number; hi: number; alpha: number };
 
@@ -43,7 +50,7 @@ type SourceStack = {
 // smooth smoke gradient that darkens around the median. The median tick on
 // top is colour-coded by per-cycle loss percentage. In multi-source "all"
 // view, each source gets its own palette entry and is drawn independently.
-export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
+export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "lin", onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   // Keep onCyclePick in a ref so swapping the callback doesn't force a full
@@ -99,16 +106,17 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
   useEffect(() => {
     soloSourceRef.current = soloSource;
     soloIdxRef.current = soloSource != null ? built.sources.indexOf(soloSource) : null;
-    const range = soloSource != null
+    const raw = soloSource != null
       ? (built.sourceYRanges.get(soloSource) ?? built.yRange)
       : built.yRange;
+    const range = clampRangeForScale(raw, yScale);
     yRangeRef.current = range;
     const u = plotRef.current;
     if (u) {
       u.setScale("y", { min: range[0], max: range[1] });
       u.redraw(false, true);
     }
-  }, [soloSource, built.sources, built.yRange, built.sourceYRanges]);
+  }, [soloSource, built.sources, built.yRange, built.sourceYRanges, yScale]);
 
   useEffect(() => {
     if (!divRef.current) return;
@@ -131,7 +139,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       height,
       scales: {
         x: { time: true },
-        y: { auto: false, range: () => yRangeRef.current },
+        y: yScale === "log"
+          ? { auto: false, distr: 3, log: 10, range: () => yRangeRef.current }
+          : { auto: false, range: () => yRangeRef.current },
       },
       axes: [
         { stroke: "#8a93a6", grid: { stroke: "#1f2430" } },
@@ -278,8 +288,10 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       plotRef.current = null;
     };
     // sourcesKey rebuilds the chart when the set of sources changes; data-only
-    // updates flow through the setData effect below.
-  }, [height, sourcesKey]);
+    // updates flow through the setData effect below. yScale is in deps because
+    // uPlot reads `distr` once at construction — flipping lin↔log requires a
+    // full rebuild.
+  }, [height, sourcesKey, yScale]);
 
   // Pin the x scale only when the requested window changes. A plain data
   // refresh passes resetScales=false so user drag-zooms survive the tick.
@@ -295,7 +307,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
 
     stacksRef.current = empty ? [] : built.stacks;
     if (soloSourceRef.current === null) {
-      yRangeRef.current = empty ? [0, 1] : built.yRange;
+      yRangeRef.current = empty
+        ? clampRangeForScale([0, 1], yScale)
+        : clampRangeForScale(built.yRange, yScale);
     }
 
     u.batch(() => {
@@ -321,7 +335,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, onCyclePic
       // just mutated — force another pass so the fresh stacks land.
       u.redraw(false, true);
     }
-  }, [built, fromSec, toSec]);
+  }, [built, fromSec, toSec, yScale]);
 
   return (
     <div className="chart-host" style={{ minHeight: height }}>
@@ -641,6 +655,17 @@ function buildSources(points: CyclePoint[]): Built {
     anyLoss,
     aggregates,
   };
+}
+
+// clampRangeForScale lifts the lower bound into log-safe territory when log
+// mode is on. Linear keeps the natural [0, hi] band; log needs strictly > 0
+// or uPlot returns NaN positions and the entire chart vanishes.
+function clampRangeForScale(
+  range: [number, number],
+  yScale: "lin" | "log",
+): [number, number] {
+  if (yScale !== "log") return range;
+  return [Math.max(LOG_Y_FLOOR, range[0]), Math.max(range[1], LOG_Y_FLOOR * 10)];
 }
 
 // Labels that toggle each drawStack band. Index lines up with the filtered
