@@ -19,11 +19,15 @@
   --text-faint: #4a5160;
   --text-id:    #6b7282;  /* monospace ids (consolidates #6b7282 / #6b7284) */
 
-  /* Indigo — interactive only: focus, selected, active, sort, drag. */
-  --accent:        #818cf8;
-  --accent-dim:    rgba(129, 140, 248, 0.16);
-  --accent-border: rgba(129, 140, 248, 0.55);
-  --accent-text:   #c0c6fc;  /* indigo text on a --accent-dim fill */
+  /* Blue — interactive only: focus, selected, active, sort, drag.
+     Single source of truth: change --accent-rgb (one line) to retint every
+     interactive surface; everything below derives from it. */
+  --accent-rgb:    79, 147, 245;
+  --accent:        rgb(var(--accent-rgb));
+  --accent-dim:    rgba(var(--accent-rgb), 0.16);
+  --accent-border: rgba(var(--accent-rgb), 0.55);
+  --accent-select: rgba(var(--accent-rgb), 0.25);  /* drag-select overlay */
+  --accent-text:   color-mix(in srgb, rgb(var(--accent-rgb)) 62%, white);
 
   /* MTR heatmap "ok" cell — neutral slate, but light enough to read clearly
      against the row strip so the path stays legible; loss is still the only
@@ -784,7 +788,7 @@ body {
    a tiny dot at the plot origin — the fill alone is invisible at 0×0 and clear
    during a drag. !important because uPlot's stylesheet is injected after ours. */
 .u-select {
-  background: rgba(129, 140, 248, 0.25) !important;
+  background: var(--accent-select) !important;
   border: none !important;
 }
 

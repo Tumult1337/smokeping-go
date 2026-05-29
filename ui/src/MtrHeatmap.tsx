@@ -3,22 +3,26 @@ import { getHopsTimeline, type HopPoint } from "./api";
 import { lossColor } from "./palette";
 import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
 
-// A <canvas> 2d context can't read CSS custom properties, so the two chrome
-// colors the heatmap paints live here as literals. Keep them in sync with the
-// matching tokens in styles.css:
-//   HEAT_OK     ↔ --heat-ok  (neutral "ok" cell — light enough to read clearly
-//                             against the row strip; loss is the only saturated
-//                             colour)
-//   MARKER_FILL ↔ --accent   (selected-cycle marker — indigo, interactive)
-const HEAT_OK = "#2c3647";
-const MARKER_FILL = "rgba(129, 140, 248, 0.7)";
+// The heatmap's chrome colours all live as CSS custom properties in styles.css
+// (single source of truth). A <canvas> 2d context can't read CSS vars, so
+// readHeatColors pulls --heat-ok (neutral "ok" cell) and --accent-rgb
+// (selected-cycle marker) off :root at draw time. Falls back to literals only
+// if the vars are somehow missing.
+function readHeatColors() {
+  const s = getComputedStyle(document.documentElement);
+  const heatOk = s.getPropertyValue("--heat-ok").trim() || "#2c3647";
+  const accentRgb = s.getPropertyValue("--accent-rgb").trim() || "79, 147, 245";
+  return { heatOk, markerFill: `rgba(${accentRgb}, 0.7)` };
+}
 
-// Loss-ramp swatches for the legend, mirroring lossColor()'s thresholds.
-const HEATMAP_LEGEND: ReadonlyArray<readonly [string, string]> = [
-  ["ok", HEAT_OK],
-  ["<5%", "#eab308"],
-  ["<20%", "#f97316"],
-  ["≥20%", "#ef4444"],
+// Legend thresholds. Swatch colours derive from lossColor() (the single source
+// for the loss ramp) and --heat-ok for the neutral cell, so the legend never
+// hard-codes a colour of its own.
+const HEATMAP_LEGEND: ReadonlyArray<readonly [string, number]> = [
+  ["ok", 0],
+  ["<5%", 3],
+  ["<20%", 12],
+  ["≥20%", 50],
 ];
 
 // HeatmapLegend is the color key rendered once beneath the heatmap(s) so the
@@ -26,9 +30,9 @@ const HEATMAP_LEGEND: ReadonlyArray<readonly [string, string]> = [
 function HeatmapLegend() {
   return (
     <div className="mtr-heatmap-legend">
-      {HEATMAP_LEGEND.map(([label, color]) => (
+      {HEATMAP_LEGEND.map(([label, pct]) => (
         <span key={label}>
-          <i style={{ background: color }} />
+          <i style={{ background: lossColor(pct, "var(--heat-ok)") }} />
           {label}
         </span>
       ))}
@@ -285,6 +289,7 @@ function PathHeatmap({
     canvas.style.height = cssH + "px";
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const { heatOk, markerFill } = readHeatColors();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
     ctx.fillStyle = "#0f141c";
@@ -328,7 +333,7 @@ function PathHeatmap({
           // bucket stays visible — averaging it (LossPct) to ~3% would make
           // it disappear into the clean background.
           const worst = (p as { MaxLossPct?: number }).MaxLossPct ?? p.LossPct;
-          ctx.fillStyle = lossColor(worst, HEAT_OK);
+          ctx.fillStyle = lossColor(worst, heatOk);
           ctx.fillRect(x, y, Math.max(1, colW), actualRowH - 1);
         }
       }
@@ -371,7 +376,7 @@ function PathHeatmap({
     // Selected-cycle marker.
     if (selectedSec != null && selectedSec >= fromSec && selectedSec <= toSec) {
       const x = xForSec(selectedSec);
-      ctx.fillStyle = MARKER_FILL;
+      ctx.fillStyle = markerFill;
       ctx.fillRect(Math.round(x), 2, 2, plotH - 4);
     }
   }, [rows, cycles, visibleHops, height, fromSec, toSec, selectedSec, repaintCount]);
