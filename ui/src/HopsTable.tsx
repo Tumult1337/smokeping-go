@@ -26,7 +26,11 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
   const prevKeyRef = useRef<string>("");
 
   useEffect(() => {
-    const k = `${targetId}|${atSec ?? ""}|${source ?? ""}`;
+    // Blank only when the target or source changes (genuinely different path).
+    // A cycle re-pick (atSec change) keeps the previous rows visible while the
+    // new cycle loads — blanking collapses the section height and the scroll
+    // container jumps to the top. Stale-while-revalidate keeps layout stable.
+    const k = `${targetId}|${source ?? ""}`;
     const keyChanged = prevKeyRef.current !== k;
     prevKeyRef.current = k;
     setErr(null);

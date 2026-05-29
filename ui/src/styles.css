@@ -35,6 +35,12 @@
      (canvas can't read CSS vars); keep the two in sync. */
   --heat-ok: #2c3647;
 
+  /* MTR heatmap "no reply" cell — a hop that never answered the TTL probe
+     (silent / rate-limited router, no resolved address). Muted neutral grey,
+     deliberately OFF the loss ramp so transit noise doesn't read as a real
+     outage. Mirrored as the HEAT_NOREPLY literal in MtrHeatmap.tsx. */
+  --heat-noreply: #4a5570;
+
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 16px rgba(0, 0, 0, 0.22);
 
   --font-sans: "Geist Variable", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;

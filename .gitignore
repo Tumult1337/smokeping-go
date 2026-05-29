@@ -3,6 +3,10 @@
 /config.json
 ui/node_modules/
 ui/dist/
+# Local Vite overrides for verifying the UI against a live API (e.g.
+# vite.config.live.ts). The checked-in vite.config.ts stays pinned at
+# localhost; per-env overrides are local-only and never committed.
+ui/vite.config.*.ts
 internal/ui/dist/*
 !internal/ui/dist/.gitkeep
 *.log

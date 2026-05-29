@@ -11,8 +11,9 @@ import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
 function readHeatColors() {
   const s = getComputedStyle(document.documentElement);
   const heatOk = s.getPropertyValue("--heat-ok").trim() || "#2c3647";
+  const noReply = s.getPropertyValue("--heat-noreply").trim() || "#4a5570";
   const accentRgb = s.getPropertyValue("--accent-rgb").trim() || "79, 147, 245";
-  return { heatOk, markerFill: `rgba(${accentRgb}, 0.7)` };
+  return { heatOk, noReply, markerFill: `rgba(${accentRgb}, 0.7)` };
 }
 
 // Legend thresholds. Swatch colours derive from lossColor() (the single source
@@ -36,6 +37,10 @@ function HeatmapLegend() {
           {label}
         </span>
       ))}
+      <span>
+        <i style={{ background: "var(--heat-noreply)" }} />
+        no reply
+      </span>
     </div>
   );
 }
@@ -58,15 +63,6 @@ interface Props {
   // requested and the collapsible UI is skipped (one section, no chevron).
   source?: string;
 }
-
-// PATH_LEN_AUTO_HIDE_THRESHOLD is the minimum total hop count at which
-// auto-hide of zero-loss hops kicks in. Below this, the whole path renders
-// even when several hops are clean — short paths benefit from full context
-// more than they suffer from clutter. Tuned so a Hetzner → 1.1.1.1 path
-// (8 TTLs, 2 lossy because of ICMP rate-limiting upstream) still renders
-// every hop, while a 28-hop transit path with half a dozen quiet routers
-// gets the declutter.
-const PATH_LEN_AUTO_HIDE_THRESHOLD = 12;
 
 // Per-hop packet-loss heatmap over a time window. With one source (filtered
 // view or single-origin target) renders a single heatmap. With N sources
@@ -222,12 +218,14 @@ function PathHeatmap({
 
   // rows: hop index → (cycleSec → HopPoint).
   // cycles: distinct cycle timestamps in this source.
-  // visibleHops: hop indices to draw, in ascending order; on a long, mostly
-  // clean path the hop-count heuristic drops the clean rows.
+  // visibleHops: every hop index in the path, ascending. We render the full
+  // path rather than only the lossy rows: intermediate routers that rate-limit
+  // TTL-expired ICMP show as "loss" here, so a lossy-only view both buries the
+  // real (clean) last hop and makes the bottom-most row a mid-path rate-limit
+  // artifact the eye reads as the destination.
   const { rows, cycles, visibleHops } = useMemo(() => {
     const byHop = new Map<number, Map<number, HopPoint>>();
     const cycleSet = new Set<number>();
-    const lossyHops = new Set<number>();
     let maxIdx = 0;
     for (const h of hops) {
       const t = Math.floor(new Date(h.Time).getTime() / 1000);
@@ -237,7 +235,6 @@ function PathHeatmap({
       // that bucket-avg LossPct dilutes to ~0%. Falls back to LossPct for
       // raw rows where the server didn't compute a max.
       const worst = (h as { MaxLossPct?: number }).MaxLossPct ?? h.LossPct;
-      if (worst > 0) lossyHops.add(h.Index);
       let row = byHop.get(h.Index);
       if (!row) {
         row = new Map();
@@ -251,15 +248,8 @@ function PathHeatmap({
         existing && ((existing as { MaxLossPct?: number }).MaxLossPct ?? existing.LossPct);
       if (!existing || worst > (existingWorst ?? 0)) row.set(t, h);
     }
-    const all: number[] = [];
-    for (let i = 1; i <= maxIdx; i++) if (byHop.has(i)) all.push(i);
-    // Hop-count-driven auto-hide: only collapse clean rows when the path is
-    // long enough that the clutter actually hurts readability AND at least
-    // half the path is clean (so we don't hide most of a noisy path).
-    const cleanCount = all.length - lossyHops.size;
-    const shouldHide =
-      all.length >= PATH_LEN_AUTO_HIDE_THRESHOLD && cleanCount * 2 >= all.length;
-    const visible = shouldHide ? all.filter((i) => lossyHops.has(i)) : all;
+    const visible: number[] = [];
+    for (let i = 1; i <= maxIdx; i++) if (byHop.has(i)) visible.push(i);
     return {
       rows: byHop,
       cycles: Array.from(cycleSet).sort((a, b) => a - b),
@@ -289,7 +279,7 @@ function PathHeatmap({
     canvas.style.height = cssH + "px";
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const { heatOk, markerFill } = readHeatColors();
+    const { heatOk, noReply, markerFill } = readHeatColors();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
     ctx.fillStyle = "#0f141c";
@@ -333,7 +323,12 @@ function PathHeatmap({
           // bucket stays visible — averaging it (LossPct) to ~3% would make
           // it disappear into the clean background.
           const worst = (p as { MaxLossPct?: number }).MaxLossPct ?? p.LossPct;
-          ctx.fillStyle = lossColor(worst, heatOk);
+          // A hop with no resolved address never answered the TTL probe — a
+          // silent/rate-limited router, not a real packet drop. Paint it the
+          // muted "no reply" neutral instead of the loss ramp so transit noise
+          // doesn't read as a genuine outage; only hops that actually replied
+          // get the red ramp.
+          ctx.fillStyle = p.IP ? lossColor(worst, heatOk) : noReply;
           ctx.fillRect(x, y, Math.max(1, colW), actualRowH - 1);
         }
       }

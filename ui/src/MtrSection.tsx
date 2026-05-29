@@ -145,9 +145,14 @@ function MultiSourceLayout({
   const prevKey = useRef<string>("");
 
   useEffect(() => {
-    const k = `${targetId}|${atSec ?? ""}`;
-    const changed = prevKey.current !== k;
-    prevKey.current = k;
+    // Blank to the loading state only when the TARGET changes — a new target
+    // has a wholly different path, so the old one is misleading. On a mere
+    // cycle re-pick (atSec change) keep the current hops on screen while the
+    // new cycle loads: blanking the whole section collapses its height, and the
+    // scroll container then clamps to the much shorter page and never scrolls
+    // back — the "click jumps me to the top" bug.
+    const changed = prevKey.current !== targetId;
+    prevKey.current = targetId;
     setErr(null);
     if (changed) setHops(null);
     const controller = new AbortController();
