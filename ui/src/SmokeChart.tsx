@@ -124,7 +124,6 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
             const left = Math.round(u.bbox.left / dpr);
             const right = Math.round(u.width - (u.bbox.left + u.bbox.width) / dpr);
             setPlotOffsets((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
-            drawBandPeakLabel(u, builtRef.current, soloSourceRef.current);
           },
         ],
         setCursor: [
@@ -281,7 +280,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
       <div ref={divRef} style={{ width: "100%" }} />
       {points.length === 0 &&
         (loading ? (
-          <div className="chart-skeleton" aria-label="Loading…" />
+          <div className="chart-skeleton" role="status" aria-label="Loading…" />
         ) : (
           <div className="chart-empty">No data in range</div>
         ))}
@@ -391,7 +390,6 @@ type Built = {
 
 const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
 const PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max"] as const;
-const MAX_COL_OFFSET = 6; // 0=min, 1=p5, 2=p25, 3=median, 4=p75, 5=p95, 6=max
 
 // decadeSplits returns one tick per power-of-ten across the visible y range.
 // Replaces uPlot's default log splits (which add minor 2/3/5/7 ticks per
@@ -402,62 +400,6 @@ function decadeSplits(_u: uPlot, _axisIdx: number, scaleMin: number, scaleMax: n
   const out: number[] = [];
   for (let i = lo; i <= hi; i++) out.push(Math.pow(10, i));
   return out;
-}
-
-// drawBandPeakLabel finds the visible window's peak Max across all bands
-// (per-source palette colour of whichever source owns it) and renders a dot
-// at (t, value) inside the plot with the numeric value in the y-axis gutter
-// at the peak's y-pixel. Walks built.data's Max columns (offset MAX_COL_OFFSET
-// within each source's 7-column block) so we get the per-cycle max directly.
-function drawBandPeakLabel(u: uPlot, built: Built | null, soloSource: string | null) {
-  if (!built || built.sources.length === 0) return;
-  const xs = built.data[0] as number[] | undefined;
-  if (!xs || xs.length === 0) return;
-  let bestVal = -Infinity;
-  let bestT = 0;
-  let bestSrcIdx = 0;
-  for (let si = 0; si < built.sources.length; si++) {
-    if (soloSource != null && built.sources[si] !== soloSource) continue;
-    const col = built.data[1 + si * PCT_KEYS.length + MAX_COL_OFFSET] as (number | null)[] | undefined;
-    if (!col) continue;
-    for (let i = 0; i < col.length; i++) {
-      const v = col[i];
-      if (v == null) continue;
-      if (v > bestVal) {
-        bestVal = v;
-        bestT = xs[i];
-        bestSrcIdx = si;
-      }
-    }
-  }
-  if (!isFinite(bestVal) || bestVal <= 0) return;
-  const xPos = u.valToPos(bestT, "x", true);
-  const yPos = u.valToPos(bestVal, "y", true);
-  if (!isFinite(xPos) || !isFinite(yPos)) return;
-  const ctx = u.ctx;
-  const color = PALETTE[bestSrcIdx % PALETTE.length].stroke;
-  ctx.save();
-  // Anchor dot at the peak inside the plot area.
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(xPos, yPos, 2.5, 0, Math.PI * 2);
-  ctx.fill();
-  // Gutter label: right-aligned just inside the plot bbox at the peak's
-  // y-pixel — reads like an extra labeled axis tick.
-  const label = bestVal >= 100 ? `${bestVal.toFixed(0)}` : `${bestVal.toFixed(1)}`;
-  ctx.font = "12px ui-sans-serif, system-ui, -apple-system, sans-serif";
-  ctx.textBaseline = "middle";
-  ctx.textAlign = "right";
-  const labelX = u.bbox.left - 6;
-  const padX = 3;
-  const padY = 2;
-  const w = ctx.measureText(label).width;
-  // Background swatch hides any underlying axis tick at the same y-pixel.
-  ctx.fillStyle = "#0f1218";
-  ctx.fillRect(labelX - w - padX, yPos - 8 - padY, w + padX * 2, 16 + padY * 2);
-  ctx.fillStyle = color;
-  ctx.fillText(label, labelX, yPos);
-  ctx.restore();
 }
 
 function buildAligned(points: CyclePoint[]): Built {

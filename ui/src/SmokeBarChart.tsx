@@ -189,10 +189,6 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
               drawStack(u, ctx, stacks[si], hiddenRef.current);
             }
             ctx.restore();
-            // Peak callout: small dot in the plot at the peak's (t, max),
-            // plus the numeric value rendered in the y-axis gutter at the
-            // peak's y-pixel so it reads like an extra axis tick.
-            drawPeakLabel(u, stacks, soloIdx, hiddenRef.current);
           },
         ],
         setCursor: [
@@ -357,7 +353,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
       <div ref={divRef} style={{ width: "100%" }} />
       {points.length === 0 &&
         (loading ? (
-          <div className="chart-skeleton" aria-label="Loading…" />
+          <div className="chart-skeleton" role="status" aria-label="Loading…" />
         ) : (
           <div className="chart-empty">No data in range</div>
         ))}
@@ -696,73 +692,6 @@ function decadeSplits(_u: uPlot, _axisIdx: number, scaleMin: number, scaleMax: n
   const out: number[] = [];
   for (let i = lo; i <= hi; i++) out.push(Math.pow(10, i));
   return out;
-}
-
-// drawPeakLabel annotates the visible window's peak: a small dot inside the
-// plot at the (t, max) coordinate, plus the numeric value drawn in the
-// y-axis gutter at the peak's y-pixel so it reads like an extra labeled
-// tick. Skips when "max" is hidden in the legend or no valid peak exists.
-function drawPeakLabel(
-  u: uPlot,
-  stacks: SourceStack[],
-  soloIdx: number | null,
-  hidden: Set<string>,
-) {
-  if (hidden.has("max")) return;
-  let bestVal = -Infinity;
-  let bestT = 0;
-  let bestColor = "#e6ebf2";
-  for (let si = 0; si < stacks.length; si++) {
-    if (soloIdx != null && si !== soloIdx) continue;
-    const stack = stacks[si];
-    for (let i = 0; i < stack.bands.length; i++) {
-      const cb = stack.bands[i];
-      if (cb.length === 0) continue;
-      // Outer min-max band's `hi` carries the per-cycle max.
-      const m = cb[0].hi;
-      if (m > bestVal) {
-        bestVal = m;
-        bestT = stack.ts[i];
-        bestColor = stack.medianColor;
-      }
-    }
-  }
-  drawPeakAt(u, bestVal, bestT, bestColor);
-}
-
-// drawPeakAt paints the dot + gutter label for a known peak. Shared between
-// the bars and band paths so the on-axis tick looks identical regardless of
-// which chart style is showing.
-function drawPeakAt(u: uPlot, value: number, t: number, color: string) {
-  if (!isFinite(value) || value <= 0) return;
-  const xPos = u.valToPos(t, "x", true);
-  const yPos = u.valToPos(value, "y", true);
-  if (!isFinite(xPos) || !isFinite(yPos)) return;
-  const ctx = u.ctx;
-  ctx.save();
-  // Anchor dot at the peak inside the plot area.
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(xPos, yPos, 2.5, 0, Math.PI * 2);
-  ctx.fill();
-  // Gutter label: right-aligned just inside the plot bbox, at the peak's
-  // y-pixel. Lives where the regular axis tick labels do — feels like an
-  // extra labeled tick rather than a chart annotation.
-  const label = value >= 100 ? `${value.toFixed(0)}` : `${value.toFixed(1)}`;
-  ctx.font = "12px ui-sans-serif, system-ui, -apple-system, sans-serif";
-  ctx.textBaseline = "middle";
-  ctx.textAlign = "right";
-  const labelX = u.bbox.left - 6;
-  // Background swatch masks any underlying axis tick that happens to share
-  // the y-pixel — without it the two numbers would visually overlap.
-  const padX = 3;
-  const padY = 2;
-  const w = ctx.measureText(label).width;
-  ctx.fillStyle = "#0f1218";
-  ctx.fillRect(labelX - w - padX, yPos - 8 - padY, w + padX * 2, 16 + padY * 2);
-  ctx.fillStyle = color;
-  ctx.fillText(label, labelX, yPos);
-  ctx.restore();
 }
 
 // Labels that toggle each drawStack band. Index lines up with the filtered

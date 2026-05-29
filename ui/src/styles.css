@@ -23,6 +23,12 @@
   --accent:        #a78bfa;
   --accent-dim:    rgba(167, 139, 250, 0.16);
   --accent-border: rgba(167, 139, 250, 0.55);
+  --accent-text:   #c4b5fd;  /* violet text on a --accent-dim fill */
+
+  /* MTR heatmap "ok" cell — neutral slate so loss is the only saturated
+     colour. Mirrored as the HEAT_OK literal in MtrHeatmap.tsx (canvas can't
+     read CSS vars); keep the two in sync. */
+  --heat-ok: #222a38;
 
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 16px rgba(0, 0, 0, 0.22);
 
@@ -370,7 +376,7 @@ body {
    active source-chip). */
 .segmented button.active {
   background: var(--accent-dim);
-  color: #c4b5fd;
+  color: var(--accent-text);
   font-weight: 600;
   box-shadow: inset 0 0 0 1px var(--accent-border);
 }
@@ -418,7 +424,7 @@ body {
 .chip:hover { background: var(--surface-hover); }
 .chip.active {
   background: var(--accent-dim);
-  color: #c4b5fd;
+  color: var(--accent-text);
   border-color: var(--accent-border);
 }
 
