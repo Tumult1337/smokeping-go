@@ -125,17 +125,20 @@ export function OverviewView(props: Props) {
           ☰
         </button>
         <strong>Overview</strong>
-        <span style={{ color: "#8a93a6" }}>· fleet health</span>
+        <span style={{ color: "var(--text-muted)" }}>· fleet health</span>
         <div style={{ flex: 1 }} />
-        {WINDOW_BUTTONS.map((b) => (
-          <button
-            key={b.value}
-            className={win === b.value ? "active" : ""}
-            onClick={() => onWindowChange(b.value)}
-          >
-            {b.label}
-          </button>
-        ))}
+        <div className="segmented" role="group" aria-label="Time window">
+          {WINDOW_BUTTONS.map((b) => (
+            <button
+              key={b.value}
+              className={win === b.value ? "active" : ""}
+              aria-pressed={win === b.value}
+              onClick={() => onWindowChange(b.value)}
+            >
+              {b.label}
+            </button>
+          ))}
+        </div>
         <button
           onClick={onRefresh}
           disabled={refreshing}
