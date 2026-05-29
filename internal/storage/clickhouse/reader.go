@@ -355,6 +355,7 @@ func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 		p.Median = median
 		p.LossPct = float64(lossPct)
 		p.MaxLossPct = p.LossPct
+		p.WorstTime = p.Time // raw rows are one cycle each
 		p.LossCount = int64(lost)
 		p.Sent = int64(sent)
 		out = append(out, p)
@@ -410,7 +411,8 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        sum(sent)                                         AS total_sent,
        sum(lost)                                         AS total_lost,
        if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS avg_loss_pct,
-       max(loss_pct)                                     AS max_loss_pct
+       max(loss_pct)                                     AS max_loss_pct,
+       argMax(timestamp, loss_pct)                       AS worst_ts
 FROM probe_hop
 WHERE target_id = ?
   AND timestamp >= ? AND timestamp < ?%s
@@ -429,7 +431,8 @@ ORDER BY bucket_ts, source, ttl`, int(step.Seconds()), srcClause)
 		var sent, lost uint64
 		var lossPct float64
 		var maxLossPct float32
-		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &sent, &lost, &lossPct, &maxLossPct); err != nil {
+		var worstTs time.Time
+		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &sent, &lost, &lossPct, &maxLossPct, &worstTs); err != nil {
 			return nil, err
 		}
 		p.Index = int64(ttl)
@@ -437,6 +440,7 @@ ORDER BY bucket_ts, source, ttl`, int(step.Seconds()), srcClause)
 		p.LossCount = int64(lost)
 		p.LossPct = lossPct
 		p.MaxLossPct = float64(maxLossPct)
+		p.WorstTime = worstTs
 		out = append(out, p)
 	}
 	return out, rows.Err()

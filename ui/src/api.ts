@@ -24,6 +24,10 @@ export interface HopPoint {
   LossPct: number;
   LossCount: number;
   Sent: number;
+  // Timeline (bucketed) rows only: worst single-cycle loss in the bucket and
+  // the exact timestamp of that cycle. Absent on the /hops?at= path-table rows.
+  MaxLossPct?: number;
+  WorstTime?: string;
 }
 
 export interface HopsResponse {

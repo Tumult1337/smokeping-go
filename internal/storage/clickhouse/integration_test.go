@@ -1083,6 +1083,14 @@ func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
 	if got.MaxLossPct < 99.9 {
 		t.Errorf("MaxLossPct: got %.2f, want 100 (the 100%%-loss spike must survive bucketing)", got.MaxLossPct)
 	}
+	// WorstTime must point at the exact lossy cycle (i=5, start+150s), not the
+	// bucket start — this is what lets a heatmap-cell click open the cycle that
+	// justifies the cell's colour instead of the bucket's first (clean) cycle.
+	wantWorst := start.Add(5 * 30 * time.Second)
+	if !got.WorstTime.Equal(wantWorst) {
+		t.Errorf("WorstTime: got %s, want %s (the 100%%-loss cycle, not bucket start %s)",
+			got.WorstTime.UTC(), wantWorst.UTC(), got.Time.UTC())
+	}
 
 	// Raw path must mirror LossPct into MaxLossPct so the UI can read
 	// MaxLossPct uniformly without branching.
@@ -1101,6 +1109,10 @@ func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
 		if p.MaxLossPct != p.LossPct {
 			t.Errorf("raw row at %v: MaxLossPct=%.2f, LossPct=%.2f — raw rows must mirror",
 				p.Time, p.MaxLossPct, p.LossPct)
+		}
+		// Raw rows are a single cycle, so the worst-loss cycle is themselves.
+		if !p.WorstTime.Equal(p.Time) {
+			t.Errorf("raw row at %v: WorstTime=%s, want == Time", p.Time, p.WorstTime.UTC())
 		}
 	}
 }

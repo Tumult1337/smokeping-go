@@ -170,6 +170,13 @@ type HopPoint struct {
 	MaxLossPct float64
 	LossCount  int64
 	Sent       int64
+	// WorstTime is the exact timestamp of the worst-loss cycle inside the
+	// bucket (argMax(timestamp, loss_pct)); equals Time for raw rows. Lets a
+	// heatmap-cell click jump to the cycle that justifies the cell's colour
+	// instead of the bucket's first (often clean) cycle — the bucket is
+	// coloured by MaxLossPct, so the first cycle is frequently not the lossy
+	// one and the displayed path looked "one cycle to the left".
+	WorstTime time.Time
 }
 
 // OverviewSourceRow is one row of fleet-overview aggregates for a single

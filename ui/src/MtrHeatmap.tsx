@@ -412,6 +412,32 @@ function PathHeatmap({
     return best;
   }
 
+  // worstCycleSec maps a clicked bucket-start (unix sec, as keyed in `rows`) to
+  // the exact timestamp of the worst-loss cycle within that bucket, across the
+  // visible hops. Cells are coloured by MaxLossPct, so the bucket's first cycle
+  // is frequently clean; clicking a red cell should open the cycle that
+  // actually lost — not the earliest one (which read as "one to the left").
+  // Falls back to the bucket start when the bucket is clean or the row carries
+  // no WorstTime (raw, non-bucketed rows where WorstTime == Time anyway).
+  function worstCycleSec(bucketSec: number): number {
+    let bestLoss = 0;
+    let worstISO: string | undefined;
+    for (const hop of visibleHops) {
+      const p = rows.get(hop)?.get(bucketSec);
+      if (!p) continue;
+      const loss = p.MaxLossPct ?? p.LossPct;
+      if (loss > bestLoss) {
+        bestLoss = loss;
+        worstISO = p.WorstTime;
+      }
+    }
+    if (bestLoss > 0 && worstISO) {
+      const s = Math.floor(new Date(worstISO).getTime() / 1000);
+      if (Number.isFinite(s)) return s;
+    }
+    return bucketSec;
+  }
+
   if (visibleHops.length === 0) {
     return <div className="empty">All hops clean in this range</div>;
   }
@@ -429,7 +455,7 @@ function PathHeatmap({
       onClick={(e) => {
         if (!onPick) return;
         const t = pickAtX(e.clientX);
-        if (t != null) onPick(t, source || undefined);
+        if (t != null) onPick(worstCycleSec(t), source || undefined);
       }}
     >
       <canvas ref={canvasRef} style={{ display: "block" }} />

@@ -428,6 +428,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 			MaxLossPct: h.MaxLossPct,
 			LossCount:  h.LossCount,
 			Sent:       h.Sent,
+			WorstTime:  h.WorstTime,
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -452,6 +453,9 @@ type hopTimelineDTO struct {
 	MaxLossPct float64   `json:"MaxLossPct"`
 	LossCount  int64     `json:"LossCount"`
 	Sent       int64     `json:"Sent"`
+	// WorstTime: exact timestamp of the bucket's worst-loss cycle so a
+	// heatmap click can open that cycle instead of the bucket's first one.
+	WorstTime time.Time `json:"WorstTime"`
 }
 
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
