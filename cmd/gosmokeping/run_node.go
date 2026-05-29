@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/alert"
@@ -21,15 +21,16 @@ import (
 // runNode is the default (non-slave) entrypoint: loads a full config, wires
 // storage + alerts + UI + optional cluster master endpoints, and blocks
 // running the scheduler (via Supervisor, so SIGHUP-triggered target edits are
-// applied live) until ctx is cancelled.
-func runNode(ctx context.Context, log *slog.Logger, configPath, version string) {
+// applied live) until ctx is cancelled. Returns an error rather than calling
+// os.Exit so deferred cleanup (notably backend.close, which flushes the
+// batching writer) always runs before the process exits.
+func runNode(ctx context.Context, log *slog.Logger, configPath, version string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		log.Error("load config", "path", configPath, "err", err)
-		os.Exit(1)
+		return fmt.Errorf("load config %q: %w", configPath, err)
 	}
 	store := config.NewStore(configPath, cfg)
 
@@ -64,20 +65,19 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		log.Warn("storage backend disabled, running without persistent storage",
 			"storage", "clickhouse")
 	default:
-		log.Error("open storage", "storage", "clickhouse", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("open storage clickhouse: %w", err)
 	}
 
-	var evaluator *alert.Evaluator
-	if len(cfg.Alerts) > 0 {
-		dispatcher := alert.NewDispatcher(log, store)
-		evaluator, err = alert.NewEvaluator(log, store, dispatcher)
-		if err != nil {
-			log.Error("init alert evaluator", "err", err)
-			os.Exit(1)
-		}
-		sinks = append(sinks, evaluator)
+	// Always construct the evaluator, even with zero alerts at startup. It is a
+	// cheap no-op sink when there are no conditions, and building it up front
+	// lets a later SIGHUP that adds the first alert take effect via Refresh —
+	// otherwise the nil→non-nil transition would require a process restart.
+	dispatcher := alert.NewDispatcher(log, store)
+	evaluator, err := alert.NewEvaluator(log, store, dispatcher)
+	if err != nil {
+		return fmt.Errorf("init alert evaluator: %w", err)
 	}
+	sinks = append(sinks, evaluator)
 
 	// Build the fanout once — slave-inbound cycles flow through the exact same
 	// sinks as locally-probed ones (Writer, alert evaluator, log sink).
@@ -135,10 +135,8 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 			return scheduler.New(log, registry, fanout, master.LocalTargets(c)), nil
 		},
 		OnReload: func(c *config.Config) {
-			if evaluator != nil {
-				if err := evaluator.Refresh(); err != nil {
-					log.Error("alert refresh failed, keeping previous conditions", "err", err)
-				}
+			if err := evaluator.Refresh(); err != nil {
+				log.Error("alert refresh failed, keeping previous conditions", "err", err)
 			}
 			log.Info("config reload applied",
 				"targets", len(c.AllTargets()),
@@ -147,8 +145,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		},
 	}
 	if err := sup.Run(ctx); err != nil {
-		log.Error("scheduler supervisor", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("scheduler supervisor: %w", err)
 	}
 
 	// Wait for the HTTP server to finish draining in-flight requests before
@@ -158,4 +155,5 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		log.Error("http server", "err", err)
 	}
 	log.Info("gosmokeping shutting down")
+	return nil
 }

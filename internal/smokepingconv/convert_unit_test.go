@@ -53,3 +53,44 @@ host = berlin.example.com
 		t.Errorf("expected storage-placeholder note, got %+v", notes)
 	}
 }
+
+// TestConvert_AlertRefsSlugged guards the bug where an alert defined with an
+// uppercase/spaced SmokePing name was stored slugged in the alert map but
+// referenced verbatim from targets — producing a config that fails
+// config.Validate (and was written anyway). The emitted target's Alerts must
+// match the alert map keys.
+func TestConvert_AlertRefsSlugged(t *testing.T) {
+	src := `*** Probes ***
++ FPing
+
+*** Alerts ***
++ LossAlert
+type = loss
+pattern = >50%,>50%
+
+*** Targets ***
+probe = FPing
+alerts = LossAlert
+
++ berlin
+host = berlin.example.com
+`
+	cfg, _, err := Convert(strings.NewReader(src), "/tmp", "/tmp/x.conf")
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if _, ok := cfg.Alerts["lossalert"]; !ok {
+		t.Fatalf("alert map missing slugged key %q: %+v", "lossalert", cfg.Alerts)
+	}
+	if len(cfg.Targets) == 0 || len(cfg.Targets[0].Targets) == 0 {
+		t.Fatalf("targets: %+v", cfg.Targets)
+	}
+	got := cfg.Targets[0].Targets[0].Alerts
+	if len(got) != 1 || got[0] != "lossalert" {
+		t.Errorf("target alerts = %v, want [lossalert]", got)
+	}
+	// The whole point: the emitted config must validate.
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("emitted config fails validation: %v", err)
+	}
+}

@@ -464,6 +464,11 @@ export default function App() {
     setZoom(null);
     setPickedSec(null);
     setPickedSource(null);
+    // Clear any soloed source from the previous target. The chart only resets
+    // this when its source set changes, so switching between two targets with
+    // an identical source set would otherwise leak a stale solo filter into
+    // windowStats and report stats for the wrong source subset.
+    setChartSoloSource(null);
     setSidebarOpen(false);
   };
 
@@ -473,6 +478,7 @@ export default function App() {
     setZoom(null);
     setPickedSec(null);
     setPickedSource(null);
+    setChartSoloSource(null);
     setSidebarOpen(false);
   };
 

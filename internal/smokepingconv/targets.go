@@ -77,7 +77,7 @@ func mapTargets(root *parser.SPRoot, probeInfo map[string]ProbeInfo, extNotes []
 					Source: sourceOf(n.File, n.LineNo),
 				})
 				for _, c := range n.Children {
-					walk(frame{node: c, path: pathSelf, probe: probe, alerts: alerts})
+					walk(frame{node: c, path: pathSelf, probe: probe, alerts: alerts, slaves: slaves})
 				}
 				return
 			}
@@ -106,7 +106,12 @@ func mapTargets(root *parser.SPRoot, probeInfo map[string]ProbeInfo, extNotes []
 				tgt.Title = v
 			}
 			if len(alerts) > 0 {
-				tgt.Alerts = alerts
+				// Alert references must be slugged to match the alert map keys,
+				// which are keyed by slug(a.Name) in mapAlerts. SmokePing alert
+				// names carry uppercase/spaces that would otherwise fail
+				// config.Validate (and the converter only warns, then writes the
+				// broken file anyway).
+				tgt.Alerts = slugAll(alerts)
 			}
 			if len(slaves) > 0 {
 				tgt.Slaves = append([]string(nil), slaves...)

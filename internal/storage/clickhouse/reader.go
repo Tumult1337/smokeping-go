@@ -150,7 +150,7 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
        quantilesExactWeighted(0.85)(p85_ms, sent)[1],
        quantilesExactWeighted(0.90)(p90_ms, sent)[1],
        quantilesExactWeighted(0.95)(p95_ms, sent)[1],
-       100.0 * sum(lost) / nullIf(sum(sent), 0)            AS loss_pct,
+       if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS loss_pct,
        sum(lost), sum(sent)
 FROM probe_cycle
 WHERE target_id = ?
@@ -409,7 +409,7 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        hop_addr,
        sum(sent)                                         AS total_sent,
        sum(lost)                                         AS total_lost,
-       100.0 * sum(lost) / nullIf(sum(sent), 0)          AS avg_loss_pct,
+       if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS avg_loss_pct,
        max(loss_pct)                                     AS max_loss_pct
 FROM probe_hop
 WHERE target_id = ?

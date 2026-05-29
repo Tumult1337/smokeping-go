@@ -197,6 +197,29 @@ func TestCachingReader_QuantizesKey(t *testing.T) {
 	}
 }
 
+func TestCachingReader_StepDoesNotCollide(t *testing.T) {
+	// The API's `?step=` override makes Step independent of the window: the same
+	// from/to can be requested at different bucket widths. Those must NOT share
+	// a cache entry — the payload shape differs. Two identical-window queries
+	// with different Step should each hit the inner reader.
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &fakeReader{out: []CyclePoint{{Time: now}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{Step: 24 * time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.cycles.Load(); got != 2 {
+		t.Fatalf("inner calls: got %d want 2 (different Step must not collide on one cache entry)", got)
+	}
+}
+
 func TestCachingReader_DifferentSourcesAreSeparate(t *testing.T) {
 	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
 	inner := &fakeReader{out: []CyclePoint{{Time: now}}}
@@ -702,6 +725,7 @@ func TestCachingReader_Cycles_NoRedundantLeaderAfterRace(t *testing.T) {
 		name:     "t",
 		fromUnix: floorUnix(from, cacheKeyFromQuantum),
 		toUnix:   ceilUnix(now, cacheKeyToQuantum),
+		stepSec:  int64(time.Hour / time.Second),
 	}
 	c.testHookAfterCyclesLookup = func() {
 		c.testHookAfterCyclesLookup = nil

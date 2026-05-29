@@ -46,6 +46,14 @@ type Writer struct {
 // it's one line per N drops so a saturating channel doesn't flood the log.
 const dropLogEvery = 10000
 
+// flushRetainFactor bounds the backlog a table buffer keeps across failed
+// flushes. On a flush error the batch is retained for retry rather than
+// dropped, but a prolonged ClickHouse outage must not grow `pending` without
+// limit — so the retained backlog is capped at maxRows*flushRetainFactor,
+// dropping (and counting) the oldest overflow. This mirrors the drop-oldest
+// semantics of the slave push ring.
+const flushRetainFactor = 4
+
 // NewWriter opens a connection and starts one consumer goroutine per
 // table. Returns an error if the initial Ping fails.
 func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) (*Writer, error) {
@@ -195,8 +203,14 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 	defer ticker.Stop()
 
 	pending := make([]any, 0, maxRows)
+	// flushFailing is set while the last flush errored. It gates the
+	// size-triggered flush below so a sustained outage retries only on the
+	// ticker tick, not on every incoming row (which would fire a blocking dial
+	// per row once pending stays ≥ maxRows — a retry storm).
+	flushFailing := false
 	flush := func(flushCtx context.Context) {
 		if len(pending) == 0 {
+			flushFailing = false
 			return
 		}
 		var err error
@@ -211,8 +225,22 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 			err = w.flushHTTP(flushCtx, pending)
 		}
 		if err != nil {
+			flushFailing = true
 			w.log.Warn("clickhouse.flush", "table", tableName(table), "err", err, "rows", len(pending))
+			// Retain the batch for retry on the next ticker tick instead of
+			// dropping it on a transient ClickHouse hiccup. Bound the backlog so
+			// a long outage can't grow pending without limit: keep the newest
+			// maxRows*flushRetainFactor rows, dropping the oldest overflow.
+			if maxRetain := maxRows * flushRetainFactor; len(pending) > maxRetain {
+				over := len(pending) - maxRetain
+				pending = append(pending[:0], pending[over:]...)
+				for range over {
+					w.recordDrop(table)
+				}
+			}
+			return
 		}
+		flushFailing = false
 		pending = pending[:0]
 	}
 	for {
@@ -237,7 +265,9 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 			return
 		case row := <-w.chans[table]:
 			pending = append(pending, row)
-			if len(pending) >= maxRows {
+			// While a flush is failing, defer to the ticker for retries so we
+			// don't dial ClickHouse on every row during an outage.
+			if len(pending) >= maxRows && !flushFailing {
 				flush(ctx)
 			}
 		case <-ticker.C:

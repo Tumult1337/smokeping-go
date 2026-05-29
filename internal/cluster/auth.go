@@ -12,6 +12,13 @@ import (
 // compare is constant-time regardless of token length (subtle.ConstantTimeCompare
 // returns 0 immediately on a length mismatch, leaking token length via timing).
 func BearerAuth(token string) func(http.Handler) http.Handler {
+	// An empty token would hash to sha256("") and then a request carrying the
+	// literal header "Authorization: Bearer " (empty credential) would compare
+	// equal and pass — an open ingest endpoint. Fail fast: this is a startup
+	// misconfiguration, not runtime input.
+	if token == "" {
+		panic("cluster: BearerAuth requires a non-empty token")
+	}
 	expectedHash := sha256.Sum256([]byte(token))
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

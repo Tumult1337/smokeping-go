@@ -29,7 +29,15 @@ func mapAlerts(root *parser.SPRoot) (map[string]config.Alert, []Note) {
 			})
 			continue
 		}
-		out[slug(a.Name)] = config.Alert{
+		key := uniqueKey(out, slug(a.Name))
+		if key != slug(a.Name) {
+			notes = append(notes, Note{
+				Level: LevelWarn, Category: CatAlert,
+				Detail: fmt.Sprintf("%q slug collides with an earlier alert — stored as %q; update any target referencing it", a.Name, key),
+				Source: src,
+			})
+		}
+		out[key] = config.Alert{
 			Condition: cond,
 			Sustained: sustained,
 			Actions:   []string{"log"},

@@ -468,6 +468,7 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	from := to.Add(-24 * time.Hour)
 	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
+		s.log.Warn("query status", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
 		return
 	}
@@ -548,6 +549,15 @@ func parseTimeParam(s string, def, now time.Time) (time.Time, error) {
 	return time.Unix(ts, 0), nil
 }
 
+// Upper bounds for the "d"/"w" units below. time.Duration is int64 nanoseconds,
+// so n*24h overflows past ~106751 days; cap well below that (~10 years) so a
+// crafted "?from=-9223372036d" can't wrap to a bogus window. The sign is
+// preserved (windows are relative offsets), so the guard is on magnitude.
+const (
+	maxRelDays  = 3660 // ~10 years
+	maxRelWeeks = 530  // ~10 years
+)
+
 // parseRelativeDuration extends time.ParseDuration with "d" (days) and "w"
 // (weeks) so UI-friendly windows like "-7d" and "-365d" work. Go's stdlib
 // only parses up to "h", which would reject anything wider than a day.
@@ -560,13 +570,13 @@ func parseRelativeDuration(s string) (time.Duration, error) {
 	switch {
 	case strings.HasSuffix(s, "d"):
 		n, err := strconv.ParseInt(strings.TrimSuffix(s, "d"), 10, 64)
-		if err != nil {
+		if err != nil || n < -maxRelDays || n > maxRelDays {
 			return 0, fmt.Errorf("invalid duration %q", s)
 		}
 		return time.Duration(n) * 24 * time.Hour, nil
 	case strings.HasSuffix(s, "w"):
 		n, err := strconv.ParseInt(strings.TrimSuffix(s, "w"), 10, 64)
-		if err != nil {
+		if err != nil || n < -maxRelWeeks || n > maxRelWeeks {
 			return 0, fmt.Errorf("invalid duration %q", s)
 		}
 		return time.Duration(n) * 7 * 24 * time.Hour, nil
@@ -626,4 +636,11 @@ type statusWriter struct {
 func (s *statusWriter) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Unwrap lets http.ResponseController (and middleware like chi's Compress)
+// reach the underlying ResponseWriter for Flush/Hijack support. Without it
+// the wrapper chain stops here and those interfaces are silently lost.
+func (s *statusWriter) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
 }

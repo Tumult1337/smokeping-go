@@ -33,6 +33,13 @@ const (
 	// window. One ping cycle of slack keeps fresh-data refreshes short
 	// even when the request slightly trails real time.
 	liveBoundary = 60 * time.Second
+	// queryMaxDuration caps a detached leader query. context.WithoutCancel
+	// decouples the inner query from the caller so a browser nav can't kill a
+	// slow warm-up, but it also strips the parent deadline — without a ceiling
+	// a wedged ClickHouse query would hang the leader goroutine forever, never
+	// delete the inflight slot, and block every later identical request as a
+	// permanent waiter. Sized well above the worst legitimate 7d hops query.
+	queryMaxDuration = 5 * time.Minute
 )
 
 // CachingReader wraps a Reader with two LRU+singleflight decorators: one for
@@ -100,6 +107,11 @@ type hopsCacheKey struct {
 	group, name, source string
 	// fromUnix/toUnix used for timeline + hopsAt windows; both zero for latest.
 	fromUnix, toUnix int64
+	// stepSec is the resolved bucket width. Two windows that quantize to the
+	// same from/to but straddle a step-ladder boundary resolve to different
+	// bucket widths; without this they would collide and serve wrong-shaped
+	// data. Zero for raw/latest.
+	stepSec int64
 }
 
 type hopsKind uint8
@@ -131,6 +143,11 @@ type hopsInflight struct {
 type cycleCacheKey struct {
 	group, name, source string
 	fromUnix, toUnix    int64
+	// stepSec is the resolved bucket width (f.Step). The cached payload's
+	// shape depends on it, and the API's back-compat `?step=raw|1h|1d`
+	// override makes Step independent of the window — so two requests with
+	// an identical from/to but a different step must NOT share an entry.
+	stepSec int64
 }
 
 type cycleCacheEntry struct {
@@ -182,6 +199,7 @@ func (c *CachingReader) QueryCycles(ctx context.Context, ref config.TargetRef, f
 		source:   f.Source,
 		fromUnix: floorUnix(from, cacheKeyFromQuantum),
 		toUnix:   ceilUnix(to, cacheKeyToQuantum),
+		stepSec:  int64(f.Step / time.Second),
 	}
 
 	if pts, ok := c.lookup(key); ok {
@@ -254,7 +272,8 @@ func (c *CachingReader) fetchCycles(ctx context.Context, key cycleCacheKey, ttl 
 // (cache hit) or neither (still inflight) — never the in-between state that
 // would leak a redundant leader.
 func (c *CachingReader) runCyclesLeader(ctx context.Context, key cycleCacheKey, ttl time.Duration, call *cycleInflight, run func(context.Context) ([]CyclePoint, error)) {
-	runCtx := context.WithoutCancel(ctx)
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryMaxDuration)
+	defer cancel()
 	pts, err := run(runCtx)
 
 	var stale []CyclePoint
@@ -332,6 +351,7 @@ func (c *CachingReader) QueryHopsTimeline(ctx context.Context, ref config.Target
 		source:   f.Source,
 		fromUnix: floorUnix(from, cacheKeyFromQuantum),
 		toUnix:   ceilUnix(to, cacheKeyToQuantum),
+		stepSec:  int64(f.Step / time.Second),
 	}
 	return c.fetchHops(ctx, key, c.ttlFor(to), func(ctx context.Context) ([]HopPoint, error) {
 		return c.inner.QueryHopsTimeline(ctx, ref, from, to, f)
@@ -436,7 +456,8 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 // store still happens BEFORE close(done) so a follow-up request on the same
 // goroutine hits the cache immediately.
 func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl time.Duration, call *hopsInflight, run func(context.Context) ([]HopPoint, error)) {
-	runCtx := context.WithoutCancel(ctx)
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryMaxDuration)
+	defer cancel()
 	hops, err := run(runCtx)
 
 	var stale []HopPoint

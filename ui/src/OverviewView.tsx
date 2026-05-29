@@ -55,20 +55,25 @@ export function OverviewView(props: Props) {
   const [rows, setRows] = useState<OverviewRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  // hasLoadedRef tracks whether we've ever rendered real data; lets us avoid
-  // wiping the table to skeleton on subsequent refreshes.
-  const hasLoadedRef = useRef(false);
+  // prevWinRef tracks the last window we fetched. On a window change we wipe to
+  // skeleton (row count + sparkline shapes differ); on a same-window refresh
+  // tick we keep the existing rows visible. Doing this inside the fetch effect
+  // — rather than a separate [win] effect — avoids the effect-ordering bug
+  // where the reset ran after the fetch effect had already read the flag.
+  const prevWinRef = useRef(win);
 
   useEffect(() => {
     let cancelled = false;
     setError(null);
     setRefreshing(true);
-    if (!hasLoadedRef.current) setRows(null);
+    if (prevWinRef.current !== win) {
+      prevWinRef.current = win;
+      setRows(null);
+    }
     getOverview(win)
       .then((r) => {
         if (cancelled) return;
         setRows(r.rows);
-        hasLoadedRef.current = true;
       })
       .catch((e) => {
         if (cancelled) return;
@@ -82,12 +87,6 @@ export function OverviewView(props: Props) {
       cancelled = true;
     };
   }, [win, refreshTick]);
-
-  // Window changes reset the "have we loaded yet" flag so the skeleton shows
-  // again — the row count and sparkline shapes likely differ.
-  useEffect(() => {
-    hasLoadedRef.current = false;
-  }, [win]);
 
   // Sort behaviour: silent rows always sit at the top regardless of the
   // user-chosen column, so a click on "sort by median" still surfaces dead

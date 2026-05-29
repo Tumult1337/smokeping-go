@@ -68,7 +68,7 @@ func Convert(r io.Reader, baseDir, path string) (*config.Config, []Note, error) 
 	notes = append(notes, targetNotes...)
 	notes = append(notes, alertNotes...)
 	notes = append(notes, Note{
-		Level: LevelWarn, Category: CatGeneral,
+		Level: LevelInfo, Category: CatGeneral,
 		Detail: "storage.clickhouse.addr is set to 127.0.0.1:9000 — edit to point at your ClickHouse instance before running gosmokeping",
 	})
 	for _, u := range root.Unknown {

@@ -36,8 +36,9 @@ type Server struct {
 }
 
 // NewServer builds a master-side cluster handler. token is the shared bearer
-// secret checked on every request; an empty token disables the mount at the
-// caller level (we still require non-empty here as a safety).
+// secret checked on every request. The caller must not mount this with an
+// empty token; BearerAuth panics on an empty token to prevent an open ingest
+// endpoint (see cluster.BearerAuth).
 func NewServer(log *slog.Logger, store *config.Store, registry *Registry, sink scheduler.Sink, token string) *Server {
 	return &Server{
 		log:      log,

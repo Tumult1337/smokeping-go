@@ -119,9 +119,9 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int, timeout time.Duration) (string, time.Duration, bool, error) {
 	var msg icmp.Message
 	if isV6 {
-		msg = icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq, Data: payload()}}
+		msg = icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq, Data: icmpPayload}}
 	} else {
-		msg = icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: id, Seq: seq, Data: payload()}}
+		msg = icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: id, Seq: seq, Data: icmpPayload}}
 	}
 	wire, err := msg.Marshal(nil)
 	if err != nil {
@@ -151,7 +151,9 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		return "", 0, false, err
 	}
 
-	buf := make([]byte, 1500)
+	bufp := icmpBufPool.Get().(*[]byte)
+	defer icmpBufPool.Put(bufp)
+	buf := *bufp
 	proto := 1
 	if isV6 {
 		proto = 58

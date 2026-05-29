@@ -142,9 +142,9 @@ func listen(isV6 bool) (*icmp.PacketConn, error) {
 func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq int, timeout time.Duration) (time.Duration, error) {
 	var msg icmp.Message
 	if isV6 {
-		msg = icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq, Data: payload()}}
+		msg = icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq, Data: icmpPayload}}
 	} else {
-		msg = icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: id, Seq: seq, Data: payload()}}
+		msg = icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: id, Seq: seq, Data: icmpPayload}}
 	}
 	wire, err := msg.Marshal(nil)
 	if err != nil {
@@ -170,7 +170,9 @@ func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		return 0, err
 	}
 
-	buf := make([]byte, 1500)
+	bufp := icmpBufPool.Get().(*[]byte)
+	defer icmpBufPool.Put(bufp)
+	buf := *bufp
 	for {
 		n, _, err := conn.ReadFrom(buf)
 		if err != nil {
@@ -210,11 +212,20 @@ func isTimeout(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-func payload() []byte {
-	// Fixed 56 bytes like ping(8); content arbitrary but stable aids debugging.
+// icmpPayload is the fixed 56-byte echo body (like ping(8); content arbitrary
+// but stable aids debugging). Built once and shared read-only across all sends
+// — icmp.Message.Marshal copies the body into its own buffer, so concurrent
+// sends never mutate it. Hoisted out of the per-ping hot path.
+var icmpPayload = func() []byte {
 	b := make([]byte, 56)
 	for i := range b {
 		b[i] = byte(i)
 	}
 	return b
-}
+}()
+
+// icmpBufPool recycles 1500-byte receive buffers across probes to avoid a
+// heap allocation per ping / per TTL-step. 1500 covers the largest reply we
+// parse (an ICMP error quoting an IPv6 header + 8 bytes). The buffer never
+// escapes the send/receive call, so pooling is safe.
+var icmpBufPool = sync.Pool{New: func() any { b := make([]byte, 1500); return &b }}

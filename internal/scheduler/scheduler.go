@@ -120,6 +120,16 @@ func (s *Scheduler) loopTarget(ctx context.Context, ref config.TargetRef, pr pro
 }
 
 func (s *Scheduler) runCycle(ctx context.Context, ref config.TargetRef, pr probe.Probe) {
+	// A panic in any sink (storage writer, alert evaluator, log sink) must not
+	// kill this target's goroutine — that would silently stop probing the
+	// target until the next full rebuild with no log line. Recover at the
+	// per-cycle boundary so the loop survives and retries on the next tick.
+	defer func() {
+		if v := recover(); v != nil {
+			s.log.Error("runCycle panic recovered", "target", ref.ID(), "panic", v)
+		}
+	}()
+
 	target := probe.Target{
 		Name:   ref.Target.Name,
 		Group:  ref.Group,

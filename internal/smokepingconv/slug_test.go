@@ -10,7 +10,9 @@ func TestSlug(t *testing.T) {
 		{"Europe & Asia", "europe-asia"},
 		{"North_America", "north_america"},
 		{"A  B", "a-b"},
-		{"", ""},
+		{"", "unnamed"},
+		{"---", "unnamed"},
+		{"!!!", "unnamed"},
 	}
 	for _, c := range cases {
 		got := slug(c.in)

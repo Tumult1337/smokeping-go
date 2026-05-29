@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -45,5 +46,8 @@ func main() {
 		runSlave(ctx, log, *configPath, version)
 		return
 	}
-	runNode(ctx, log, *configPath, version)
+	if err := runNode(ctx, log, *configPath, version); err != nil {
+		log.Error("fatal", "err", err)
+		os.Exit(1)
+	}
 }

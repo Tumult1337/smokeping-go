@@ -137,7 +137,9 @@ func sourceOf(file string, line int) string {
 }
 
 // uniqueKey returns base when unused; otherwise base-2, base-3, etc.
-func uniqueKey(m map[string]config.Probe, base string) string {
+// uniqueKey returns base, or base-2/base-3/… if base already exists in m, so
+// two source names that slug identically don't silently overwrite each other.
+func uniqueKey[V any](m map[string]V, base string) string {
 	if _, ok := m[base]; !ok {
 		return base
 	}

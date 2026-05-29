@@ -1,5 +1,5 @@
+info general: storage.clickhouse.addr is set to 127.0.0.1:9000 — edit to point at your ClickHouse instance before running gosmokeping
 skip alert: "weird" pattern "<10,<10,<10,>100,>100" (type=rtt) not expressible as gosmokeping condition — skipped  (source: unsupported.conf:20)
 skip probe: "AnotherSSH" (type AnotherSSH) — no gosmokeping equivalent  (source: unsupported.conf:16)
 skip section: *** Presentation *** ignored (no gosmokeping analogue)
 skip target: ssh-only probe="AnotherSSH" unknown/unsupported — dropped  (source: unsupported.conf:30)
-warn general: storage.clickhouse.addr is set to 127.0.0.1:9000 — edit to point at your ClickHouse instance before running gosmokeping

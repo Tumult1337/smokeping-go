@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -36,7 +37,7 @@ func main() {
 
 	if err := run(*inPath, *outPath, *notesPath, *force, *strict); err != nil {
 		var strictErr *strictError
-		if ok := asStrict(err, &strictErr); ok {
+		if errors.As(err, &strictErr) {
 			slog.Warn(strictErr.Error())
 			os.Exit(2)
 		}
@@ -48,15 +49,7 @@ func main() {
 type strictError struct{ n int }
 
 func (e *strictError) Error() string {
-	return fmt.Sprintf("strict mode: %d note(s) produced", e.n)
-}
-
-func asStrict(err error, target **strictError) bool {
-	s, ok := err.(*strictError)
-	if ok {
-		*target = s
-	}
-	return ok
+	return fmt.Sprintf("strict mode: %d partial/dropped construct(s)", e.n)
 }
 
 func run(inPath, outPath, notesPath string, force, strict bool) error {
@@ -99,8 +92,17 @@ func run(inPath, outPath, notesPath string, force, strict bool) error {
 		}
 	}
 
-	if strict && len(notes) > 0 {
-		return &strictError{n: len(notes)}
+	// Strict mode fails only on loss-of-fidelity notes (warn/skip), not on
+	// purely advisory info notes like the ClickHouse-address reminder — which
+	// is emitted on every run and would otherwise make -strict always exit 2.
+	if strict && smokepingconv.HasPartial(notes) {
+		var n int
+		for _, note := range notes {
+			if note.Level == smokepingconv.LevelWarn || note.Level == smokepingconv.LevelSkip {
+				n++
+			}
+		}
+		return &strictError{n: n}
 	}
 	return nil
 }

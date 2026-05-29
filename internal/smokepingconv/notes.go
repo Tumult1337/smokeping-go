@@ -7,6 +7,9 @@ type Level string
 const (
 	LevelWarn Level = "warn"
 	LevelSkip Level = "skip"
+	// LevelInfo is a purely advisory note (e.g. "edit this placeholder") that
+	// does NOT indicate a loss-of-fidelity translation, so -strict ignores it.
+	LevelInfo Level = "info"
 )
 
 type Category string
@@ -35,7 +38,13 @@ func (n Note) Format() string {
 }
 
 // HasPartial reports whether any note indicates a loss-of-fidelity translation
-// (warn) or dropped construct (skip). Used by -strict mode.
+// (warn) or dropped construct (skip). Advisory info notes are ignored. Used by
+// -strict mode.
 func HasPartial(notes []Note) bool {
-	return len(notes) > 0
+	for _, n := range notes {
+		if n.Level == LevelWarn || n.Level == LevelSkip {
+			return true
+		}
+	}
+	return false
 }

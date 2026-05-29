@@ -40,6 +40,58 @@ func (r *recordingSink) snapshot() []Cycle {
 	return append([]Cycle(nil), r.cycles...)
 }
 
+// panickingSink panics on its first OnCycle, then records calls. Used to prove
+// runCycle's recover keeps the per-target goroutine alive — without it the
+// first panic would crash the test binary (unrecovered goroutine panic).
+type panickingSink struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *panickingSink) OnCycle(_ context.Context, _ Cycle) {
+	p.mu.Lock()
+	p.calls++
+	first := p.calls == 1
+	p.mu.Unlock()
+	if first {
+		panic("sink boom")
+	}
+}
+
+func (p *panickingSink) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func TestSchedulerRecoversFromSinkPanic(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	reg := probe.NewRegistry()
+	reg.Register(&fakeProbe{name: "fake", rtts: []time.Duration{10 * time.Millisecond}})
+
+	cfg := &config.Config{
+		Interval: 20 * time.Millisecond,
+		Pings:    1,
+		Probes:   map[string]config.Probe{"fake": {Type: "icmp", Timeout: time.Second}},
+		Targets: []config.Group{{
+			Group:   "g",
+			Targets: []config.Target{{Name: "a", Host: "1.1.1.1", Probe: "fake"}},
+		}},
+	}
+
+	sink := &panickingSink{}
+	s := New(log, reg, sink, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	s.Run(ctx)
+
+	if got := sink.count(); got < 2 {
+		t.Fatalf("target stopped probing after a sink panic: got %d OnCycle calls, want ≥2", got)
+	}
+}
+
 func TestSchedulerRunsAndStops(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 

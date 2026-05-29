@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -123,6 +124,10 @@ type Cluster struct {
 	// only, then rely on operator restart for changes). Any positive
 	// duration is used as-is.
 	PullEvery string `json:"pull_every,omitempty"`
+	// InsecureMasterURL permits a plaintext http:// master_url. The shared
+	// bearer token and all cycle data otherwise require https — set this only
+	// on a trusted network (e.g. TLS terminated at a loopback sidecar).
+	InsecureMasterURL bool `json:"insecure_master_url,omitempty"`
 }
 
 type Alert struct {
@@ -266,10 +271,21 @@ func loadUnvalidated(path string) (*Config, error) {
 func expandEnv(data []byte) []byte {
 	return envVar.ReplaceAllFunc(data, func(match []byte) []byte {
 		name := string(match[2 : len(match)-1])
-		if v, ok := os.LookupEnv(name); ok {
-			return []byte(v)
+		v, ok := os.LookupEnv(name)
+		if !ok {
+			return match
 		}
-		return match
+		// Placeholders live inside JSON string values, so the substituted
+		// value must be JSON-escaped — otherwise a value containing a quote,
+		// backslash, or newline (a Windows path, a regex, an injected field)
+		// either breaks the parse or alters surrounding structure. Marshal as
+		// a JSON string and strip the surrounding quotes so it slots cleanly
+		// into the existing "${VAR}" string context.
+		b, err := json.Marshal(v)
+		if err != nil { // unreachable for string input
+			return match
+		}
+		return b[1 : len(b)-1]
 	})
 }
 
@@ -302,6 +318,13 @@ func (c *Config) ValidateMinimal() error {
 	}
 	if c.Cluster.MasterURL == "" {
 		return fmt.Errorf("cluster.master_url is required for slave mode")
+	}
+	u, err := url.Parse(c.Cluster.MasterURL)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("cluster.master_url %q is not a valid URL", c.Cluster.MasterURL)
+	}
+	if u.Scheme != "https" && !c.Cluster.InsecureMasterURL {
+		return fmt.Errorf("cluster.master_url must use https (set cluster.insecure_master_url to allow http on a trusted network)")
 	}
 	if c.Cluster.Token == "" {
 		return fmt.Errorf("cluster.token is required for slave mode")
