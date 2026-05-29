@@ -6,11 +6,12 @@ import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
 // A <canvas> 2d context can't read CSS custom properties, so the two chrome
 // colors the heatmap paints live here as literals. Keep them in sync with the
 // matching tokens in styles.css:
-//   HEAT_OK     ↔ --heat-ok  (neutral "ok" cell — loss is the only saturated
-//                             colour now, instead of the old full-sat teal)
-//   MARKER_FILL ↔ --accent   (selected-cycle marker — violet, interactive)
-const HEAT_OK = "#222a38";
-const MARKER_FILL = "rgba(167, 139, 250, 0.7)";
+//   HEAT_OK     ↔ --heat-ok  (neutral "ok" cell — light enough to read clearly
+//                             against the row strip; loss is the only saturated
+//                             colour)
+//   MARKER_FILL ↔ --accent   (selected-cycle marker — indigo, interactive)
+const HEAT_OK = "#2c3647";
+const MARKER_FILL = "rgba(129, 140, 248, 0.7)";
 
 // Loss-ramp swatches for the legend, mirroring lossColor()'s thresholds.
 const HEATMAP_LEGEND: ReadonlyArray<readonly [string, string]> = [

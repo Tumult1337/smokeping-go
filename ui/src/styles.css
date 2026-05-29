@@ -19,16 +19,17 @@
   --text-faint: #4a5160;
   --text-id:    #6b7282;  /* monospace ids (consolidates #6b7282 / #6b7284) */
 
-  /* Violet — interactive only: focus, selected, active, sort, drag. */
-  --accent:        #a78bfa;
-  --accent-dim:    rgba(167, 139, 250, 0.16);
-  --accent-border: rgba(167, 139, 250, 0.55);
-  --accent-text:   #c4b5fd;  /* violet text on a --accent-dim fill */
+  /* Indigo — interactive only: focus, selected, active, sort, drag. */
+  --accent:        #818cf8;
+  --accent-dim:    rgba(129, 140, 248, 0.16);
+  --accent-border: rgba(129, 140, 248, 0.55);
+  --accent-text:   #c0c6fc;  /* indigo text on a --accent-dim fill */
 
-  /* MTR heatmap "ok" cell — neutral slate so loss is the only saturated
-     colour. Mirrored as the HEAT_OK literal in MtrHeatmap.tsx (canvas can't
-     read CSS vars); keep the two in sync. */
-  --heat-ok: #222a38;
+  /* MTR heatmap "ok" cell — neutral slate, but light enough to read clearly
+     against the row strip so the path stays legible; loss is still the only
+     saturated colour. Mirrored as the HEAT_OK literal in MtrHeatmap.tsx
+     (canvas can't read CSS vars); keep the two in sync. */
+  --heat-ok: #2c3647;
 
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 16px rgba(0, 0, 0, 0.22);
 
@@ -741,10 +742,15 @@ body {
   font: inherit;
   padding: 0;
   cursor: pointer;
-  text-decoration: underline dotted;
-  text-underline-offset: 2px;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.12s;
 }
-.smoke-legend-name-btn:hover { filter: brightness(1.3); }
+.smoke-legend-name-btn:hover {
+  text-decoration-color: currentColor;
+}
 .smoke-legend-row.dimmed { opacity: 0.3; }
 .smoke-legend-val {
   background: transparent;
@@ -772,12 +778,14 @@ body {
 .u-axis { color: var(--text-muted); }
 
 /* High-contrast range-drag overlay. uPlot's default is rgba(0,0,0,0.07) which
-   is ~invisible on this near-black bg; the violet matches the interactive
-   accent so the selection reads as "you're acting on this". !important because
-   uPlot's own stylesheet is injected after ours at runtime. */
+   is ~invisible on this near-black bg; the indigo fill matches the interactive
+   accent so the selection reads as "you're acting on this". No border: uPlot
+   keeps this element in the DOM at 0×0 when idle, and a border would render as
+   a tiny dot at the plot origin — the fill alone is invisible at 0×0 and clear
+   during a drag. !important because uPlot's stylesheet is injected after ours. */
 .u-select {
-  background: var(--accent-dim) !important;
-  border: 1px solid var(--accent-border) !important;
+  background: rgba(129, 140, 248, 0.25) !important;
+  border: none !important;
 }
 
 @media (max-width: 768px) {
