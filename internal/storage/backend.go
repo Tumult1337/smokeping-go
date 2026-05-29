@@ -24,6 +24,14 @@ type Reader interface {
 	QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) ([]HopPoint, error)
 	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f QueryFilter) ([]HopPoint, error)
 	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HopPoint, error)
+	// QueryOverview returns one row per (group, name, source) for the
+	// configured targets passed in. Used by the fleet overview page; the
+	// handler collapses to worst-source per target. Sparkline length is fixed
+	// at 24 (one slot per bucket across the window); slots without data are
+	// nil. Targets with no rows at all are not returned — the handler
+	// synthesizes silent rows by left-joining the input target list against
+	// the result.
+	QueryOverview(ctx context.Context, from, to time.Time, targets []config.TargetRef) ([]OverviewSourceRow, error)
 }
 
 // PickCycleStep returns the toStartOfInterval width for cycle queries.
@@ -162,6 +170,25 @@ type HopPoint struct {
 	MaxLossPct float64
 	LossCount  int64
 	Sent       int64
+}
+
+// OverviewSourceRow is one row of fleet-overview aggregates for a single
+// (group, name, source) tuple over a user-selected window. The API handler
+// collapses per-source rows to one row per target using worst-source-per-
+// target semantics (worst LossAvg, tiebreak by worst RTTMax) before serving.
+// Sparkline is 24 positional buckets across the window; nil entries mean
+// "no cycles landed in this bucket".
+type OverviewSourceRow struct {
+	Group     string
+	Name      string
+	Source    string
+	LossAvg   float64
+	LossMax   float64
+	RTTMedian float64
+	RTTP95    float64
+	RTTMax    float64
+	LastSeen  time.Time
+	Sparkline []*float64
 }
 
 // ErrDisabled is returned by Open when the config selects a backend but

@@ -338,6 +338,13 @@ func (c *CachingReader) QueryHopsTimeline(ctx context.Context, ref config.Target
 	})
 }
 
+// QueryOverview passes through uncached. The fleet overview is recomputed
+// per request (window-relative, sensitive to fresh cycles); caching it would
+// surface stale "silent" flags and stale RTT/loss values.
+func (c *CachingReader) QueryOverview(ctx context.Context, from, to time.Time, targets []config.TargetRef) ([]OverviewSourceRow, error) {
+	return c.inner.QueryOverview(ctx, from, to, targets)
+}
+
 // fetchHops is the cache + singleflight helper shared by the three hops
 // query paths. Callers supply the cache key, the TTL the result should live
 // for on success, and a closure that runs the inner reader. Behaviour:

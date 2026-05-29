@@ -11,6 +11,8 @@ import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
 import { MtrSection } from "./MtrSection";
 import { paletteForSorted, lossColor } from "./palette";
+import { OverviewView, type SortKey, type SortDir } from "./OverviewView";
+import type { OverviewWindow } from "./api";
 
 type Range = "-1h" | "-6h" | "-24h" | "-7d" | "-30d" | "-180d" | "-365d";
 type ChartStyle = "band" | "bars";
@@ -18,8 +20,21 @@ type YScale = "lin" | "log";
 const CHART_STYLE_KEY = "gosmokeping.chartStyle";
 const Y_SCALE_KEY = "gosmokeping.yScale";
 const COLLAPSED_GROUPS_KEY = "gosmokeping.collapsedGroups";
+const OVERVIEW_WINDOW_KEY = "gosmokeping.overviewWindow";
+const OVERVIEW_SORT_KEY = "gosmokeping.overviewSort";
 
 const VALID_RANGES: Range[] = ["-1h", "-6h", "-24h", "-7d", "-30d", "-180d", "-365d"];
+const VALID_OVERVIEW_WINDOWS: OverviewWindow[] = ["-1h", "-6h", "-24h"];
+const VALID_SORT_KEYS: SortKey[] = [
+  "target",
+  "loss_avg",
+  "loss_max",
+  "rtt_median",
+  "rtt_p95",
+  "rtt_max",
+  "worst_source",
+  "last_seen",
+];
 
 // readUrlState plucks the shareable-link params the app writes on every
 // state change. Kept loose: unknown values fall through to defaults so a
@@ -32,10 +47,18 @@ type UrlState = {
   source: string | null;
   pickedSec: number | null;
   zoom: { from: number; to: number } | null;
+  view: "overview" | null;
+  overviewWindow: OverviewWindow | null;
+  overviewSort: SortKey | null;
+  overviewDir: SortDir | null;
 };
 function readUrlState(): UrlState {
   if (typeof window === "undefined") {
-    return { target: null, range: null, mode: null, scale: null, source: null, pickedSec: null, zoom: null };
+    return {
+      target: null, range: null, mode: null, scale: null, source: null,
+      pickedSec: null, zoom: null, view: null, overviewWindow: null,
+      overviewSort: null, overviewDir: null,
+    };
   }
   const p = new URLSearchParams(window.location.search);
   const range = p.get("range") as Range | null;
@@ -51,6 +74,10 @@ function readUrlState(): UrlState {
     Number.isFinite(z0) && Number.isFinite(z1) && z1 > z0
       ? { from: z0, to: z1 }
       : null;
+  const view = p.get("view") === "overview" ? "overview" : null;
+  const ow = p.get("window") as OverviewWindow | null;
+  const os = p.get("sort") as SortKey | null;
+  const od = p.get("dir");
   return {
     target: p.get("target"),
     range: range && VALID_RANGES.includes(range) ? range : null,
@@ -59,6 +86,10 @@ function readUrlState(): UrlState {
     source: p.get("source"),
     pickedSec: Number.isFinite(t) ? t : null,
     zoom,
+    view,
+    overviewWindow: ow && VALID_OVERVIEW_WINDOWS.includes(ow) ? ow : null,
+    overviewSort: os && VALID_SORT_KEYS.includes(os) ? os : null,
+    overviewDir: od === "asc" || od === "desc" ? od : null,
   };
 }
 
@@ -101,6 +132,31 @@ export default function App() {
     if (initialUrl.scale) return initialUrl.scale;
     const saved = typeof localStorage !== "undefined" ? localStorage.getItem(Y_SCALE_KEY) : null;
     return saved === "log" ? "log" : "lin";
+  });
+  // Overview state. View mode: when true (or no target picked), the main pane
+  // shows the fleet overview instead of a single target. Window/sort persist
+  // in URL + localStorage so a reload restores the view exactly.
+  const [overviewView, setOverviewView] = useState<boolean>(initialUrl.view === "overview");
+  const [overviewWindow, setOverviewWindow] = useState<OverviewWindow>(() => {
+    if (initialUrl.overviewWindow) return initialUrl.overviewWindow;
+    const saved = typeof localStorage !== "undefined" ? localStorage.getItem(OVERVIEW_WINDOW_KEY) : null;
+    return saved && (VALID_OVERVIEW_WINDOWS as string[]).includes(saved)
+      ? (saved as OverviewWindow)
+      : "-1h";
+  });
+  const [overviewSort, setOverviewSort] = useState<SortKey>(() => {
+    if (initialUrl.overviewSort) return initialUrl.overviewSort;
+    const saved = typeof localStorage !== "undefined" ? localStorage.getItem(OVERVIEW_SORT_KEY) : null;
+    if (!saved) return "loss_avg";
+    const [k] = saved.split("|");
+    return (VALID_SORT_KEYS as string[]).includes(k) ? (k as SortKey) : "loss_avg";
+  });
+  const [overviewDir, setOverviewDir] = useState<SortDir>(() => {
+    if (initialUrl.overviewDir) return initialUrl.overviewDir;
+    const saved = typeof localStorage !== "undefined" ? localStorage.getItem(OVERVIEW_SORT_KEY) : null;
+    if (!saved) return "desc";
+    const parts = saved.split("|");
+    return parts[1] === "asc" ? "asc" : "desc";
   });
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
     try {
@@ -164,6 +220,22 @@ export default function App() {
     }
   }, [collapsedGroups]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(OVERVIEW_WINDOW_KEY, overviewWindow);
+    } catch {
+      // localStorage unavailable — ignore
+    }
+  }, [overviewWindow]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(OVERVIEW_SORT_KEY, `${overviewSort}|${overviewDir}`);
+    } catch {
+      // localStorage unavailable — ignore
+    }
+  }, [overviewSort, overviewDir]);
+
   const toggleGroup = useCallback((group: string) => {
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
@@ -177,12 +249,13 @@ export default function App() {
     listTargets()
       .then((t) => {
         setTargets(t);
-        // Honor URL target if it exists in the list; otherwise fall back to
-        // the first available so a stale bookmark doesn't leave the page
-        // empty.
+        // Honor URL target if it exists; otherwise leave selectedId null so
+        // the main pane lands on the overview. Stale bookmarks (target=
+        // pointing at a removed config entry) also fall through to overview
+        // rather than silently switching to an unrelated target.
         setSelectedId((cur) => {
           if (cur && t.some((x) => x.id === cur)) return cur;
-          return t.length ? t[0].id : null;
+          return null;
         });
       })
       .catch((e) => setError(String(e)));
@@ -255,12 +328,24 @@ export default function App() {
       p.set("z0", String(zoom.from));
       p.set("z1", String(zoom.to));
     }
+    // Overview view: only encoded when active *and* there's a selected target
+    // — without target= the URL implicitly means overview, so the extra param
+    // is redundant.
+    if (overviewView && selectedId) p.set("view", "overview");
+    if (overviewView || !selectedId) {
+      if (overviewWindow !== "-1h") p.set("window", overviewWindow);
+      if (overviewSort !== "loss_avg") p.set("sort", overviewSort);
+      if (overviewDir !== "desc") p.set("dir", overviewDir);
+    }
     const qs = p.toString();
     const url = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`;
     if (url !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
       window.history.replaceState(null, "", url);
     }
-  }, [selectedId, range, chartStyle, yScale, selectedSource, pickedSec, zoom]);
+  }, [
+    selectedId, range, chartStyle, yScale, selectedSource, pickedSec, zoom,
+    overviewView, overviewWindow, overviewSort, overviewDir,
+  ]);
 
   const refresh = useCallback(() => {
     setRefreshTick((n) => n + 1);
@@ -375,11 +460,26 @@ export default function App() {
 
   const pickTarget = (id: string) => {
     setSelectedId(id);
+    setOverviewView(false);
     setZoom(null);
     setPickedSec(null);
     setPickedSource(null);
     setSidebarOpen(false);
   };
+
+  const openOverview = () => {
+    setSelectedId(null);
+    setOverviewView(false);
+    setZoom(null);
+    setPickedSec(null);
+    setPickedSource(null);
+    setSidebarOpen(false);
+  };
+
+  // showOverview = the right pane should render the overview, not a detail
+  // view. Two paths get us here: explicit view=overview state, or simply
+  // having no target selected.
+  const showOverview = !selectedId || overviewView;
 
   return (
     <div className={`app ${sidebarOpen ? "sidebar-open" : ""}`}>
@@ -405,6 +505,13 @@ export default function App() {
             aria-label="Search targets"
           />
         </div>
+        <button
+          type="button"
+          className={`target-item overview-tab ${showOverview ? "active" : ""}`}
+          onClick={openOverview}
+        >
+          Overview
+        </button>
         {searchResults !== null ? (
           searchResults.length === 0 ? (
             <div className="empty" style={{ padding: "16px 0" }}>No matches</div>
@@ -454,20 +561,25 @@ export default function App() {
       </aside>
 
       <main className="main">
-        {!selected && (
-          <>
-            <button
-              type="button"
-              className="hamburger"
-              aria-label="Open target list"
-              onClick={() => setSidebarOpen(true)}
-            >
-              ☰
-            </button>
-            <div className="empty">Select a target</div>
-          </>
+        {showOverview && (
+          <OverviewView
+            window={overviewWindow}
+            onWindowChange={setOverviewWindow}
+            sort={overviewSort}
+            dir={overviewDir}
+            onSortChange={(s, d) => {
+              setOverviewSort(s);
+              setOverviewDir(d);
+            }}
+            autoRefresh={autoRefresh}
+            onAutoRefreshChange={setAutoRefresh}
+            refreshTick={refreshTick}
+            onRefresh={refresh}
+            onOpenSidebar={() => setSidebarOpen(true)}
+            onPickTarget={pickTarget}
+          />
         )}
-        {selected && (
+        {!showOverview && selected && (
           <>
             <div className="toolbar">
               <button

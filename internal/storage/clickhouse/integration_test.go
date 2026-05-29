@@ -430,6 +430,195 @@ func TestReaderBucketedSourcesPreserved(t *testing.T) {
 	}
 }
 
+// TestReaderQueryOverview seeds two targets with two sources each and asserts
+// the per-(group,name,source) rollup is correct: one row per tuple, sparkline
+// length 24, RTT/loss numbers reflect the underlying cycles.
+func TestReaderQueryOverview(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	// Seed a 1h window of cycles, one per minute.
+	from := now.Add(-time.Hour).Truncate(time.Minute)
+	to := now
+
+	// Profiles: master is clean (1-2ms, 0 loss); slave is lossy (5 lost of 20).
+	cleanRTTs := makeRTTs(20, time.Millisecond, 2*time.Millisecond)
+	lossyRTTs := makeRTTs(15, 30*time.Millisecond, 60*time.Millisecond)
+
+	target1 := config.TargetRef{Target: config.Target{Name: "t1"}, Group: "g"}
+	target2 := config.TargetRef{Target: config.Target{Name: "t2"}, Group: "g"}
+
+	for i := 0; i < 60; i++ {
+		ts := from.Add(time.Duration(i) * time.Minute)
+		// target1 from master: clean
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:    ts,
+			Target:  target1,
+			Source:  "master",
+			Sent:    20,
+			Summary: stats.Compute(cleanRTTs),
+		})
+		// target1 from eu-west: lossy (5 lost of 20)
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:      ts,
+			Target:    target1,
+			Source:    "eu-west",
+			Sent:      20,
+			LossCount: 5,
+			Summary:   stats.Compute(lossyRTTs),
+		})
+		// target2 from master only, clean
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:    ts,
+			Target:  target2,
+			Source:  "master",
+			Sent:    20,
+			Summary: stats.Compute(cleanRTTs),
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	rows, err := r.QueryOverview(ctx, from, to.Add(time.Minute),
+		[]config.TargetRef{target1, target2})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	// 3 expected (target,source) tuples: (t1,master), (t1,eu-west), (t2,master).
+	if len(rows) != 3 {
+		t.Fatalf("rows=%d, want 3: %+v", len(rows), rows)
+	}
+
+	byKey := make(map[string]storage.OverviewSourceRow, len(rows))
+	for _, row := range rows {
+		byKey[row.Group+"/"+row.Name+"|"+row.Source] = row
+	}
+
+	clean := byKey["g/t1|master"]
+	lossy := byKey["g/t1|eu-west"]
+	other := byKey["g/t2|master"]
+
+	if clean.LossAvg != 0 {
+		t.Errorf("g/t1 master loss_avg=%v, want 0", clean.LossAvg)
+	}
+	if lossy.LossAvg <= clean.LossAvg {
+		t.Errorf("g/t1 eu-west loss_avg=%v should exceed master (%v)", lossy.LossAvg, clean.LossAvg)
+	}
+	// 5/20 = 25%
+	if lossy.LossAvg < 24 || lossy.LossAvg > 26 {
+		t.Errorf("g/t1 eu-west loss_avg=%v, want ~25", lossy.LossAvg)
+	}
+	if lossy.RTTMax <= clean.RTTMax {
+		t.Errorf("g/t1 eu-west rtt_max=%v should exceed master (%v)", lossy.RTTMax, clean.RTTMax)
+	}
+	if other.Source != "master" {
+		t.Errorf("g/t2 source=%q, want master", other.Source)
+	}
+
+	// Sparkline length 24 across the board.
+	for _, row := range rows {
+		if len(row.Sparkline) != 24 {
+			t.Errorf("%s/%s source=%s sparkline len=%d, want 24",
+				row.Group, row.Name, row.Source, len(row.Sparkline))
+		}
+		// At least one bucket should have a non-nil value (we seeded 60 cycles).
+		any := false
+		for _, v := range row.Sparkline {
+			if v != nil {
+				any = true
+				break
+			}
+		}
+		if !any {
+			t.Errorf("%s/%s source=%s sparkline all-nil; expected coverage",
+				row.Group, row.Name, row.Source)
+		}
+	}
+
+	// last_seen must be within the seeded window.
+	for _, row := range rows {
+		if row.LastSeen.Before(from) || row.LastSeen.After(to.Add(time.Minute)) {
+			t.Errorf("%s/%s source=%s last_seen=%v outside [%v,%v]",
+				row.Group, row.Name, row.Source, row.LastSeen, from, to)
+		}
+	}
+}
+
+// TestReaderQueryOverviewScopesToTargets verifies the (group,name) IN filter
+// keeps rows belonging to unrelated targets out of the response.
+func TestReaderQueryOverviewScopesToTargets(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	from := now.Add(-30 * time.Minute)
+	rtts := makeRTTs(20, time.Millisecond, 2*time.Millisecond)
+
+	// Seed cycles for three distinct targets.
+	for _, name := range []string{"included", "excluded", "alsoexcluded"} {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:    from.Add(time.Minute),
+			Target:  config.TargetRef{Target: config.Target{Name: name}, Group: "g"},
+			Source:  "master",
+			Sent:    20,
+			Summary: stats.Compute(rtts),
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	// Ask for "included" only.
+	rows, err := r.QueryOverview(ctx, from, now,
+		[]config.TargetRef{{Target: config.Target{Name: "included"}, Group: "g"}})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d, want 1 (only included): %+v", len(rows), rows)
+	}
+	if rows[0].Name != "included" {
+		t.Errorf("rows[0].Name=%q, want included", rows[0].Name)
+	}
+}
+
+// TestReaderQueryOverviewEmptyTargets verifies that calling with no target
+// refs returns no rows and no error (rather than a bare IN () SQL error).
+func TestReaderQueryOverviewEmptyTargets(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	rows, err := r.QueryOverview(ctx, time.Now().Add(-time.Hour), time.Now(), nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("rows=%d, want 0", len(rows))
+	}
+}
+
 // makeRTTs returns n samples linearly spaced from lo to hi inclusive.
 func makeRTTs(n int, lo, hi time.Duration) []time.Duration {
 	out := make([]time.Duration, n)

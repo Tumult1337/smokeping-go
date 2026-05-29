@@ -152,6 +152,36 @@ export interface HopsTimelineResponse {
   hops: HopPoint[];
 }
 
+export interface OverviewRow {
+  id: string;
+  group: string;
+  group_title?: string;
+  title?: string;
+  probe_type?: string;
+  loss_avg: number | null;
+  loss_max: number | null;
+  rtt_median: number | null;
+  rtt_p95: number | null;
+  rtt_max: number | null;
+  worst_source?: string;
+  last_seen: string | null;
+  silent: boolean;
+  sparkline: Array<number | null>;
+}
+
+export interface OverviewResponse {
+  window: string;
+  from: string;
+  to: string;
+  rows: OverviewRow[];
+}
+
+export type OverviewWindow = "-1h" | "-6h" | "-24h";
+
+export function getOverview(window: OverviewWindow): Promise<OverviewResponse> {
+  return jsonGet<OverviewResponse>(`/api/v1/overview?window=${window}`);
+}
+
 export function getHopsTimeline(
   id: string,
   from: string,

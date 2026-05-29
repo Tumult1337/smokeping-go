@@ -98,6 +98,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/targets/{group}/{name}/status", s.getStatus)
 		r.Get("/targets/{group}/{name}/hops", s.getHops)
 		r.Get("/targets/{group}/{name}/hops/timeline", s.getHopsTimeline)
+		r.Get("/overview", s.getOverview)
 		if s.clusterHandler != nil {
 			r.Mount("/cluster", s.clusterHandler)
 		}

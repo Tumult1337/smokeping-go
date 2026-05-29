@@ -54,6 +54,9 @@ func (f *fakeReader) QueryHopsTimeline(context.Context, config.TargetRef, time.T
 	}
 	return f.hops, nil
 }
+func (f *fakeReader) QueryOverview(context.Context, time.Time, time.Time, []config.TargetRef) ([]OverviewSourceRow, error) {
+	return nil, nil
+}
 
 func newRef(group, name string) config.TargetRef {
 	return config.TargetRef{Group: group, Target: config.Target{Name: name}}
@@ -96,6 +99,9 @@ func (s *slowFakeReader) QueryHopsTimeline(context.Context, config.TargetRef, ti
 	s.calls.Add(1)
 	<-s.gate
 	return s.hops, nil
+}
+func (s *slowFakeReader) QueryOverview(context.Context, time.Time, time.Time, []config.TargetRef) ([]OverviewSourceRow, error) {
+	return nil, nil
 }
 
 func TestCachingReader_HitsCacheWithinTTL(t *testing.T) {

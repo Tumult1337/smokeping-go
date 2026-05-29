@@ -7,6 +7,131 @@ body {
   color: #e6e6e6;
 }
 
+/* === Overview page ====================================================== */
+/* Sidebar "Overview" entry sits between the search input and the group list.
+   Styled like a normal target-item but with a separator below so it visually
+   delimits itself from the configured-target groups. */
+.overview-tab {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  font-weight: 600;
+  border-bottom: 1px solid #1f2430;
+  border-radius: 4px 4px 0 0;
+}
+
+.overview-wrap {
+  background: #141822;
+  border: 1px solid #1f2430;
+  border-radius: 6px;
+  padding: 8px 4px;
+  overflow-x: auto;
+}
+
+.overview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 720px;
+}
+
+.overview-table thead th {
+  position: sticky;
+  top: 0;
+  background: #141822;
+  text-align: left;
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: #8a93a6;
+  padding: 8px 10px;
+  border-bottom: 1px solid #1f2430;
+}
+.overview-th {
+  cursor: pointer;
+  user-select: none;
+}
+.overview-th:hover { color: #cfd3dd; }
+.overview-th.num { text-align: right; }
+.overview-th.active { color: #cfd3dd; }
+.overview-sort-arrow { color: #5eead4; }
+
+.overview-row td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #1a1f2b;
+  cursor: pointer;
+}
+.overview-row:hover td { background: #1a1f2b; }
+.overview-row td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.overview-row.silent td {
+  background: rgba(40, 18, 22, 0.55);
+  color: #c97a83;
+}
+.overview-row.silent:hover td { background: rgba(58, 26, 32, 0.75); }
+
+.overview-target { white-space: nowrap; max-width: 280px; overflow: hidden; }
+.overview-target-name {
+  font-weight: 600;
+  color: #e6e6e6;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.overview-row.silent .overview-target-name { color: #e7a3aa; }
+.overview-target-id {
+  font-size: 11px;
+  color: #6b7282;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-top: 1px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.overview-src {
+  font-size: 12px;
+  color: #cfd3dd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.overview-last-seen {
+  font-size: 12px;
+  color: #8a93a6;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.overview-na { color: #4a5160; }
+
+.overview-spark-col {
+  width: 72px;
+  text-align: right;
+  padding-right: 12px;
+}
+.overview-spark { display: inline-block; vertical-align: middle; }
+
+.overview-empty {
+  text-align: center;
+  color: #8a93a6;
+  padding: 24px;
+  font-style: italic;
+}
+
+.overview-skel td { padding: 10px; }
+.overview-skel-bar {
+  height: 14px;
+  background: linear-gradient(90deg, #1a1f2b 0%, #232938 50%, #1a1f2b 100%);
+  background-size: 200% 100%;
+  border-radius: 3px;
+  animation: overview-skel-shimmer 1.4s infinite linear;
+}
+@keyframes overview-skel-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
 /* Themed scrollbars — Chromium/WebKit needs the pseudo-elements, Firefox
    takes the two-value shorthand. Palette pulled from the existing chip/button
    active states so overflowing regions blend with the rest of the UI. */
