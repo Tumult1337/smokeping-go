@@ -279,9 +279,12 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
   return (
     <div className="chart-host" style={{ minHeight: height }}>
       <div ref={divRef} style={{ width: "100%" }} />
-      {points.length === 0 && (
-        <div className="chart-empty">{loading ? "Loading…" : "No data in range"}</div>
-      )}
+      {points.length === 0 &&
+        (loading ? (
+          <div className="chart-skeleton" aria-label="Loading…" />
+        ) : (
+          <div className="chart-empty">No data in range</div>
+        ))}
       {points.length > 0 && built.anyLoss && (
         <LossStripCanvas
           lossSeries={soloSource != null

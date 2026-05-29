@@ -3,6 +3,38 @@ import { getHopsTimeline, type HopPoint } from "./api";
 import { lossColor } from "./palette";
 import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
 
+// A <canvas> 2d context can't read CSS custom properties, so the two chrome
+// colors the heatmap paints live here as literals. Keep them in sync with the
+// matching tokens in styles.css:
+//   HEAT_OK     ↔ --heat-ok  (neutral "ok" cell — loss is the only saturated
+//                             colour now, instead of the old full-sat teal)
+//   MARKER_FILL ↔ --accent   (selected-cycle marker — violet, interactive)
+const HEAT_OK = "#222a38";
+const MARKER_FILL = "rgba(167, 139, 250, 0.7)";
+
+// Loss-ramp swatches for the legend, mirroring lossColor()'s thresholds.
+const HEATMAP_LEGEND: ReadonlyArray<readonly [string, string]> = [
+  ["ok", HEAT_OK],
+  ["<5%", "#eab308"],
+  ["<20%", "#f97316"],
+  ["≥20%", "#ef4444"],
+];
+
+// HeatmapLegend is the color key rendered once beneath the heatmap(s) so the
+// ok/loss ramp is readable without hovering.
+function HeatmapLegend() {
+  return (
+    <div className="mtr-heatmap-legend">
+      {HEATMAP_LEGEND.map(([label, color]) => (
+        <span key={label}>
+          <i style={{ background: color }} />
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 interface Props {
   targetId: string;
   refreshTick: number;
@@ -89,15 +121,18 @@ export function MtrHeatmap({
   // Single-source: render the canvas directly, no collapse chrome.
   if (groups.length === 1) {
     return (
-      <PathHeatmap
-        source={groups[0].source}
-        hops={groups[0].hops}
-        fromSec={fromSec}
-        toSec={toSec}
-        selectedSec={selectedSec}
-        onPick={onCyclePick}
-        stale={err != null}
-      />
+      <>
+        <PathHeatmap
+          source={groups[0].source}
+          hops={groups[0].hops}
+          fromSec={fromSec}
+          toSec={toSec}
+          selectedSec={selectedSec}
+          onPick={onCyclePick}
+          stale={err != null}
+        />
+        <HeatmapLegend />
+      </>
     );
   }
 
@@ -105,7 +140,8 @@ export function MtrHeatmap({
   // heading row is clickable to expand/collapse; expanded shows that
   // source's heatmap (only that source's hops, not the union).
   return (
-    <div className="mtr-heatmap-stack">
+    <>
+      <div className="mtr-heatmap-stack">
       {groups.map((g) => {
         const isCollapsed = collapsed.has(g.source);
         const worstLoss = g.hops.reduce((m, h) => {
@@ -149,7 +185,9 @@ export function MtrHeatmap({
           </div>
         );
       })}
-    </div>
+      </div>
+      <HeatmapLegend />
+    </>
   );
 }
 
@@ -289,7 +327,7 @@ function PathHeatmap({
           // bucket stays visible — averaging it (LossPct) to ~3% would make
           // it disappear into the clean background.
           const worst = (p as { MaxLossPct?: number }).MaxLossPct ?? p.LossPct;
-          ctx.fillStyle = lossColor(worst, "#5eead4");
+          ctx.fillStyle = lossColor(worst, HEAT_OK);
           ctx.fillRect(x, y, Math.max(1, colW), actualRowH - 1);
         }
       }
@@ -297,7 +335,7 @@ function PathHeatmap({
 
     // Hop index gutter labels.
     ctx.fillStyle = "#8a93a6";
-    ctx.font = "10px system-ui, sans-serif";
+    ctx.font = '10px "JetBrains Mono Variable", ui-monospace, monospace';
     ctx.textBaseline = "middle";
     const labelStep = actualRowH < 12 ? Math.ceil(12 / actualRowH) : 1;
     for (let rank = 0; rank < visibleHops.length; rank++) {
@@ -332,7 +370,7 @@ function PathHeatmap({
     // Selected-cycle marker.
     if (selectedSec != null && selectedSec >= fromSec && selectedSec <= toSec) {
       const x = xForSec(selectedSec);
-      ctx.fillStyle = "rgba(94, 234, 212, 0.55)";
+      ctx.fillStyle = MARKER_FILL;
       ctx.fillRect(Math.round(x), 2, 2, plotH - 4);
     }
   }, [rows, cycles, visibleHops, height, fromSec, toSec, selectedSec, repaintCount]);

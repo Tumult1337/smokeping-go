@@ -600,22 +600,25 @@ export default function App() {
               {selected.title && (
                 <span className="toolbar-id">{selected.id}</span>
               )}
-              <span style={{ color: "#8a93a6" }}>· {selected.probe}</span>
+              <span style={{ color: "var(--text-muted)" }}>· {selected.probe}</span>
               <div style={{ flex: 1 }} />
-              {RANGES.filter(
-                (r) => selected.probe_type !== "http" || HTTP_RANGES.includes(r.value),
-              ).map((r) => (
-                <button
-                  key={r.value}
-                  className={range === r.value ? "active" : ""}
-                  onClick={() => {
-                    setRange(r.value);
-                    setZoom(null);
-                  }}
-                >
-                  {r.label}
-                </button>
-              ))}
+              <div className="segmented" role="group" aria-label="Time range">
+                {RANGES.filter(
+                  (r) => selected.probe_type !== "http" || HTTP_RANGES.includes(r.value),
+                ).map((r) => (
+                  <button
+                    key={r.value}
+                    className={range === r.value ? "active" : ""}
+                    aria-pressed={range === r.value}
+                    onClick={() => {
+                      setRange(r.value);
+                      setZoom(null);
+                    }}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
               {selected.probe_type !== "http" && (
                 <>
                   <div className="toolbar-sep" />
@@ -665,7 +668,7 @@ export default function App() {
                   alignItems: "center",
                   gap: 4,
                   fontSize: 13,
-                  color: "#8a93a6",
+                  color: "var(--text-muted)",
                   cursor: "pointer",
                 }}
                 title={`Auto-refresh every ${AUTO_REFRESH_MS / 1000}s`}
@@ -779,7 +782,7 @@ export default function App() {
                       <strong style={{ color: lossColor(windowStats.loss, "#8a93a6") }}>
                         {windowStats.loss.toFixed(1)}%
                       </strong>{" "}
-                      <span style={{ color: "#8a93a6" }}>
+                      <span style={{ color: "var(--text-muted)" }}>
                         (max{" "}
                         <strong style={{ color: lossColor(windowStats.maxLoss, "#8a93a6") }}>
                           {windowStats.maxLoss.toFixed(1)}%

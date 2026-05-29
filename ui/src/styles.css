@@ -1,10 +1,63 @@
+/* Design tokens. One coherent slate ramp oriented at the original palette
+   (scattered near-duplicate blues consolidated), with violet as the single
+   new hue reserved strictly for interactive states. Data colors (the teal
+   latency line, the source palette, the loss ramp) live in palette.ts and are
+   intentionally NOT tokenized here — they're data, not chrome. */
+:root {
+  --bg:            #0f1115;
+  --surface-1:     #141822;  /* containers, cards */
+  --surface-2:     #181d28;  /* elevated cards (chart, MTR sections) */
+  --surface-inset: #0f141c;  /* chart wells, heatmap canvas */
+  --surface-hover: #1a1f2b;  /* row/button hover */
+  --border:        #1f2430;
+  --border-strong: #2a3142;
+  --border-hover:  #3a4357;
+
+  --text:       #e6e6e6;
+  --text-dim:   #cfd3dd;
+  --text-muted: #8a93a6;
+  --text-faint: #4a5160;
+  --text-id:    #6b7282;  /* monospace ids (consolidates #6b7282 / #6b7284) */
+
+  /* Violet — interactive only: focus, selected, active, sort, drag. */
+  --accent:        #a78bfa;
+  --accent-dim:    rgba(167, 139, 250, 0.16);
+  --accent-border: rgba(167, 139, 250, 0.55);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 16px rgba(0, 0, 0, 0.22);
+
+  --font-sans: "Geist Variable", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  background: #0f1115;
-  color: #e6e6e6;
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* Monospace for everything numeric, every identifier, and the wordmark — the
+   data columns snap into alignment and ids read as machine values. Sans
+   (the body default) carries names, labels, and prose. */
+.sidebar h1,
+.overview-table td.num, .overview-table th.num, .overview-th.num,
+.overview-last-seen, .overview-src, .overview-target-id,
+.toolbar-id, .group-count,
+.stats, .smoke-legend,
+.hops-table td.num, .hops-table .hop-ip,
+.mtr-heatmap-summary, .mtr-section-summary, .hops-path-time {
+  font-family: var(--font-mono);
+}
+
+/* Global keyboard-focus ring. Pointer clicks stay quiet (:focus-visible only),
+   keyboard users get a clear violet outline on every interactive element. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 3px;
 }
 
 /* === Overview page ====================================================== */
@@ -15,13 +68,13 @@ body {
   margin-bottom: 8px;
   padding: 8px 10px;
   font-weight: 600;
-  border-bottom: 1px solid #1f2430;
+  border-bottom: 1px solid var(--border);
   border-radius: 4px 4px 0 0;
 }
 
 .overview-wrap {
-  background: #141822;
-  border: 1px solid #1f2430;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 4px;
   overflow-x: auto;
@@ -37,31 +90,31 @@ body {
 .overview-table thead th {
   position: sticky;
   top: 0;
-  background: #141822;
+  background: var(--surface-1);
   text-align: left;
   font-weight: 500;
   text-transform: uppercase;
   font-size: 11px;
   letter-spacing: 0.06em;
-  color: #8a93a6;
+  color: var(--text-muted);
   padding: 8px 10px;
-  border-bottom: 1px solid #1f2430;
+  border-bottom: 1px solid var(--border);
 }
 .overview-th {
   cursor: pointer;
   user-select: none;
 }
-.overview-th:hover { color: #cfd3dd; }
+.overview-th:hover { color: var(--text-dim); }
 .overview-th.num { text-align: right; }
-.overview-th.active { color: #cfd3dd; }
-.overview-sort-arrow { color: #5eead4; }
+.overview-th.active { color: var(--text-dim); }
+.overview-sort-arrow { color: var(--accent); }
 
 .overview-row td {
   padding: 8px 10px;
-  border-bottom: 1px solid #1a1f2b;
+  border-bottom: 1px solid var(--surface-hover);
   cursor: pointer;
 }
-.overview-row:hover td { background: #1a1f2b; }
+.overview-row:hover td { background: var(--surface-hover); }
 .overview-row td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -76,15 +129,14 @@ body {
 .overview-target { white-space: nowrap; max-width: 280px; overflow: hidden; }
 .overview-target-name {
   font-weight: 600;
-  color: #e6e6e6;
+  color: var(--text);
   text-overflow: ellipsis;
   overflow: hidden;
 }
 .overview-row.silent .overview-target-name { color: #e7a3aa; }
 .overview-target-id {
   font-size: 11px;
-  color: #6b7282;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text-id);
   margin-top: 1px;
   text-overflow: ellipsis;
   overflow: hidden;
@@ -92,18 +144,17 @@ body {
 
 .overview-src {
   font-size: 12px;
-  color: #cfd3dd;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text-dim);
 }
 
 .overview-last-seen {
   font-size: 12px;
-  color: #8a93a6;
+  color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.overview-na { color: #4a5160; }
+.overview-na { color: var(--text-faint); }
 
 .overview-spark-col {
   width: 72px;
@@ -114,7 +165,7 @@ body {
 
 .overview-empty {
   text-align: center;
-  color: #8a93a6;
+  color: var(--text-muted);
   padding: 24px;
   font-style: italic;
 }
@@ -122,12 +173,12 @@ body {
 .overview-skel td { padding: 10px; }
 .overview-skel-bar {
   height: 14px;
-  background: linear-gradient(90deg, #1a1f2b 0%, #232938 50%, #1a1f2b 100%);
+  background: linear-gradient(90deg, var(--surface-hover) 0%, #232938 50%, var(--surface-hover) 100%);
   background-size: 200% 100%;
   border-radius: 3px;
-  animation: overview-skel-shimmer 1.4s infinite linear;
+  animation: skel-shimmer 1.4s infinite linear;
 }
-@keyframes overview-skel-shimmer {
+@keyframes skel-shimmer {
   from { background-position: 200% 0; }
   to   { background-position: -200% 0; }
 }
@@ -136,11 +187,11 @@ body {
    takes the two-value shorthand. Palette pulled from the existing chip/button
    active states so overflowing regions blend with the rest of the UI. */
 ::-webkit-scrollbar        { width: 10px; height: 10px; }
-::-webkit-scrollbar-track  { background: #0f1115; }
-::-webkit-scrollbar-thumb  { background: #2a3142; border-radius: 5px; border: 2px solid #0f1115; }
-::-webkit-scrollbar-thumb:hover  { background: #3a4357; }
-::-webkit-scrollbar-corner { background: #0f1115; }
-* { scrollbar-color: #2a3142 #0f1115; scrollbar-width: thin; }
+::-webkit-scrollbar-track  { background: var(--bg); }
+::-webkit-scrollbar-thumb  { background: var(--border-strong); border-radius: 5px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover  { background: var(--border-hover); }
+::-webkit-scrollbar-corner { background: var(--bg); }
+* { scrollbar-color: var(--border-strong) var(--bg); scrollbar-width: thin; }
 
 .app {
   display: grid;
@@ -149,7 +200,7 @@ body {
 }
 
 .sidebar {
-  border-right: 1px solid #1f2430;
+  border-right: 1px solid var(--border);
   padding: 16px;
   overflow-y: auto;
   height: 100vh;
@@ -158,6 +209,8 @@ body {
 .sidebar h1 {
   font-size: 18px;
   margin: 0 0 12px;
+  letter-spacing: -0.02em;
+  font-weight: 600;
 }
 
 .search-wrap {
@@ -167,9 +220,9 @@ body {
 
 .search-input {
   width: 100%;
-  background: #141822;
-  color: #e6e6e6;
-  border: 1px solid #2a3142;
+  background: var(--surface-1);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   padding: 6px 10px;
   font-size: 13px;
@@ -178,8 +231,8 @@ body {
   appearance: none;
   -webkit-appearance: none;
 }
-.search-input::placeholder { color: #4a5160; }
-.search-input:focus { border-color: #5eead4; }
+.search-input::placeholder { color: var(--text-faint); }
+.search-input:focus { border-color: var(--accent); }
 /* suppress browser-native clear button (we use the native type=search clear) */
 .search-input::-webkit-search-cancel-button { opacity: 0.4; cursor: pointer; }
 
@@ -190,7 +243,7 @@ body {
   width: 100%;
   font-size: 11px;
   text-transform: uppercase;
-  color: #8a93a6;
+  color: var(--text-muted);
   margin: 16px 0 6px;
   letter-spacing: 0.06em;
   background: transparent;
@@ -200,19 +253,19 @@ body {
   text-align: left;
   font-family: inherit;
 }
-.group-title:hover { color: #cfd3dd; }
+.group-title:hover { color: var(--text-dim); }
 .group-caret {
   display: inline-block;
   width: 10px;
   font-size: 10px;
-  color: #4a5160;
+  color: var(--text-faint);
 }
-.group-title:hover .group-caret { color: #8a93a6; }
+.group-title:hover .group-caret { color: var(--text-muted); }
 .group-count {
   margin-left: auto;
   font-size: 10px;
-  color: #4a5160;
-  background: #1a1f2b;
+  color: var(--text-faint);
+  background: var(--surface-hover);
   padding: 1px 6px;
   border-radius: 8px;
 }
@@ -224,13 +277,19 @@ body {
   padding: 6px 10px;
   border-radius: 4px;
   background: transparent;
-  color: #cfd3dd;
+  color: var(--text-dim);
   border: none;
   cursor: pointer;
   font-size: 14px;
 }
-.target-item:hover { background: #1a1f2b; }
-.target-item.active { background: #2a3142; color: #fff; }
+.target-item:hover { background: var(--surface-hover); }
+/* Selected target: violet left-edge + tinted fill so the active row reads as
+   "selected" via the interactive accent, not just a neutral grey. */
+.target-item.active {
+  background: var(--accent-dim);
+  color: #fff;
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
 
 .main {
   padding: 24px;
@@ -248,9 +307,9 @@ body {
 
 .hamburger {
   display: none;
-  background: #1a1f2b;
-  color: #cfd3dd;
-  border: 1px solid #2a3142;
+  background: var(--surface-hover);
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
   padding: 6px 12px;
   border-radius: 4px;
   cursor: pointer;
@@ -268,28 +327,66 @@ body {
 }
 
 .toolbar button {
-  background: #1a1f2b;
-  color: #cfd3dd;
-  border: 1px solid #2a3142;
+  background: var(--surface-hover);
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
   padding: 6px 12px;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 13px;
 }
-.toolbar button.active { background: #2a3142; color: #fff; }
+.toolbar button.active {
+  background: var(--accent-dim);
+  color: #fff;
+  border-color: var(--accent-border);
+}
 .toolbar button:hover { background: #252b3a; }
+.toolbar button.active:hover { background: var(--accent-dim); }
+
+/* Segmented control — the time-range buttons collapse into one connected
+   unit so they read as "pick one window", visually distinct from the
+   band/bars/log toggles beside them. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--surface-inset);
+}
+.segmented button {
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  border-right: 1px solid var(--border-strong);
+  border-radius: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+.segmented button:last-child { border-right: none; }
+.segmented button:hover { background: var(--surface-hover); }
+/* Active window: soft violet fill + violet text + inner ring (matches the
+   active source-chip). */
+.segmented button.active {
+  background: var(--accent-dim);
+  color: #c4b5fd;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+.segmented button.active:hover { background: var(--accent-dim); }
+.segmented :focus-visible { outline-offset: -2px; border-radius: 0; }
 
 .toolbar-sep {
   width: 1px;
   height: 20px;
-  background: #2a3142;
+  background: var(--border-strong);
   margin: 0 4px;
 }
 
 .toolbar-id {
   font-size: 11px;
-  color: #6b7284;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text-id);
   margin-left: -2px;
 }
 
@@ -302,24 +399,28 @@ body {
   font-size: 12px;
 }
 .source-label {
-  color: #8a93a6;
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 10px;
   margin-right: 2px;
 }
 .chip {
-  background: #141822;
-  color: #cfd3dd;
-  border: 1px solid #2a3142;
+  background: var(--surface-1);
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
   padding: 3px 10px;
   cursor: pointer;
   font-size: 12px;
   font-family: inherit;
 }
-.chip:hover { background: #1a1f2b; }
-.chip.active { background: #2a3142; color: #fff; border-color: #3a4357; }
+.chip:hover { background: var(--surface-hover); }
+.chip.active {
+  background: var(--accent-dim);
+  color: #c4b5fd;
+  border-color: var(--accent-border);
+}
 
 .hops-table-wrap {
   overflow-x: auto;
@@ -336,28 +437,28 @@ body {
 .hops-table td {
   padding: 6px 10px;
   text-align: left;
-  border-bottom: 1px solid #1f2430;
+  border-bottom: 1px solid var(--border);
 }
 .hops-table th {
-  color: #8a93a6;
+  color: var(--text-muted);
   font-weight: 500;
   text-transform: uppercase;
   font-size: 11px;
   letter-spacing: 0.06em;
 }
 .hops-table td.num { text-align: left; font-variant-numeric: tabular-nums; }
-.hops-table tr:hover td { background: #1a1f2b; }
-.hops-table .hop-ip { color: #cfd3dd; font-family: monospace; }
-.hops-table .hop-none { color: #4a5160; font-style: italic; }
+.hops-table tr:hover td { background: var(--surface-hover); }
+.hops-table .hop-ip { color: var(--text-dim); }
+.hops-table .hop-none { color: var(--text-faint); font-style: italic; }
 .hops-table .hop-whois {
   margin-left: 6px;
-  color: #6b7282;
+  color: var(--text-id);
   text-decoration: none;
   font-size: 0.85em;
   opacity: 0.55;
   transition: color 0.1s, opacity 0.1s;
 }
-.hops-table .hop-whois:hover { color: #5eead4; opacity: 1; }
+.hops-table .hop-whois:hover { color: var(--accent); opacity: 1; }
 .hops-loss-bar {
   display: inline-block;
   height: 10px;
@@ -371,13 +472,13 @@ body {
   align-items: center;
   gap: 12px;
   padding: 4px 0 10px 0;
-  color: #8a93a6;
+  color: var(--text-muted);
   font-size: 13px;
 }
 .hops-reset {
-  background: #1a1f2b;
-  color: #cfd3dd;
-  border: 1px solid #2a3142;
+  background: var(--surface-hover);
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
   padding: 3px 10px;
   font-size: 12px;
@@ -393,20 +494,43 @@ body {
   gap: 12px;
   padding: 6px 0 6px 0;
   font-size: 12px;
-  border-top: 1px solid #1a1f2b;
+  border-top: 1px solid var(--surface-hover);
 }
 .hops-path-source {
-  color: #cfd3dd;
+  color: var(--text-dim);
   font-weight: 600;
 }
 .hops-path-time {
-  color: #4a5160;
+  color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
 
 .mtr-heatmap {
-  background: #0f141c;
+  background: var(--surface-inset);
   border-radius: 4px;
+}
+
+/* MTR heatmap loss key. Mirrors the canvas fill ramp so a newcomer reads the
+   color meaning without hovering: neutral ok cell, then the loss ramp. */
+.mtr-heatmap-legend {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 6px 2px 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.mtr-heatmap-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.mtr-heatmap-legend i {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  display: inline-block;
 }
 
 .mtr-heatmap-stack {
@@ -415,7 +539,7 @@ body {
   gap: 6px;
 }
 .mtr-heatmap-source {
-  background: #0f141c;
+  background: var(--surface-inset);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -430,16 +554,16 @@ body {
   width: 100%;
   background: #131823;
   border: none;
-  color: #cfd3dd;
+  color: var(--text-dim);
   padding: 6px 10px;
   font-size: 13px;
   text-align: left;
   cursor: pointer;
   font-family: inherit;
 }
-.mtr-heatmap-heading:hover { background: #1a1f2b; }
+.mtr-heatmap-heading:hover { background: var(--surface-hover); }
 .mtr-heatmap-chevron {
-  color: #4a5160;
+  color: var(--text-faint);
   font-size: 10px;
   width: 10px;
   flex-shrink: 0;
@@ -449,7 +573,7 @@ body {
   font-weight: 600;
 }
 .mtr-heatmap-summary {
-  color: #8a93a6;
+  color: var(--text-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -464,10 +588,11 @@ body {
   gap: 10px;
 }
 .mtr-section {
-  background: #0f141c;
-  border-radius: 4px;
+  background: var(--surface-2);
+  border-radius: 8px;
   overflow: hidden;
-  border: 1px solid #1a1f2b;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
 }
 .mtr-section-heading {
   display: flex;
@@ -476,16 +601,16 @@ body {
   width: 100%;
   background: #131823;
   border: none;
-  color: #cfd3dd;
+  color: var(--text-dim);
   padding: 8px 12px;
   font-size: 14px;
   text-align: left;
   cursor: pointer;
   font-family: inherit;
 }
-.mtr-section-heading:hover { background: #1a1f2b; }
+.mtr-section-heading:hover { background: var(--surface-hover); }
 .mtr-section-chevron {
-  color: #4a5160;
+  color: var(--text-faint);
   font-size: 10px;
   width: 10px;
   flex-shrink: 0;
@@ -495,7 +620,7 @@ body {
   font-weight: 600;
 }
 .mtr-section-summary {
-  color: #8a93a6;
+  color: var(--text-muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -511,19 +636,21 @@ body {
 }
 
 .empty {
-  color: #8a93a6;
+  color: var(--text-muted);
   font-size: 14px;
   padding: 32px;
   text-align: center;
 }
 
 .chart-wrap {
-  background: #141822;
-  border: 1px solid #1f2430;
-  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 8px;
   padding: 16px;
   margin-bottom: 16px;
   min-height: 340px;
+  box-shadow: var(--shadow-card);
 }
 
 .chart-host {
@@ -537,9 +664,20 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #8a93a6;
+  color: var(--text-muted);
   font-size: 14px;
   pointer-events: none;
+}
+
+/* Chart loading state — reuse the overview shimmer so a fetch-in-flight reads
+   as "loading", not "empty". Sized to the chart well. */
+.chart-skeleton {
+  position: absolute;
+  inset: 0;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-inset) 0%, var(--surface-hover) 50%, var(--surface-inset) 100%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.4s infinite linear;
 }
 
 .chart-title {
@@ -560,10 +698,10 @@ body {
   gap: 16px;
   flex-wrap: wrap;
   font-size: 13px;
-  color: #8a93a6;
+  color: var(--text-muted);
 }
 .stats span strong {
-  color: #e6e6e6;
+  color: var(--text);
   margin-left: 4px;
 }
 
@@ -577,7 +715,7 @@ body {
   gap: 4px;
   margin-top: 10px;
   font-size: 12px;
-  color: #8a93a6;
+  color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
 .smoke-legend-row {
@@ -611,29 +749,29 @@ body {
   cursor: pointer;
   font-variant-numeric: tabular-nums;
 }
-.smoke-legend-val:hover { color: #cfd3dd; }
+.smoke-legend-val:hover { color: var(--text-dim); }
 .smoke-legend-val.off {
   opacity: 0.4;
   text-decoration: line-through;
 }
 .smoke-legend-val strong {
-  color: #e6e6e6;
+  color: var(--text);
   margin-left: 2px;
   font-weight: 500;
 }
-.smoke-legend-val.off strong { color: #8a93a6; }
+.smoke-legend-val.off strong { color: var(--text-muted); }
 
 /* Match uPlot dark theme to the page. */
-.u-legend { color: #cfd3dd !important; }
-.u-axis { color: #8a93a6; }
+.u-legend { color: var(--text-dim) !important; }
+.u-axis { color: var(--text-muted); }
 
 /* High-contrast range-drag overlay. uPlot's default is rgba(0,0,0,0.07) which
-   is ~invisible on this near-black bg; the teal matches the accent colour so
-   the selection reads as part of the theme. !important because uPlot's own
-   stylesheet is injected after ours at runtime. */
+   is ~invisible on this near-black bg; the violet matches the interactive
+   accent so the selection reads as "you're acting on this". !important because
+   uPlot's own stylesheet is injected after ours at runtime. */
 .u-select {
-  background: rgba(94, 234, 212, 0.18) !important;
-  border: 1px solid rgba(94, 234, 212, 0.55) !important;
+  background: var(--accent-dim) !important;
+  border: 1px solid var(--accent-border) !important;
 }
 
 @media (max-width: 768px) {
@@ -648,7 +786,7 @@ body {
     bottom: 0;
     width: 82vw;
     max-width: 320px;
-    background: #0f1115;
+    background: var(--bg);
     z-index: 10;
     transform: translateX(-100%);
     transition: transform 0.2s ease;
@@ -680,6 +818,9 @@ body {
   .toolbar button {
     padding: 6px 10px;
     font-size: 12px;
+  }
+  .segmented button {
+    padding: 6px 9px;
   }
   .toolbar-sep {
     display: none;
