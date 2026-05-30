@@ -125,31 +125,43 @@ ORDER BY timestamp`
 
 func (r *Reader) queryCyclesBucketed(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.CyclePoint, error) {
 	srcClause, srcArgs := sourceFilter(source)
+	// A 100%-loss cycle stores all-zero percentile columns (stats.Compute over
+	// an empty RTT slice). Weighting the quantile rollup by `sent` folds those
+	// zeros into the distribution, collapsing the bucket's low percentiles to
+	// 0 — in log-scale bars that paints a full-height band down to the floor.
+	// Weight by received pings (`sent - lost`) instead: a 100%-loss sub-cycle
+	// gets weight 0 and drops out, so only cycles that actually measured an RTT
+	// shape the percentile band. Loss is reported separately and is unaffected.
+	// quantilesExactWeighted needs an unsigned weight (UInt16-UInt16 promotes to
+	// Int32), hence toUInt64. min/mean/stddev get the same treatment; a bucket
+	// where every sub-cycle was 100% loss has zero total received, so the
+	// avgWeighted (mean/stddev) is NaN-guarded — NaN would break JSON encoding,
+	// and the value is moot anyway (the UI skips 100%-loss buckets).
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
        source                                              AS src,
-       min(rtt_min_ms), max(rtt_max_ms),
-       avgWeighted(rtt_mean_ms, sent),
-       quantilesExactWeighted(0.50)(rtt_median_ms, sent)[1] AS rtt_median_ms,
-       sqrt(avgWeighted(pow(rtt_stddev_ms, 2), sent))      AS rtt_stddev_ms,
-       quantilesExactWeighted(0.05)(p5_ms, sent)[1],
-       quantilesExactWeighted(0.10)(p10_ms, sent)[1],
-       quantilesExactWeighted(0.15)(p15_ms, sent)[1],
-       quantilesExactWeighted(0.20)(p20_ms, sent)[1],
-       quantilesExactWeighted(0.25)(p25_ms, sent)[1],
-       quantilesExactWeighted(0.30)(p30_ms, sent)[1],
-       quantilesExactWeighted(0.35)(p35_ms, sent)[1],
-       quantilesExactWeighted(0.40)(p40_ms, sent)[1],
-       quantilesExactWeighted(0.45)(p45_ms, sent)[1],
-       quantilesExactWeighted(0.55)(p55_ms, sent)[1],
-       quantilesExactWeighted(0.60)(p60_ms, sent)[1],
-       quantilesExactWeighted(0.65)(p65_ms, sent)[1],
-       quantilesExactWeighted(0.70)(p70_ms, sent)[1],
-       quantilesExactWeighted(0.75)(p75_ms, sent)[1],
-       quantilesExactWeighted(0.80)(p80_ms, sent)[1],
-       quantilesExactWeighted(0.85)(p85_ms, sent)[1],
-       quantilesExactWeighted(0.90)(p90_ms, sent)[1],
-       quantilesExactWeighted(0.95)(p95_ms, sent)[1],
+       minIf(rtt_min_ms, sent > lost), max(rtt_max_ms),
+       if(sum(sent) = sum(lost), 0, avgWeighted(rtt_mean_ms, toUInt64(sent - lost))),
+       quantilesExactWeighted(0.50)(rtt_median_ms, toUInt64(sent - lost))[1] AS rtt_median_ms,
+       if(sum(sent) = sum(lost), 0, sqrt(avgWeighted(pow(rtt_stddev_ms, 2), toUInt64(sent - lost)))) AS rtt_stddev_ms,
+       quantilesExactWeighted(0.05)(p5_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.10)(p10_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.15)(p15_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.20)(p20_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.25)(p25_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.30)(p30_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.35)(p35_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.40)(p40_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.45)(p45_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.55)(p55_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.60)(p60_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.65)(p65_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.70)(p70_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.75)(p75_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.80)(p80_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.85)(p85_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.90)(p90_ms, toUInt64(sent - lost))[1],
+       quantilesExactWeighted(0.95)(p95_ms, toUInt64(sent - lost))[1],
        if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS loss_pct,
        sum(lost), sum(sent)
 FROM probe_cycle

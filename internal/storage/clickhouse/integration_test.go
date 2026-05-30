@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -374,6 +375,133 @@ func TestReaderBucketedPercentilesMonotone(t *testing.T) {
 			p.Median <= p.P75 && p.P75 <= p.P95 && p.P95 <= p.Max) {
 			t.Errorf("bucket %d: percentiles not monotone: min=%g p5=%g p25=%g median=%g p75=%g p95=%g max=%g",
 				i, p.Min, p.P5, p.P25, p.Median, p.P75, p.P95, p.Max)
+		}
+	}
+}
+
+// TestReaderBucketedLossExcludesFullLossCycles is the regression for the
+// "loss going to 0" bars bug. A 100%-loss cycle stores all-zero percentile
+// columns; weighting the bucket rollup by `sent` folds those zeros into the
+// distribution and collapses the low percentiles to 0 (a full-height band to
+// the log floor in the UI). The fix weights by received pings (sent - lost)
+// so full-loss cycles drop out of the RTT shape while still counting toward
+// loss_pct.
+//
+// Scenario: one 1h bucket holding 40 clean cycles (~100ms) interleaved with
+// 20 fully-lost cycles. The bucket's low percentiles must stay near 100ms
+// (not 0), and loss_pct must read ~33% (20 of 60 cycles lost).
+func TestReaderBucketedLossExcludesFullLossCycles(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+
+	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	clean := makeRTTs(20, 99*time.Millisecond, 101*time.Millisecond)
+	target := config.TargetRef{Target: config.Target{Name: "tfl"}, Group: "g"}
+	for i := 0; i < 60; i++ {
+		c := scheduler.Cycle{
+			Time:   start.Add(time.Duration(i) * time.Minute),
+			Target: target,
+			Source: "master",
+			Sent:   20,
+		}
+		if i%3 == 0 {
+			// Every third cycle is 100% loss: empty summary, all packets lost.
+			c.LossCount = 20
+			c.Summary = stats.Compute(nil)
+		} else {
+			c.Summary = stats.Compute(clean)
+		}
+		w.OnCycle(ctx, c)
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	pts, err := r.QueryCycles(ctx, target,
+		start, start.Add(time.Hour+time.Minute),
+		storage.QueryFilter{Step: time.Hour},
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) == 0 {
+		t.Fatalf("expected ≥ 1 bucket, got 0")
+	}
+	p := pts[0]
+	// 20 of 60 cycles fully lost -> ~33%.
+	if p.LossPct < 32 || p.LossPct > 35 {
+		t.Errorf("LossPct = %.2f, want ~33", p.LossPct)
+	}
+	// The clean cycles sit at ~100ms; the full-loss zeros must NOT pull the low
+	// percentiles down to 0. Pre-fix these all read 0.
+	mustBePositive := map[string]float64{
+		"Min": p.Min, "P5": p.P5, "P25": p.P25, "Median": p.Median, "P75": p.P75,
+	}
+	for name, v := range mustBePositive {
+		if v < 90 {
+			t.Errorf("%s = %.2f, want ~100 (full-loss zeros must not collapse the band)", name, v)
+		}
+	}
+}
+
+// TestReaderBucketedAllLossBucketIsFinite pins the NaN edge: a bucket whose
+// every sub-cycle is 100% loss has zero total received packets, so the
+// received-weighted avgWeighted(mean)/stddev divide by zero. Unguarded that
+// yields NaN, which makes Go's encoding/json error out and kills the whole
+// /cycles response. The query guards those to 0; this asserts the row comes
+// back with finite fields and loss_pct == 100.
+func TestReaderBucketedAllLossBucketIsFinite(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	_ = Bootstrap(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg)
+
+	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	target := config.TargetRef{Target: config.Target{Name: "tal"}, Group: "g"}
+	for i := 0; i < 30; i++ {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:      start.Add(time.Duration(i) * time.Minute),
+			Target:    target,
+			Source:    "master",
+			Sent:      20,
+			LossCount: 20,
+			Summary:   stats.Compute(nil),
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+
+	pts, err := r.QueryCycles(ctx, target,
+		start, start.Add(time.Hour+time.Minute),
+		storage.QueryFilter{Step: time.Hour},
+	)
+	if err != nil {
+		t.Fatalf("query (would fail with NaN->JSON if unguarded): %v", err)
+	}
+	if len(pts) == 0 {
+		t.Fatalf("expected ≥ 1 bucket, got 0")
+	}
+	p := pts[0]
+	if p.LossPct < 99.9 {
+		t.Errorf("LossPct = %.2f, want 100", p.LossPct)
+	}
+	for name, v := range map[string]float64{
+		"Min": p.Min, "Max": p.Max, "Mean": p.Mean, "Median": p.Median,
+		"StdDev": p.StdDev, "P5": p.P5, "P95": p.P95,
+	} {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			t.Errorf("%s = %v, want finite (NaN/Inf breaks JSON encoding)", name, v)
 		}
 	}
 }

@@ -45,8 +45,12 @@ SELECT
   target_group, target_id, source,
   toFloat64(avg(b_loss_avg))                                 AS loss_avg,
   toFloat64(max(b_loss_max))                                 AS loss_max,
-  quantilesExactWeighted(0.5)(b_median, b_sent_total)[1]     AS rtt_median,
-  quantilesExactWeighted(0.95)(b_p95,    b_sent_total)[1]    AS rtt_p95,
+  -- Weight by received packets, not sent: a fully-lost bucket has b_recv_total
+  -- 0 and its zero-valued b_median/b_p95 drop out instead of dragging the
+  -- window median toward 0 (mirrors queryCyclesBucketed). quantilesExactWeighted
+  -- with all-zero weights returns 0 (not NaN), so no JSON-encoding guard needed.
+  quantilesExactWeighted(0.5)(b_median, b_recv_total)[1]     AS rtt_median,
+  quantilesExactWeighted(0.95)(b_p95,    b_recv_total)[1]    AS rtt_p95,
   max(b_max)                                                 AS rtt_max,
   max(b_last_seen)                                           AS last_seen,
   -- Two parallel arrays so the handler can assemble a fixed-length sparkline
@@ -60,10 +64,10 @@ FROM (
     intDiv(toUInt32(timestamp) - toUInt32(toDateTime(?)), ?)  AS bucket_idx,
     avg(loss_pct)                                             AS b_loss_avg,
     max(loss_pct)                                             AS b_loss_max,
-    quantilesExactWeighted(0.5)(rtt_median_ms, sent)[1]       AS b_median,
-    quantilesExactWeighted(0.95)(p95_ms, sent)[1]             AS b_p95,
+    quantilesExactWeighted(0.5)(rtt_median_ms, toUInt64(sent - lost))[1]  AS b_median,
+    quantilesExactWeighted(0.95)(p95_ms, toUInt64(sent - lost))[1]        AS b_p95,
     max(rtt_max_ms)                                           AS b_max,
-    sum(sent)                                                 AS b_sent_total,
+    sum(toUInt64(sent - lost))                                AS b_recv_total,
     max(timestamp)                                            AS b_last_seen
   FROM probe_cycle
   WHERE timestamp >= ? AND timestamp < ?
