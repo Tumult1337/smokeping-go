@@ -433,6 +433,41 @@ function PathHeatmap({
     return bucketSec;
   }
 
+  // After a pick the path table above this heatmap re-renders to the new
+  // cycle's hops. This target's route flaps between e.g. 10 and 17 hops
+  // cycle-to-cycle (anycast), so that table changes height and the heatmap the
+  // user just clicked jumps out from under the cursor. The reflow lands
+  // asynchronously (after the /hops fetch), and in the multi-source view
+  // several tables resize at once — so instead of tracking any one table's
+  // delta we keep this heatmap's own viewport position fixed: watch our top
+  // across the reflow window and feed every shift back into the scroll
+  // container. The window is bounded and stops once the layout settles, so it
+  // never fights a user who starts scrolling.
+  function pinScrollAcrossReflow() {
+    const el = wrapRef.current;
+    const scroller = el?.closest(".main") as HTMLElement | null;
+    if (!el || !scroller) return;
+    let prevTop = el.getBoundingClientRect().top;
+    const start = performance.now();
+    let corrected = false;
+    let stableFrames = 0;
+    const tick = () => {
+      const top = el.getBoundingClientRect().top;
+      const dy = top - prevTop;
+      if (Math.abs(dy) >= 1) {
+        scroller.scrollTop += dy;
+        prevTop = el.getBoundingClientRect().top;
+        corrected = true;
+        stableFrames = 0;
+      } else {
+        stableFrames++;
+      }
+      if ((corrected && stableFrames > 6) || performance.now() - start > 1500) return;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
   if (visibleHops.length === 0) {
     return <div className="empty">All hops clean in this range</div>;
   }
@@ -450,7 +485,9 @@ function PathHeatmap({
       onClick={(e) => {
         if (!onPick) return;
         const t = pickAtX(e.clientX);
-        if (t != null) onPick(worstCycleSec(t), source || undefined);
+        if (t == null) return;
+        pinScrollAcrossReflow();
+        onPick(worstCycleSec(t), source || undefined);
       }}
     >
       <canvas ref={canvasRef} style={{ display: "block" }} />
