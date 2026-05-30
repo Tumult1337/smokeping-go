@@ -438,25 +438,36 @@ function PathHeatmap({
   // cycle-to-cycle (anycast), so that table changes height and the heatmap the
   // user just clicked jumps out from under the cursor. The reflow lands
   // asynchronously (after the /hops fetch), and in the multi-source view
-  // several tables resize at once — so instead of tracking any one table's
-  // delta we keep this heatmap's own viewport position fixed: watch our top
-  // across the reflow window and feed every shift back into the scroll
-  // container. The window is bounded and stops once the layout settles, so it
-  // never fights a user who starts scrolling.
+  // several tables resize at once.
+  //
+  // We track this heatmap's position within the scroll *content*
+  // (scroll-invariant), not its viewport top. A reflow above the heatmap
+  // shifts its content-space position; the user scrolling does NOT. So
+  // compensating only content-space shifts keeps the heatmap visually fixed
+  // across the table resize without fighting a user who scrolls during the
+  // bounded settle window — tracking viewport top instead made any scroll get
+  // yanked back. The window stops once the layout settles.
   function pinScrollAcrossReflow() {
     const el = wrapRef.current;
     const scroller = el?.closest(".main") as HTMLElement | null;
     if (!el || !scroller) return;
-    let prevTop = el.getBoundingClientRect().top;
+    const contentTop = () =>
+      el.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top +
+      scroller.scrollTop;
+    let prev = contentTop();
     const start = performance.now();
     let corrected = false;
     let stableFrames = 0;
     const tick = () => {
-      const top = el.getBoundingClientRect().top;
-      const dy = top - prevTop;
-      if (Math.abs(dy) >= 1) {
-        scroller.scrollTop += dy;
-        prevTop = el.getBoundingClientRect().top;
+      const now = contentTop();
+      const d = now - prev;
+      if (Math.abs(d) >= 1) {
+        // Reflow above us moved the heatmap down/up in the content; scroll by
+        // the same amount to hold its viewport position. (A user scroll leaves
+        // content-space position unchanged, so d is 0 and we don't touch it.)
+        scroller.scrollTop += d;
+        prev = now;
         corrected = true;
         stableFrames = 0;
       } else {
