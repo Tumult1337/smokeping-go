@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData } from "uplot";
 import { getHttpSamples, type HttpPoint } from "./api";
-import { paletteForSorted } from "./palette";
+import { paletteForSorted, lossColor } from "./palette";
+import { colorFor, statusLabel, statusClass, isSuccess, type StatusClass } from "./httpStatus";
+import { StatusStrip } from "./StatusStrip";
 
 interface Props {
   targetId: string;
@@ -17,25 +19,10 @@ interface Props {
   toArg?: string;
 }
 
-// Color by status class. Network error (status==0) gets its own color so you
-// can tell "server said no" apart from "never reached server".
-function colorFor(status: number): string {
-  if (status === 0) return "#6b7280";
-  if (status >= 500) return "#ef4444";
-  if (status >= 400) return "#f59e0b";
-  if (status >= 300) return "#60a5fa";
-  if (status >= 200) return "#5eead4";
-  return "#8a93a6";
-}
-
-function statusLabel(status: number): string {
-  if (status === 0) return "network error";
-  return String(status);
-}
-
 // Per-request HTTP chart: one vertical bar per sample, height = RTT, color =
-// status class. Replaces the smoke band for HTTP targets because with 1–2
-// samples per cycle the percentile math is meaningless.
+// source. Status (success / 4xx / 5xx / network error) is encoded entirely by
+// the StatusStrip below — one dimension per visual element, so the bar no
+// longer carries the confusing status cap it used to.
 export function HttpChart({
   targetId,
   range,
@@ -52,6 +39,11 @@ export function HttpChart({
   const plotRef = useRef<uPlot | null>(null);
   const [points, setPoints] = useState<HttpPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Left/right gutter of the plot area in CSS px, tracked from u.bbox so the
+  // StatusStrip canvas lines up pixel-for-pixel under the chart.
+  const [plotOffsets, setPlotOffsets] = useState({ left: 34, right: 0 });
+  // Hover readout: nearest sample index + cursor position in plot-area CSS px.
+  const [hover, setHover] = useState<{ idx: number; left: number; top: number } | null>(null);
 
   // Sorted source names → palette map, matching SmokeChart's convention so a
   // given node wears the same colour everywhere on the page. Derived from the
@@ -76,6 +68,27 @@ export function HttpChart({
   // registers as a zoom instead of collapsing to a reset.
   const requestedWindowRef = useRef<{ from?: number; to?: number }>({});
   requestedWindowRef.current = { from: fromSec, to: toSec };
+
+  // Window summary, computed from the fetched samples (already source-filtered
+  // server-side when a source is selected). uptime mirrors the probe's loss
+  // semantics: status in [200,400) is a success.
+  const summary = useMemo(() => {
+    if (points.length === 0) return null;
+    let success = 0;
+    const dist: Record<StatusClass, number> = { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0, err: 0 };
+    const rtts: number[] = [];
+    for (const p of points) {
+      dist[statusClass(p.Status)]++;
+      if (isSuccess(p.Status)) {
+        success++;
+        rtts.push(p.RTT);
+      }
+    }
+    rtts.sort((a, b) => a - b);
+    const pct = (q: number): number | null =>
+      rtts.length === 0 ? null : rtts[Math.min(rtts.length - 1, Math.max(0, Math.ceil((q / 100) * rtts.length) - 1))];
+    return { uptime: (success / points.length) * 100, total: points.length, dist, p50: pct(50), p95: pct(95) };
+  }, [points]);
 
   useEffect(() => {
     let cancelled = false;
@@ -127,7 +140,7 @@ export function HttpChart({
         },
         { label: "status", stroke: "transparent", points: { show: false } },
       ],
-      legend: { live: true },
+      legend: { show: false },
       // Disable uPlot's default dblclick (auto-resets scales) so our own
       // handler owns the gesture — clears the zoom via onZoomChange(null)
       // without a spurious data-extent round-trip through setScale.
@@ -138,15 +151,23 @@ export function HttpChart({
             const ctx = u.ctx;
             const xs = u.data[0] as number[];
             const ys = u.data[1] as number[];
-            const sts = u.data[2] as number[];
             const pts = pointsRef.current;
             const pal = paletteRef.current;
+            // Track the plot gutter so the StatusStrip aligns under the bars.
+            const dpr = devicePixelRatio || 1;
+            const left = Math.round(u.bbox.left / dpr);
+            const right = Math.round(u.width - (u.bbox.left + u.bbox.width) / dpr);
+            setPlotOffsets((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
             if (xs.length === 0) return;
-            const barW = 3;
-            // Height of the top status-class cap. Small enough that the
-            // source colour dominates the body; big enough that a 5xx stands
-            // out at a glance.
-            const capH = 3;
+            const sts = u.data[2] as number[];
+            // Bar width scales with sample density: wide enough to read in a
+            // sparse window, thin enough to stay distinct when packed.
+            const barW = Math.max(3, Math.min(10, (u.bbox.width / xs.length) * 0.6));
+            // Network errors have no RTT, so they can't be a latency bar. Draw
+            // them as a short baseline stub (a marker) — never a tall bar that
+            // would masquerade as high latency. The strip carries the failure
+            // loudly; this stub just keeps the sample hoverable for its error.
+            const stubH = 6 * dpr;
             ctx.save();
             // Clip to plot bbox so bars at the edge don't paint over the
             // y-axis labels when the user drag-zooms into a narrow window.
@@ -155,18 +176,30 @@ export function HttpChart({
             ctx.clip();
             for (let i = 0; i < xs.length; i++) {
               const x = u.valToPos(xs[i], "x", true);
-              const y = u.valToPos(ys[i], "y", true);
               const y0 = u.valToPos(0, "y", true);
               const src = pts[i]?.Source ?? "";
-              const body = pal.get(src)?.stroke ?? colorFor(sts[i]);
-              ctx.fillStyle = body;
+              // Bar colour = source only. Status is the strip's job.
+              ctx.fillStyle = pal.get(src)?.stroke ?? "#5eead4";
+              if (sts[i] === 0) {
+                ctx.fillRect(x - barW / 2, y0 - stubH, barW, stubH);
+                continue;
+              }
+              const y = u.valToPos(ys[i], "y", true);
               ctx.fillRect(x - barW / 2, y, barW, y0 - y);
-              // Thin cap encodes the status class so outages stay visually
-              // loud without losing source identity on the body.
-              ctx.fillStyle = colorFor(sts[i]);
-              ctx.fillRect(x - barW / 2, y, barW, Math.min(capH, y0 - y));
             }
             ctx.restore();
+          },
+        ],
+        setCursor: [
+          (u) => {
+            const idx = u.cursor.idx ?? null;
+            const left = u.cursor.left ?? -1;
+            const top = u.cursor.top ?? -1;
+            if (idx == null || left < 0) {
+              setHover((prev) => (prev === null ? prev : null));
+              return;
+            }
+            setHover({ idx, left, top });
           },
         ],
         setScale: [
@@ -223,13 +256,11 @@ export function HttpChart({
       data = [[], [], []];
     } else {
       const ts = points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-      // Failed requests (status == 0 AND rtt == 0) still render a visible
-      // marker so the outage is obvious — pin them to a small floor height
-      // so they don't collapse to zero.
-      let rttMax = 1;
-      for (const p of points) if (p.RTT > rttMax) rttMax = p.RTT;
-      const failHeight = Math.max(rttMax * 0.15, 1);
-      const rtts = points.map((p) => (p.Status === 0 ? failHeight : p.RTT));
+      // Network errors (status == 0) have no RTT — give them 0 so they don't
+      // inflate the y-axis with a phantom height. The draw hook paints them as
+      // a short baseline stub instead. Non-2xx with a status (4xx/5xx) keep
+      // their real time-to-first-byte and render as normal bars.
+      const rtts = points.map((p) => (p.Status === 0 ? 0 : p.RTT));
       const statuses = points.map((p) => p.Status);
       data = [ts, rtts, statuses];
     }
@@ -250,42 +281,109 @@ export function HttpChart({
 
   if (error) return <div className="error">{error}</div>;
 
-  const last = points.length > 0 ? points[points.length - 1] : null;
+  const hovered = hover && hover.idx < points.length ? points[hover.idx] : null;
+
   return (
     <div>
-      <div className="chart-host" style={{ minHeight: height }}>
+      <div className="chart-host" style={{ minHeight: height, position: "relative" }}>
         <div ref={divRef} style={{ width: "100%" }} />
         {points.length === 0 && <div className="chart-empty">No HTTP samples in range</div>}
+        {hovered && (
+          <div
+            style={{
+              position: "absolute",
+              left: plotOffsets.left + hover!.left,
+              top: hover!.top,
+              transform: "translate(-50%, -100%)",
+              marginTop: -8,
+              pointerEvents: "none",
+              background: "#10141c",
+              border: "1px solid #2a3142",
+              borderRadius: 4,
+              padding: "4px 8px",
+              fontSize: 12,
+              whiteSpace: "nowrap",
+              zIndex: 5,
+            }}
+          >
+            <div style={{ color: "#8a93a6" }}>{new Date(hovered.Time).toLocaleString()}</div>
+            <div>
+              <span style={{ color: colorFor(hovered.Status) }}>● {statusLabel(hovered.Status)}</span>
+              {hovered.Status !== 0 && <span style={{ marginLeft: 8 }}>{hovered.RTT.toFixed(1)} ms</span>}
+              {hovered.Source && <span style={{ marginLeft: 8, color: "#8a93a6" }}>{hovered.Source}</span>}
+            </div>
+            {hovered.Err && <div style={{ color: "#ef4444" }}>{hovered.Err.slice(0, 80)}</div>}
+          </div>
+        )}
       </div>
-      {last && (
-        <div className="stats" style={{ marginTop: 12 }}>
+
+      <StatusStrip
+        points={points}
+        fromSec={fromSec}
+        toSec={toSec}
+        plotLeft={plotOffsets.left}
+        plotRight={plotOffsets.right}
+      />
+
+      {summary && (
+        <div className="stats" style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 16 }}>
           <span>
-            latest status: <strong style={{ color: colorFor(last.Status) }}>{statusLabel(last.Status)}</strong>
+            uptime:{" "}
+            <strong style={{ color: lossColor(100 - summary.uptime, "#5eead4") }}>
+              {summary.uptime.toFixed(1)}%
+            </strong>{" "}
+            <span style={{ color: "#8a93a6" }}>({summary.total} samples)</span>
           </span>
-          <span>
-            latest rtt: <strong>{last.Status === 0 ? "—" : `${last.RTT.toFixed(1)}ms`}</strong>
+          <span style={{ display: "inline-flex", gap: 8 }}>
+            {(["2xx", "3xx", "4xx", "5xx", "err"] as StatusClass[])
+              .filter((c) => summary.dist[c] > 0)
+              .map((c) => (
+                <span key={c} style={{ color: colorFor(classSample(c)) }}>
+                  {c === "err" ? "network error" : c} {summary.dist[c]}
+                </span>
+              ))}
           </span>
-          {last.Err && (
-            <span title={last.Err}>
-              error: <strong style={{ color: "#ef4444" }}>{last.Err.slice(0, 64)}</strong>
-            </span>
-          )}
+          <span style={{ color: "#8a93a6" }}>
+            TTFB p50 <strong style={{ color: "#cbd5e1" }}>{fmtMs(summary.p50)}</strong> · p95{" "}
+            <strong style={{ color: "#cbd5e1" }}>{fmtMs(summary.p95)}</strong>
+          </span>
         </div>
       )}
-      {palette.size > 1 && (
-        <div className="stats" style={{ marginTop: 8, fontSize: 12, color: "#8a93a6" }}>
-          <span className="source-label" style={{ marginRight: 4 }}>sources:</span>
-          {[...palette.entries()].map(([name, p]) => (
-            <span key={name || "—"} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-              <span style={{ display: "inline-block", width: 10, height: 10, background: p.stroke, borderRadius: 2 }} />
-              {name || "—"}
-            </span>
-          ))}
-        </div>
-      )}
+
+      {/* Labelled legends: each names the element it explains, so there's no
+          guessing which mark is what. */}
+      <div className="stats" style={{ marginTop: 8, fontSize: 12, color: "#8a93a6" }}>
+        <span className="source-label" style={{ marginRight: 4 }}>bar color = source:</span>
+        {[...palette.entries()].map(([name, p]) => (
+          <span key={name || "—"} style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
+            <span style={{ display: "inline-block", width: 10, height: 10, background: p.stroke, borderRadius: 2 }} />
+            {name || "—"}
+          </span>
+        ))}
+      </div>
       <HttpLegend />
     </div>
   );
+}
+
+function fmtMs(v: number | null): string {
+  return v == null ? "—" : `${v.toFixed(1)}ms`;
+}
+
+// Representative status code per class, for coloring the distribution chips.
+function classSample(c: StatusClass): number {
+  switch (c) {
+    case "2xx":
+      return 200;
+    case "3xx":
+      return 301;
+    case "4xx":
+      return 404;
+    case "5xx":
+      return 500;
+    case "err":
+      return 0;
+  }
 }
 
 function HttpLegend() {
@@ -298,8 +396,9 @@ function HttpLegend() {
   ];
   return (
     <div className="stats" style={{ marginTop: 8, fontSize: 12, color: "#8a93a6" }}>
+      <span className="source-label" style={{ marginRight: 4 }}>strip color = status:</span>
       {items.map((i) => (
-        <span key={i.label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span key={i.label} style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
           <span style={{ display: "inline-block", width: 10, height: 10, background: i.color, borderRadius: 2 }} />
           {i.label}
         </span>
