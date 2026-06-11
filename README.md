@@ -36,7 +36,7 @@ loss%, min/avg/max, latency bar), and a per-hop loss heatmap over the same
 window. Clicking any column in the heatmap or any point on the chart pins the
 hop table to that cycle.
 
-**HTTP probe — per-request RTT bars colour-coded by status class:**
+**HTTP probe — per-request RTT bars coloured by source, with a status strip (2xx/3xx/4xx/5xx/error) below:**
 
 ![HTTP status + response time — multi-source 6h](docs/screenshots/http.png)
 
