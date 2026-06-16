@@ -91,6 +91,13 @@ type QueryFilter struct {
 	// using toStartOfInterval (or equivalent). Zero = return raw rows.
 	// The server picks Step from window width before invoking the reader.
 	Step time.Duration
+	// LatestSince, when non-zero, bounds the "current path" view
+	// (QueryLatestHops): a source whose newest hop row predates this
+	// instant is dropped entirely, so a removed or stopped probe origin
+	// stops appearing as a live path once it goes silent. Zero = no floor
+	// (every source with retained rows is returned). Only QueryLatestHops
+	// honours it; windowed queries already bound by from/to.
+	LatestSince time.Time
 }
 
 // CyclePoint is one row of aggregate per-cycle data. Source identifies the

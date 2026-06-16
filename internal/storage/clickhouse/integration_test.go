@@ -932,6 +932,80 @@ func TestReaderQueryLatestHopsPerSource(t *testing.T) {
 	}
 }
 
+// TestReaderQueryLatestHopsStaleSourceDropped asserts the LatestSince floor
+// removes a source whose newest hop predates the cutoff while keeping a
+// source that is still reporting. Regression for a removed/stopped probe
+// origin rendering as a live path until its rows age out of retention.
+func TestReaderQueryLatestHopsStaleSourceDropped(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg)
+	now := time.Now().UTC().Truncate(time.Second)
+	// "live" wrote 1 minute ago; "removed" last wrote an hour ago.
+	srcTimes := map[string]time.Time{
+		"live":    now.Add(-1 * time.Minute),
+		"removed": now.Add(-1 * time.Hour),
+	}
+	for src, ts := range srcTimes {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time:   ts,
+			Target: config.TargetRef{Target: config.Target{Name: "tlhs"}, Group: "g"},
+			Source: src,
+			Sent:   3,
+			Hops: []probe.Hop{
+				{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{1 * time.Millisecond}},
+				{Index: 2, IP: "10.0.0.2", Sent: 3, Lost: 0, RTTs: []time.Duration{2 * time.Millisecond}},
+			},
+		})
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("writer close: %v", err)
+	}
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+	ref := config.TargetRef{Target: config.Target{Name: "tlhs"}, Group: "g"}
+
+	// Cutoff at 5 minutes ago: "live" survives, "removed" is dropped.
+	cutoff := now.Add(-5 * time.Minute)
+	pts, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{LatestSince: cutoff})
+	if err != nil {
+		t.Fatalf("query (floored): %v", err)
+	}
+	for _, p := range pts {
+		if p.Source == "removed" {
+			t.Errorf("stale source %q should have been dropped by LatestSince floor", p.Source)
+		}
+	}
+	if got := countSources(pts, "live"); got != 2 {
+		t.Errorf("live source: expected 2 hop rows, got %d", got)
+	}
+
+	// Zero floor: both sources returned (existing behaviour preserved).
+	all, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	if err != nil {
+		t.Fatalf("query (unfloored): %v", err)
+	}
+	if got := countSources(all, "removed"); got != 2 {
+		t.Errorf("with no floor, removed source should remain: got %d rows", got)
+	}
+}
+
+func countSources(pts []storage.HopPoint, source string) int {
+	n := 0
+	for _, p := range pts {
+		if p.Source == source {
+			n++
+		}
+	}
+	return n
+}
+
 // TestReaderQueryHopsAtSingleCycle writes three cycles inside the query
 // window and asserts QueryHopsAt returns exactly the hops from the cycle
 // nearest `at`, not a windowed mix. Regression for the bug where the
@@ -1312,7 +1386,7 @@ func TestBootstrapClusterMode(t *testing.T) {
 // TestReaderSourceFilter confirms QueryFilter.Source narrows results to
 // one source and that the empty-source path returns everything. Together
 // they exercise both branches of the sourceFilter helper introduced when
-// the (? = '' OR source = ?) pattern was retired in favour of a query
+// the (? = ” OR source = ?) pattern was retired in favour of a query
 // shape the CH planner can prune granules on.
 func TestReaderSourceFilter(t *testing.T) {
 	cfg, cleanup := testDSN(t)
