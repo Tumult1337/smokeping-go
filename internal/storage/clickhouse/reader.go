@@ -110,11 +110,29 @@ ORDER BY timestamp`
 		); err != nil {
 			return nil, err
 		}
-		p.Min = min; p.Max = max; p.Mean = mean; p.Median = median; p.StdDev = stddev
-		p.P5 = p5; p.P10 = p10; p.P15 = p15; p.P20 = p20; p.P25 = p25
-		p.P30 = p30; p.P35 = p35; p.P40 = p40; p.P45 = p45; p.P55 = p55
-		p.P60 = p60; p.P65 = p65; p.P70 = p70; p.P75 = p75; p.P80 = p80
-		p.P85 = p85; p.P90 = p90; p.P95 = p95
+		p.Min = min
+		p.Max = max
+		p.Mean = mean
+		p.Median = median
+		p.StdDev = stddev
+		p.P5 = p5
+		p.P10 = p10
+		p.P15 = p15
+		p.P20 = p20
+		p.P25 = p25
+		p.P30 = p30
+		p.P35 = p35
+		p.P40 = p40
+		p.P45 = p45
+		p.P55 = p55
+		p.P60 = p60
+		p.P65 = p65
+		p.P70 = p70
+		p.P75 = p75
+		p.P80 = p80
+		p.P85 = p85
+		p.P90 = p90
+		p.P95 = p95
 		p.LossPct = float64(lossPct)
 		p.LossCount = int64(lost)
 		p.Sent = int64(sent)
@@ -195,11 +213,29 @@ ORDER BY bucket_ts, source`, int(step.Seconds()), srcClause)
 		); err != nil {
 			return nil, err
 		}
-		p.Min = min; p.Max = max; p.Mean = mean; p.Median = median; p.StdDev = stddev
-		p.P5 = p5; p.P10 = p10; p.P15 = p15; p.P20 = p20; p.P25 = p25
-		p.P30 = p30; p.P35 = p35; p.P40 = p40; p.P45 = p45; p.P55 = p55
-		p.P60 = p60; p.P65 = p65; p.P70 = p70; p.P75 = p75; p.P80 = p80
-		p.P85 = p85; p.P90 = p90; p.P95 = p95
+		p.Min = min
+		p.Max = max
+		p.Mean = mean
+		p.Median = median
+		p.StdDev = stddev
+		p.P5 = p5
+		p.P10 = p10
+		p.P15 = p15
+		p.P20 = p20
+		p.P25 = p25
+		p.P30 = p30
+		p.P35 = p35
+		p.P40 = p40
+		p.P45 = p45
+		p.P55 = p55
+		p.P60 = p60
+		p.P65 = p65
+		p.P70 = p70
+		p.P75 = p75
+		p.P80 = p80
+		p.P85 = p85
+		p.P90 = p90
+		p.P95 = p95
 		p.LossPct = lossPct
 		p.LossCount = int64(lost)
 		p.Sent = int64(sent)
@@ -266,6 +302,16 @@ ORDER BY timestamp, seq`
 
 func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	srcClause, srcArgs := sourceFilter(f.Source)
+	// Optional staleness floor: bounding the CTE's max() to rows at or after
+	// the cutoff means a source whose newest row predates it produces no group
+	// row and drops out of the response — so a removed/stopped probe origin
+	// stops rendering as a live path. The bound also prunes the scan. The
+	// outer join needs no bound: it matches the exact (source, ts) pairs the
+	// CTE emitted, which are already at or after the cutoff.
+	freshClause := ""
+	if !f.LatestSince.IsZero() {
+		freshClause = " AND timestamp >= ?"
+	}
 	// Latest cycle PER SOURCE, not a single global max(timestamp). Without
 	// GROUP BY source, the CTE returns whichever source happened to flush
 	// most recently and every other source's path disappears from the
@@ -276,7 +322,7 @@ func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f st
 WITH latest AS (
   SELECT source, max(timestamp) AS ts
   FROM probe_hop
-  WHERE target_id = ?` + srcClause + `
+  WHERE target_id = ?` + srcClause + freshClause + `
   GROUP BY source
 )
 SELECT timestamp, source, ttl, hop_addr,
@@ -286,9 +332,12 @@ FROM probe_hop
 WHERE target_id = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM latest)
 ORDER BY source, ttl`
-	// args layout: CTE filter (target + opt source), outer filter (target + opt source).
+	// args layout: CTE filter (target + opt source + opt freshness), outer filter (target + opt source).
 	args := []any{ref.Target.Name}
 	args = append(args, srcArgs...)
+	if !f.LatestSince.IsZero() {
+		args = append(args, f.LatestSince)
+	}
 	args = append(args, ref.Target.Name)
 	args = append(args, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)

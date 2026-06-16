@@ -374,6 +374,13 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 		}
 		hops, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute, filter)
 	} else {
+		// Drop sources that have gone silent from the current-path view, using
+		// the same staleness threshold the overview uses for its silent flag.
+		// A removed slave's last path otherwise renders as live until its hop
+		// rows age out of retention (~90d).
+		if interval := s.store.Current().Interval; interval > 0 {
+			filter.LatestSince = time.Now().Add(-time.Duration(silentCycleMultiplier) * interval)
+		}
 		hops, err = s.reader.QueryLatestHops(r.Context(), ref, filter)
 	}
 	if err != nil {
