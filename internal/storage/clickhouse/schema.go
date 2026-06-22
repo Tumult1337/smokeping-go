@@ -48,6 +48,14 @@ func injectCluster(ddl, cluster string) string {
 	return ddl
 }
 
+// Latency columns are stored as UInt32 microseconds, not Float64 ms. Network
+// RTT noise lives in the low mantissa bits of a Float64, so Gorilla XOR coding
+// produced near-incompressible output (~1.04x). As integer µs with T64+ZSTD the
+// same data compresses ~4.9x. The writer scales ms→µs (clamped to MaxUint32) and
+// the reader divides back to ms, so the storage.Reader contract stays in ms.
+// A 100%-loss cycle stores 0 (stats.Compute returns the zero Summary), which is
+// indistinguishable from a real 0µs reading — acceptable since the loss columns
+// carry the "no measurement" signal and sub-µs RTT does not occur on a network.
 const ddlProbeCycle = `CREATE TABLE IF NOT EXISTS probe_cycle (
   timestamp      DateTime64(3, 'UTC')                              CODEC(DoubleDelta, ZSTD(1)),
   target_id      LowCardinality(String),
@@ -57,29 +65,29 @@ const ddlProbeCycle = `CREATE TABLE IF NOT EXISTS probe_cycle (
   sent           UInt16                                            CODEC(T64, ZSTD(1)),
   lost           UInt16                                            CODEC(T64, ZSTD(1)),
   loss_pct       Float32                                           CODEC(Gorilla, ZSTD(1)),
-  rtt_min_ms     Float64                                           CODEC(Gorilla, ZSTD(1)),
-  rtt_max_ms     Float64                                           CODEC(Gorilla, ZSTD(1)),
-  rtt_mean_ms    Float64                                           CODEC(Gorilla, ZSTD(1)),
-  rtt_median_ms  Float64                                           CODEC(Gorilla, ZSTD(1)),
-  rtt_stddev_ms  Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p5_ms          Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p10_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p15_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p20_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p25_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p30_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p35_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p40_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p45_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p55_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p60_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p65_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p70_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p75_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p80_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p85_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p90_ms         Float64                                           CODEC(Gorilla, ZSTD(1)),
-  p95_ms         Float64                                           CODEC(Gorilla, ZSTD(1))
+  rtt_min_us     UInt32                                            CODEC(T64, ZSTD(1)),
+  rtt_max_us     UInt32                                            CODEC(T64, ZSTD(1)),
+  rtt_mean_us    UInt32                                            CODEC(T64, ZSTD(1)),
+  rtt_median_us  UInt32                                            CODEC(T64, ZSTD(1)),
+  rtt_stddev_us  UInt32                                            CODEC(T64, ZSTD(1)),
+  p5_us          UInt32                                            CODEC(T64, ZSTD(1)),
+  p10_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p15_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p20_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p25_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p30_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p35_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p40_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p45_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p55_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p60_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p65_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p70_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p75_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p80_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p85_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p90_us         UInt32                                            CODEC(T64, ZSTD(1)),
+  p95_us         UInt32                                            CODEC(T64, ZSTD(1))
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(timestamp)
@@ -108,10 +116,10 @@ const ddlProbeHop = `CREATE TABLE IF NOT EXISTS probe_hop (
   sent          UInt16                 CODEC(T64, ZSTD(1)),
   lost          UInt16                 CODEC(T64, ZSTD(1)),
   loss_pct      Float32                CODEC(Gorilla, ZSTD(1)),
-  rtt_min_ms    Float64                CODEC(Gorilla, ZSTD(1)),
-  rtt_max_ms    Float64                CODEC(Gorilla, ZSTD(1)),
-  rtt_mean_ms   Float64                CODEC(Gorilla, ZSTD(1)),
-  rtt_median_ms Float64                CODEC(Gorilla, ZSTD(1))
+  rtt_min_us    UInt32                 CODEC(T64, ZSTD(1)),
+  rtt_max_us    UInt32                 CODEC(T64, ZSTD(1)),
+  rtt_mean_us   UInt32                 CODEC(T64, ZSTD(1)),
+  rtt_median_us UInt32                 CODEC(T64, ZSTD(1))
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(timestamp)

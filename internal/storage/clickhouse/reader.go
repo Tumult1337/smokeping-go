@@ -74,11 +74,11 @@ func (r *Reader) queryCyclesRaw(ctx context.Context, ref config.TargetRef, from,
 	srcClause, srcArgs := sourceFilter(source)
 	q := `
 SELECT timestamp, source,
-       rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms, rtt_stddev_ms,
-       p5_ms, p10_ms, p15_ms, p20_ms, p25_ms,
-       p30_ms, p35_ms, p40_ms, p45_ms, p55_ms,
-       p60_ms, p65_ms, p70_ms, p75_ms, p80_ms,
-       p85_ms, p90_ms, p95_ms,
+       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0, rtt_stddev_us / 1000.0,
+       p5_us / 1000.0, p10_us / 1000.0, p15_us / 1000.0, p20_us / 1000.0, p25_us / 1000.0,
+       p30_us / 1000.0, p35_us / 1000.0, p40_us / 1000.0, p45_us / 1000.0, p55_us / 1000.0,
+       p60_us / 1000.0, p65_us / 1000.0, p70_us / 1000.0, p75_us / 1000.0, p80_us / 1000.0,
+       p85_us / 1000.0, p90_us / 1000.0, p95_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_cycle
 WHERE target_id = ?
@@ -158,28 +158,28 @@ func (r *Reader) queryCyclesBucketed(ctx context.Context, ref config.TargetRef, 
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
        source                                              AS src,
-       minIf(rtt_min_ms, sent > lost), max(rtt_max_ms),
-       if(sum(sent) = sum(lost), 0, avgWeighted(rtt_mean_ms, toUInt64(sent - lost))),
-       quantilesExactWeighted(0.50)(rtt_median_ms, toUInt64(sent - lost))[1] AS rtt_median_ms,
-       if(sum(sent) = sum(lost), 0, sqrt(avgWeighted(pow(rtt_stddev_ms, 2), toUInt64(sent - lost)))) AS rtt_stddev_ms,
-       quantilesExactWeighted(0.05)(p5_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.10)(p10_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.15)(p15_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.20)(p20_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.25)(p25_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.30)(p30_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.35)(p35_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.40)(p40_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.45)(p45_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.55)(p55_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.60)(p60_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.65)(p65_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.70)(p70_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.75)(p75_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.80)(p80_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.85)(p85_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.90)(p90_ms, toUInt64(sent - lost))[1],
-       quantilesExactWeighted(0.95)(p95_ms, toUInt64(sent - lost))[1],
+       minIf(rtt_min_us, sent > lost) / 1000.0, max(rtt_max_us) / 1000.0,
+       if(sum(sent) = sum(lost), 0, avgWeighted(rtt_mean_us, toUInt64(sent - lost)) / 1000.0),
+       quantilesExactWeighted(0.50)(rtt_median_us, toUInt64(sent - lost))[1] / 1000.0 AS rtt_median_ms,
+       if(sum(sent) = sum(lost), 0, sqrt(avgWeighted(pow(rtt_stddev_us, 2), toUInt64(sent - lost))) / 1000.0) AS rtt_stddev_ms,
+       quantilesExactWeighted(0.05)(p5_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.10)(p10_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.15)(p15_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.20)(p20_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.25)(p25_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.30)(p30_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.35)(p35_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.40)(p40_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.45)(p45_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.55)(p55_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.60)(p60_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.65)(p65_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.70)(p70_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.75)(p75_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.80)(p80_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.85)(p85_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.90)(p90_us, toUInt64(sent - lost))[1] / 1000.0,
+       quantilesExactWeighted(0.95)(p95_us, toUInt64(sent - lost))[1] / 1000.0,
        if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS loss_pct,
        sum(lost), sum(sent)
 FROM probe_cycle
@@ -326,7 +326,7 @@ WITH latest AS (
   GROUP BY source
 )
 SELECT timestamp, source, ttl, hop_addr,
-       rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
+       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_hop
 WHERE target_id = ?` + srcClause + `
@@ -368,7 +368,7 @@ WITH nearest AS (
   GROUP BY source
 )
 SELECT timestamp, source, ttl, hop_addr,
-       rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
+       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_hop
 WHERE target_id = ?` + srcClause + `
@@ -436,7 +436,7 @@ func (r *Reader) queryHopsRaw(ctx context.Context, ref config.TargetRef, from, t
 	srcClause, srcArgs := sourceFilter(source)
 	q := `
 SELECT timestamp, source, ttl, hop_addr,
-       rtt_min_ms, rtt_max_ms, rtt_mean_ms, rtt_median_ms,
+       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_hop
 WHERE target_id = ?

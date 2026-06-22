@@ -302,11 +302,11 @@ func (w *Writer) flushCycles(ctx context.Context, rows []any) error {
 			uint16(c.Sent),
 			uint16(c.LossCount),
 			lossPct,
-			durMS(s.Min), durMS(s.Max), durMS(s.Mean), durMS(s.Median), durMS(s.StdDev),
-			durMS(s.P5), durMS(s.P10), durMS(s.P15), durMS(s.P20), durMS(s.P25),
-			durMS(s.P30), durMS(s.P35), durMS(s.P40), durMS(s.P45), durMS(s.P55),
-			durMS(s.P60), durMS(s.P65), durMS(s.P70), durMS(s.P75), durMS(s.P80),
-			durMS(s.P85), durMS(s.P90), durMS(s.P95),
+			durUS(s.Min), durUS(s.Max), durUS(s.Mean), durUS(s.Median), durUS(s.StdDev),
+			durUS(s.P5), durUS(s.P10), durUS(s.P15), durUS(s.P20), durUS(s.P25),
+			durUS(s.P30), durUS(s.P35), durUS(s.P40), durUS(s.P45), durUS(s.P55),
+			durUS(s.P60), durUS(s.P65), durUS(s.P70), durUS(s.P75), durUS(s.P80),
+			durUS(s.P85), durUS(s.P90), durUS(s.P95),
 		)
 		if err != nil {
 			return err
@@ -315,8 +315,19 @@ func (w *Writer) flushCycles(ctx context.Context, rows []any) error {
 	return batch.Send()
 }
 
-func durMS(d time.Duration) float64 {
-	return float64(d) / float64(time.Millisecond)
+// durUS converts a duration to microseconds for the UInt32 latency columns
+// in probe_cycle / probe_hop. Zero/negative maps to 0 (matching the all-zero
+// Summary a 100%-loss cycle produces) and the value is clamped to the UInt32
+// range so a pathologically large reading can't wrap around.
+func durUS(d time.Duration) uint32 {
+	if d <= 0 {
+		return 0
+	}
+	us := math.Round(float64(d) / float64(time.Microsecond))
+	if us >= math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint32(us)
 }
 
 func (w *Writer) flushRTTs(ctx context.Context, rows []any) error {
@@ -358,7 +369,7 @@ func (w *Writer) flushHops(ctx context.Context, rows []any) error {
 			uint16(r.hop.Sent),
 			uint16(r.hop.Lost),
 			lossPct,
-			durMS(hMin), durMS(hMax), durMS(hMean), durMS(hMedian),
+			durUS(hMin), durUS(hMax), durUS(hMean), durUS(hMedian),
 		)
 		if err != nil {
 			return err

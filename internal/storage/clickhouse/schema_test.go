@@ -20,7 +20,7 @@ func TestSchemaContainsAllTables(t *testing.T) {
 
 func TestSchemaPercentileColumns(t *testing.T) {
 	ddl := SchemaDDL("")
-	for _, p := range []string{"p5_ms", "p10_ms", "p25_ms", "p75_ms", "p90_ms", "p95_ms"} {
+	for _, p := range []string{"p5_us", "p10_us", "p25_us", "p75_us", "p90_us", "p95_us"} {
 		if !strings.Contains(ddl, p) {
 			t.Errorf("schema missing percentile column %q", p)
 		}

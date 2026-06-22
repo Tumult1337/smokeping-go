@@ -64,9 +64,9 @@ FROM (
     intDiv(toUInt32(timestamp) - toUInt32(toDateTime(?)), ?)  AS bucket_idx,
     avg(loss_pct)                                             AS b_loss_avg,
     max(loss_pct)                                             AS b_loss_max,
-    quantilesExactWeighted(0.5)(rtt_median_ms, toUInt64(sent - lost))[1]  AS b_median,
-    quantilesExactWeighted(0.95)(p95_ms, toUInt64(sent - lost))[1]        AS b_p95,
-    max(rtt_max_ms)                                           AS b_max,
+    quantilesExactWeighted(0.5)(rtt_median_us, toUInt64(sent - lost))[1] / 1000.0  AS b_median,
+    quantilesExactWeighted(0.95)(p95_us, toUInt64(sent - lost))[1] / 1000.0        AS b_p95,
+    max(rtt_max_us) / 1000.0                                  AS b_max,
     sum(toUInt64(sent - lost))                                AS b_recv_total,
     max(timestamp)                                            AS b_last_seen
   FROM probe_cycle
