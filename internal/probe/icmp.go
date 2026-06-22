@@ -153,8 +153,10 @@ func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 
 	// Destination: for unprivileged UDP sockets we need a UDPAddr; for raw ICMP an IPAddr.
 	var addr net.Addr = dst
+	isUDP := false
 	if ua, ok := asUDPAddr(conn); ok {
 		addr = &net.UDPAddr{IP: dst.IP, Zone: ua.Zone}
+		isUDP = true
 	}
 
 	deadline, ok := ctx.Deadline()
@@ -193,9 +195,13 @@ func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		if !ok {
 			continue
 		}
-		// On unprivileged (UDP) sockets the kernel rewrites ID to the source port,
-		// so id may not match what we sent — gate on seq only in that case.
-		if echo.Seq != seq {
+		// On unprivileged (UDP) sockets the kernel rewrites ID to the source
+		// port and demuxes replies per-socket, so id won't match what we sent —
+		// gate on seq only. On raw sockets the kernel delivers every ICMP echo
+		// reply to every raw socket, so a concurrent target's reply with a
+		// colliding seq would be mis-accepted; there id is the discriminator
+		// (matching sendTTL), so enforce it.
+		if echo.Seq != seq || (!isUDP && echo.ID != id) {
 			continue
 		}
 		return time.Since(start), nil

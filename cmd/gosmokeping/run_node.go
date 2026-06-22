@@ -81,7 +81,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 
 	// Build the fanout once — slave-inbound cycles flow through the exact same
 	// sinks as locally-probed ones (Writer, alert evaluator, log sink).
-	fanout := scheduler.Fanout(sinks...)
+	fanout := scheduler.Fanout(log, sinks...)
 
 	var clusterHandler http.Handler
 	var slaveLister api.SlaveLister

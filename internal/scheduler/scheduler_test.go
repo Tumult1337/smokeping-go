@@ -136,3 +136,23 @@ func TestSchedulerRunsAndStops(t *testing.T) {
 		t.Errorf("expected both targets to run, got %+v", seen)
 	}
 }
+
+// alwaysPanicSink panics on every OnCycle — used to prove fanout isolation.
+type alwaysPanicSink struct{}
+
+func (alwaysPanicSink) OnCycle(context.Context, Cycle) { panic("boom") }
+
+// TestFanoutIsolatesSinkPanic proves a panic in one sink does not stop later
+// sinks from receiving the cycle. This guards the alert evaluator from being
+// silently skipped when an earlier sink (e.g. the storage writer) panics, and
+// protects the slave-inbound path which feeds the fanout with no outer recover.
+func TestFanoutIsolatesSinkPanic(t *testing.T) {
+	rec := &recordingSink{}
+	fan := Fanout(slog.New(slog.NewTextHandler(io.Discard, nil)), alwaysPanicSink{}, rec)
+
+	fan.OnCycle(context.Background(), Cycle{Source: "x"})
+
+	if got := len(rec.snapshot()); got != 1 {
+		t.Fatalf("downstream sink should still receive the cycle after an upstream panic; got %d cycles", got)
+	}
+}

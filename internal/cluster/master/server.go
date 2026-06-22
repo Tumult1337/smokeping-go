@@ -62,6 +62,29 @@ func (s *Server) Handler() http.Handler {
 
 const maxSlaveNameLen = 128
 
+// validSlaveName gates the identity a slave can claim. A valid bearer token
+// authenticates the request but does not bind it to a name, so the name is
+// untrusted and must be validated wherever it is consumed (register, config,
+// cycles) — not just at /register. "master" is reserved both to keep the
+// registry honest and because it is the source label of local probes: a slave
+// stamping source="master" would collide with and corrupt the master's own
+// data and alert series. Control characters are rejected so the label stays
+// clean in ClickHouse and the alert exec environment.
+func validSlaveName(name string) bool {
+	if name == "" || len(name) > maxSlaveNameLen {
+		return false
+	}
+	if name == "master" {
+		return false
+	}
+	for _, c := range name {
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRegisterBody)
 	var req cluster.RegisterReq
@@ -69,12 +92,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if req.Name == "" || len(req.Name) > maxSlaveNameLen {
-		http.Error(w, "name required and must be ≤128 bytes", http.StatusBadRequest)
-		return
-	}
-	if req.Name == "master" {
-		http.Error(w, `slave name "master" is reserved`, http.StatusBadRequest)
+	if !validSlaveName(req.Name) {
+		http.Error(w, `name required: ≤128 bytes, not "master", no control chars`, http.StatusBadRequest)
 		return
 	}
 	s.registry.Touch(req.Name, req.Version, r.RemoteAddr)
@@ -90,6 +109,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Current()
 	slaveName := r.Header.Get("X-Slave-Name")
 	if slaveName != "" {
+		if !validSlaveName(slaveName) {
+			http.Error(w, "invalid slave name", http.StatusBadRequest)
+			return
+		}
 		s.registry.Touch(slaveName, r.Header.Get("X-Slave-Version"), r.RemoteAddr)
 	}
 
@@ -118,11 +141,18 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 	// slave could otherwise forge another's source label and corrupt alert
 	// state or registry entries. Fall back to batch.Source for older slaves
 	// that don't send the header.
-	if name := r.Header.Get("X-Slave-Name"); name != "" {
-		s.registry.Touch(name, r.Header.Get("X-Slave-Version"), r.RemoteAddr)
+	name, version := r.Header.Get("X-Slave-Name"), r.Header.Get("X-Slave-Version")
+	if name == "" {
+		// Legacy slaves omit the header; fall back to the wire-provided source.
+		name, version = batch.Source, ""
+	}
+	if name != "" {
+		if !validSlaveName(name) {
+			http.Error(w, "invalid slave name", http.StatusBadRequest)
+			return
+		}
+		s.registry.Touch(name, version, r.RemoteAddr)
 		batch.Source = name
-	} else if batch.Source != "" {
-		s.registry.Touch(batch.Source, "", r.RemoteAddr)
 	}
 	n := s.ingestBatch(r, batch)
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": n})
