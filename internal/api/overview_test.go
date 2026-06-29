@@ -13,10 +13,6 @@ import (
 	"github.com/tumult/gosmokeping/internal/storage"
 )
 
-type fakeSlaves struct{ names []string }
-
-func (f fakeSlaves) Names() []string { return f.names }
-
 // overviewTestServer builds a server with two targets (one unassigned, one
 // pinned to slave "berlin"), two registered slaves, and a stub reader that
 // returns one overview row per (target, source) so the source filter is
@@ -57,7 +53,7 @@ func overviewTestServer(t *testing.T) http.Handler {
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Store:  store,
 		Reader: reader,
-		Slaves: fakeSlaves{names: []string{"berlin", "nyc"}},
+		Slaves: stubSlaveLister{names: []string{"berlin", "nyc"}},
 	})
 	return s.Router()
 }
@@ -124,7 +120,9 @@ func TestOverviewSourceUsesThatSourcesNumbers(t *testing.T) {
 			LossAvg *float64 `json:"loss_avg"`
 		} `json:"rows"`
 	}
-	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	for _, r := range body.Rows {
 		if r.ID == "core/gw" {
 			// berlin's gw row has loss 2 — not the worst-source (nyc=3) collapse.

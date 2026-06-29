@@ -175,6 +175,7 @@ export interface OverviewRow {
 
 export interface OverviewResponse {
   window: string;
+  source?: string;
   from: string;
   to: string;
   rows: OverviewRow[];

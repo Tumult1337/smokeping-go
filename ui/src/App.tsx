@@ -390,8 +390,8 @@ export default function App() {
       setZoom(u.zoom);
       setPickedSec(u.pickedSec);
       setPickedSource(null);
-      if (u.mode) setChartStyle(u.mode);
-      if (u.scale) setYScale(u.scale);
+      setChartStyle(u.mode ?? "band");
+      setYScale(u.scale ?? "lin");
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -509,7 +509,7 @@ export default function App() {
   }, [points, selectedSource]);
 
   const pickTarget = (id: string, source?: string) => {
-    navIntentRef.current = "push";
+    if (id !== selectedId || overviewView || slaveView !== null) navIntentRef.current = "push";
     setSelectedId(id);
     setSlaveView(null);
     setOverviewView(false);
@@ -526,10 +526,11 @@ export default function App() {
   };
 
   const openOverview = () => {
-    navIntentRef.current = "push";
+    if (selectedId !== null || slaveView !== null || overviewView) navIntentRef.current = "push";
     setSelectedId(null);
     setSlaveView(null);
     setOverviewView(false);
+    setSelectedSource(null);
     setZoom(null);
     setPickedSec(null);
     setPickedSource(null);
@@ -538,7 +539,7 @@ export default function App() {
   };
 
   const pickSlave = (name: string) => {
-    navIntentRef.current = "push";
+    if (name !== slaveView || selectedId !== null || overviewView) navIntentRef.current = "push";
     setSlaveView(name);
     setSelectedId(null);
     setOverviewView(false);
@@ -656,7 +657,7 @@ export default function App() {
           <OverviewView
             window={overviewWindow}
             onWindowChange={(w) => {
-              navIntentRef.current = "push";
+              if (w !== overviewWindow) navIntentRef.current = "push";
               setOverviewWindow(w);
             }}
             source={showSlaveOverview ? slaveView ?? undefined : undefined}
@@ -700,7 +701,7 @@ export default function App() {
                     className={range === r.value ? "active" : ""}
                     aria-pressed={range === r.value}
                     onClick={() => {
-                      navIntentRef.current = "push";
+                      if (r.value !== range) navIntentRef.current = "push";
                       setRange(r.value);
                       setZoom(null);
                     }}
@@ -782,7 +783,7 @@ export default function App() {
                       type="button"
                       className={`chip ${selectedSource == null ? "active" : ""}`}
                       onClick={() => {
-                        navIntentRef.current = "push";
+                        if (selectedSource !== null) navIntentRef.current = "push";
                         setSelectedSource(null);
                       }}
                     >
@@ -797,7 +798,7 @@ export default function App() {
                           className={`chip ${selectedSource === s ? "active" : ""}`}
                           style={c ? { color: c.stroke } : undefined}
                           onClick={() => {
-                            navIntentRef.current = "push";
+                            if (selectedSource !== s) navIntentRef.current = "push";
                             setSelectedSource(s);
                           }}
                         >
