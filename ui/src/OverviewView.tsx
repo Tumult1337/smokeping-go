@@ -28,7 +28,10 @@ interface Props {
   refreshTick: number;
   onRefresh: () => void;
   onOpenSidebar: () => void;
-  onPickTarget: (id: string) => void;
+  onPickTarget: (id: string, source?: string) => void;
+  // When set, the overview is scoped to a single probe source (the "By slave"
+  // view). Hides the Worst-src column and pre-selects this source on row click.
+  source?: string;
 }
 
 const WINDOW_BUTTONS: { label: string; value: OverviewWindow }[] = [
@@ -50,27 +53,26 @@ export function OverviewView(props: Props) {
     onRefresh,
     onOpenSidebar,
     onPickTarget,
+    source,
   } = props;
 
   const [rows, setRows] = useState<OverviewRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  // prevWinRef tracks the last window we fetched. On a window change we wipe to
-  // skeleton (row count + sparkline shapes differ); on a same-window refresh
-  // tick we keep the existing rows visible. Doing this inside the fetch effect
-  // — rather than a separate [win] effect — avoids the effect-ordering bug
-  // where the reset ran after the fetch effect had already read the flag.
-  const prevWinRef = useRef(win);
+  // prevKeyRef tracks the last (window, source) we fetched. A change to either
+  // wipes to skeleton; a same-key refresh tick keeps existing rows visible.
+  const prevKeyRef = useRef(`${win}|${source ?? ""}`);
 
   useEffect(() => {
     let cancelled = false;
     setError(null);
     setRefreshing(true);
-    if (prevWinRef.current !== win) {
-      prevWinRef.current = win;
+    const key = `${win}|${source ?? ""}`;
+    if (prevKeyRef.current !== key) {
+      prevKeyRef.current = key;
       setRows(null);
     }
-    getOverview(win)
+    getOverview(win, source)
       .then((r) => {
         if (cancelled) return;
         setRows(r.rows);
@@ -86,7 +88,7 @@ export function OverviewView(props: Props) {
     return () => {
       cancelled = true;
     };
-  }, [win, refreshTick]);
+  }, [win, refreshTick, source]);
 
   // Sort behaviour: silent rows always sit at the top regardless of the
   // user-chosen column, so a click on "sort by median" still surfaces dead
@@ -124,8 +126,10 @@ export function OverviewView(props: Props) {
         >
           ☰
         </button>
-        <strong>Overview</strong>
-        <span style={{ color: "var(--text-muted)" }}>· fleet health</span>
+        <strong>{source ? source : "Overview"}</strong>
+        <span style={{ color: "var(--text-muted)" }}>
+          · {source ? "slave health" : "fleet health"}
+        </span>
         <div style={{ flex: 1 }} />
         <div className="segmented" role="group" aria-label="Time window">
           {WINDOW_BUTTONS.map((b) => (
@@ -188,14 +192,16 @@ export function OverviewView(props: Props) {
               <Th k="rtt_max" sort={sort} dir={dir} onClick={handleHeaderClick} numeric>
                 Max
               </Th>
-              <Th
-                k="worst_source"
-                sort={sort}
-                dir={dir}
-                onClick={handleHeaderClick}
-              >
-                Worst src
-              </Th>
+              {!source && (
+                <Th
+                  k="worst_source"
+                  sort={sort}
+                  dir={dir}
+                  onClick={handleHeaderClick}
+                >
+                  Worst src
+                </Th>
+              )}
               <Th k="last_seen" sort={sort} dir={dir} onClick={handleHeaderClick}>
                 Last seen
               </Th>
@@ -206,14 +212,19 @@ export function OverviewView(props: Props) {
             {sortedRows === null && skeletonRows()}
             {sortedRows !== null && sortedRows.length === 0 && (
               <tr>
-                <td colSpan={9} className="overview-empty">
+                <td colSpan={source ? 8 : 9} className="overview-empty">
                   No targets configured
                 </td>
               </tr>
             )}
             {sortedRows !== null &&
               sortedRows.map((row) => (
-                <Row key={row.id} row={row} onPick={() => onPickTarget(row.id)} />
+                <Row
+                  key={row.id}
+                  row={row}
+                  hideWorstSrc={!!source}
+                  onPick={() => onPickTarget(row.id, source)}
+                />
               ))}
           </tbody>
         </table>
@@ -280,7 +291,15 @@ function Th(props: {
   );
 }
 
-function Row({ row, onPick }: { row: OverviewRow; onPick: () => void }) {
+function Row({
+  row,
+  onPick,
+  hideWorstSrc,
+}: {
+  row: OverviewRow;
+  onPick: () => void;
+  hideWorstSrc?: boolean;
+}) {
   const label = row.title || row.id;
   return (
     <tr
@@ -312,9 +331,11 @@ function Row({ row, onPick }: { row: OverviewRow; onPick: () => void }) {
       <td className="num">{fmtMs(row.rtt_median)}</td>
       <td className="num">{fmtMs(row.rtt_p95)}</td>
       <td className="num">{fmtMs(row.rtt_max)}</td>
-      <td className="overview-src">
-        {row.worst_source || <span className="overview-na">—</span>}
-      </td>
+      {!hideWorstSrc && (
+        <td className="overview-src">
+          {row.worst_source || <span className="overview-na">—</span>}
+        </td>
+      )}
       <td className="overview-last-seen">
         {row.last_seen == null ? (
           <span className="overview-na">never</span>
