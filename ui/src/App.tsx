@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Fuse from "fuse.js";
 import {
   listTargets,
+  listSources,
   getCycles,
   type Target,
   type CyclesResponse,
@@ -51,13 +52,14 @@ type UrlState = {
   overviewWindow: OverviewWindow | null;
   overviewSort: SortKey | null;
   overviewDir: SortDir | null;
+  slaveView: string | null;
 };
 function readUrlState(): UrlState {
   if (typeof window === "undefined") {
     return {
       target: null, range: null, mode: null, scale: null, source: null,
       pickedSec: null, zoom: null, view: null, overviewWindow: null,
-      overviewSort: null, overviewDir: null,
+      overviewSort: null, overviewDir: null, slaveView: null,
     };
   }
   const p = new URLSearchParams(window.location.search);
@@ -90,6 +92,7 @@ function readUrlState(): UrlState {
     overviewWindow: ow && VALID_OVERVIEW_WINDOWS.includes(ow) ? ow : null,
     overviewSort: os && VALID_SORT_KEYS.includes(os) ? os : null,
     overviewDir: od === "asc" || od === "desc" ? od : null,
+    slaveView: p.get("view") === "slave" ? p.get("slave") : null,
   };
 }
 
@@ -114,6 +117,8 @@ export default function App() {
   // every render.
   const initialUrl = useMemo(() => readUrlState(), []);
   const [targets, setTargets] = useState<Target[]>([]);
+  const [sources, setSources] = useState<string[]>([]);
+  const [slaveView, setSlaveView] = useState<string | null>(initialUrl.slaveView);
   // null = "all sources" — no source param forwarded.
   const [selectedSource, setSelectedSource] = useState<string | null>(initialUrl.source);
   const [selectedId, setSelectedId] = useState<string | null>(initialUrl.target);
@@ -169,6 +174,10 @@ export default function App() {
     }
   });
   const fetchKeyRef = useRef<string>("");
+  // "push" means the next URL sync creates a history entry (user navigation);
+  // null means replace (derived correction / refinement). Set by user-action
+  // handlers, read+cleared by the URL-sync effect (see Task 5).
+  const navIntentRef = useRef<"push" | null>(null);
   // Historical MTR pin: when set, HopsTable and the heatmap marker
   // show the cycle at that unix-seconds timestamp. Cleared when the target
   // or range changes, or when the user clicks "← latest". Initial value
@@ -262,6 +271,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    listSources()
+      .then((r) => setSources(r.sources))
+      .catch(() => setSources([]));
+  }, []);
+
   const fromArg = zoom ? String(zoom.from) : range;
   const toArg = zoom ? String(zoom.to) : undefined;
 
@@ -332,6 +347,10 @@ export default function App() {
     // — without target= the URL implicitly means overview, so the extra param
     // is redundant.
     if (overviewView && selectedId) p.set("view", "overview");
+    if (slaveView && sources.includes(slaveView)) {
+      p.set("view", "slave");
+      p.set("slave", slaveView);
+    }
     if (overviewView || !selectedId) {
       if (overviewWindow !== "-1h") p.set("window", overviewWindow);
       if (overviewSort !== "loss_avg") p.set("sort", overviewSort);
@@ -344,7 +363,7 @@ export default function App() {
     }
   }, [
     selectedId, range, chartStyle, yScale, selectedSource, pickedSec, zoom,
-    overviewView, overviewWindow, overviewSort, overviewDir,
+    overviewView, overviewWindow, overviewSort, overviewDir, slaveView, sources,
   ]);
 
   const refresh = useCallback(() => {
@@ -458,21 +477,34 @@ export default function App() {
     return paletteForSorted([...present].sort());
   }, [points, selectedSource]);
 
-  const pickTarget = (id: string) => {
+  const pickTarget = (id: string, source?: string) => {
+    navIntentRef.current = "push";
     setSelectedId(id);
+    setSlaveView(null);
     setOverviewView(false);
+    setSelectedSource(source ?? null);
     setZoom(null);
     setPickedSec(null);
     setPickedSource(null);
-    // Clear any soloed source from the previous target. The chart only resets
-    // this when its source set changes, so switching between two targets with
-    // an identical source set would otherwise leak a stale solo filter into
-    // windowStats and report stats for the wrong source subset.
     setChartSoloSource(null);
     setSidebarOpen(false);
   };
 
   const openOverview = () => {
+    navIntentRef.current = "push";
+    setSelectedId(null);
+    setSlaveView(null);
+    setOverviewView(false);
+    setZoom(null);
+    setPickedSec(null);
+    setPickedSource(null);
+    setChartSoloSource(null);
+    setSidebarOpen(false);
+  };
+
+  const pickSlave = (name: string) => {
+    navIntentRef.current = "push";
+    setSlaveView(name);
     setSelectedId(null);
     setOverviewView(false);
     setZoom(null);
@@ -482,10 +514,10 @@ export default function App() {
     setSidebarOpen(false);
   };
 
-  // showOverview = the right pane should render the overview, not a detail
-  // view. Two paths get us here: explicit view=overview state, or simply
-  // having no target selected.
-  const showOverview = !selectedId || overviewView;
+  // Slave overview takes precedence when a slave is selected. Otherwise the
+  // overview shows when no target is picked (or explicit overview view).
+  const showSlaveOverview = slaveView != null && sources.includes(slaveView);
+  const showOverview = !showSlaveOverview && (!selectedId || overviewView);
 
   return (
     <div className={`app ${sidebarOpen ? "sidebar-open" : ""}`}>
@@ -518,6 +550,23 @@ export default function App() {
         >
           Overview
         </button>
+        {sources.length > 1 && (
+          <div className="slave-section">
+            <div className="slave-section-label">By slave</div>
+            {sources.map((src) => (
+              <button
+                key={src}
+                type="button"
+                className={`target-item slave-item ${
+                  slaveView === src ? "active" : ""
+                }`}
+                onClick={() => pickSlave(src)}
+              >
+                {src}
+              </button>
+            ))}
+          </div>
+        )}
         {searchResults !== null ? (
           searchResults.length === 0 ? (
             <div className="empty" style={{ padding: "16px 0" }}>No matches</div>
@@ -567,10 +616,14 @@ export default function App() {
       </aside>
 
       <main className="main">
-        {showOverview && (
+        {(showOverview || showSlaveOverview) && (
           <OverviewView
             window={overviewWindow}
-            onWindowChange={setOverviewWindow}
+            onWindowChange={(w) => {
+              navIntentRef.current = "push";
+              setOverviewWindow(w);
+            }}
+            source={showSlaveOverview ? slaveView ?? undefined : undefined}
             sort={overviewSort}
             dir={overviewDir}
             onSortChange={(s, d) => {
@@ -585,7 +638,7 @@ export default function App() {
             onPickTarget={pickTarget}
           />
         )}
-        {!showOverview && selected && (
+        {!showOverview && !showSlaveOverview && selected && (
           <>
             <div className="toolbar">
               <button

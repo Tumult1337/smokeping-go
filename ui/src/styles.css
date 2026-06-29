@@ -862,3 +862,17 @@ body {
     font-size: 12px;
   }
 }
+
+.slave-section {
+  margin-top: 4px;
+}
+.slave-section-label {
+  padding: 8px 12px 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.slave-item {
+  padding-left: 20px;
+}
