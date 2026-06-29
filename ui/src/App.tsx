@@ -358,13 +358,44 @@ export default function App() {
     }
     const qs = p.toString();
     const url = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`;
-    if (url !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
-      window.history.replaceState(null, "", url);
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (url !== current) {
+      if (navIntentRef.current === "push") {
+        window.history.pushState(null, "", url);
+      } else {
+        window.history.replaceState(null, "", url);
+      }
     }
+    navIntentRef.current = null;
   }, [
     selectedId, range, chartStyle, yScale, selectedSource, pickedSec, zoom,
     overviewView, overviewWindow, overviewSort, overviewDir, slaveView, sources,
   ]);
+
+  // Browser Back/Forward: rehydrate all URL-encoded state. Because we set state
+  // *from* the URL, the sync effect recomputes the same URL and its equality
+  // guard skips any write — no echo, no re-push. pickedSource is not URL-
+  // encoded, so it resets to null (matching its target/range-change reset).
+  useEffect(() => {
+    const onPop = () => {
+      const u = readUrlState();
+      setSelectedId(u.target);
+      setRange(u.range ?? "-24h");
+      setSelectedSource(u.source);
+      setOverviewView(u.view === "overview");
+      setSlaveView(u.slaveView);
+      setOverviewWindow(u.overviewWindow ?? "-1h");
+      setOverviewSort(u.overviewSort ?? "loss_avg");
+      setOverviewDir(u.overviewDir ?? "desc");
+      setZoom(u.zoom);
+      setPickedSec(u.pickedSec);
+      setPickedSource(null);
+      if (u.mode) setChartStyle(u.mode);
+      if (u.scale) setYScale(u.scale);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   const refresh = useCallback(() => {
     setRefreshTick((n) => n + 1);
@@ -486,6 +517,10 @@ export default function App() {
     setZoom(null);
     setPickedSec(null);
     setPickedSource(null);
+    // Clear any soloed source from the previous target. The chart only resets
+    // this when its source set changes, so switching between two targets with
+    // an identical source set would otherwise leak a stale solo filter into
+    // windowStats and report stats for the wrong source subset.
     setChartSoloSource(null);
     setSidebarOpen(false);
   };
@@ -507,6 +542,7 @@ export default function App() {
     setSlaveView(name);
     setSelectedId(null);
     setOverviewView(false);
+    setSelectedSource(null);
     setZoom(null);
     setPickedSec(null);
     setPickedSource(null);
@@ -664,6 +700,7 @@ export default function App() {
                     className={range === r.value ? "active" : ""}
                     aria-pressed={range === r.value}
                     onClick={() => {
+                      navIntentRef.current = "push";
                       setRange(r.value);
                       setZoom(null);
                     }}
@@ -744,7 +781,10 @@ export default function App() {
                     <button
                       type="button"
                       className={`chip ${selectedSource == null ? "active" : ""}`}
-                      onClick={() => setSelectedSource(null)}
+                      onClick={() => {
+                        navIntentRef.current = "push";
+                        setSelectedSource(null);
+                      }}
                     >
                       all
                     </button>
@@ -756,7 +796,10 @@ export default function App() {
                           type="button"
                           className={`chip ${selectedSource === s ? "active" : ""}`}
                           style={c ? { color: c.stroke } : undefined}
-                          onClick={() => setSelectedSource(s)}
+                          onClick={() => {
+                            navIntentRef.current = "push";
+                            setSelectedSource(s);
+                          }}
                         >
                           {s}
                         </button>
