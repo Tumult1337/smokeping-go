@@ -61,7 +61,31 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 	from := to.Add(-span)
 
 	cfg := s.store.Current()
-	targets := cfg.AllTargets()
+
+	source := r.URL.Query().Get("source")
+	master := masterSourceName(cfg)
+	var registered []string
+	if s.slaves != nil {
+		registered = s.slaves.Names()
+	}
+	if source != "" && !knownSource(source, master, registered) {
+		writeErr(w, http.StatusBadRequest, "unknown source")
+		return
+	}
+
+	allTargets := cfg.AllTargets()
+	targets := allTargets
+	if source != "" {
+		targets = make([]config.TargetRef, 0, len(allTargets))
+		for _, t := range allTargets {
+			for _, src := range effectiveSources(t.Target, master, registered) {
+				if src == source {
+					targets = append(targets, t)
+					break
+				}
+			}
+		}
+	}
 
 	rows, err := s.reader.QueryOverview(r.Context(), from, to, targets)
 	if err != nil {
@@ -95,6 +119,15 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 			ProbeType:  probeType(cfg, t.Target.Probe),
 		}
 		matches := bySource[t.ID()]
+		if source != "" && len(matches) > 0 {
+			filtered := make([]storage.OverviewSourceRow, 0, len(matches))
+			for _, m := range matches {
+				if m.Source == source {
+					filtered = append(filtered, m)
+				}
+			}
+			matches = filtered
+		}
 		if len(matches) == 0 {
 			// No rows at all — target is silent. Empty sparkline, nil metrics.
 			dto.Silent = true
@@ -121,10 +154,25 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window": windowStr,
+		"source": source,
 		"from":   from.Format(time.RFC3339),
 		"to":     to.Format(time.RFC3339),
 		"rows":   out,
 	})
+}
+
+// knownSource reports whether name is the master's source label or a
+// currently-registered slave. Fail-closed gate for the ?source= filter.
+func knownSource(name, master string, registered []string) bool {
+	if name == master {
+		return true
+	}
+	for _, n := range registered {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // probeType resolves a probe key to its Type. Empty if the key is unknown —
