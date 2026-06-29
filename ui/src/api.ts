@@ -182,8 +182,13 @@ export interface OverviewResponse {
 
 export type OverviewWindow = "-1h" | "-6h" | "-24h";
 
-export function getOverview(window: OverviewWindow): Promise<OverviewResponse> {
-  return jsonGet<OverviewResponse>(`/api/v1/overview?window=${window}`);
+export function getOverview(
+  window: OverviewWindow,
+  source?: string,
+): Promise<OverviewResponse> {
+  const params = new URLSearchParams({ window });
+  if (source) params.set("source", source);
+  return jsonGet<OverviewResponse>(`/api/v1/overview?${params}`);
 }
 
 export function getHopsTimeline(
