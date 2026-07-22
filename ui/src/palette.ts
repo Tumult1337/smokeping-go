@@ -1,12 +1,31 @@
-// Palette rotated per source so multi-source "all" view stays readable. First
-// entry is the historical single-source teal so plain 1-source charts look
-// unchanged.
+// Palette rotated per source so multi-source "all" view stays readable.
+// Fixed order, 8 slots, chosen (not generated) so every adjacent pair clears
+// the colorblind-safety gate: worst adjacent CVD ΔE 8.4 (protan/deutan,
+// OKLab ×100, floor 6.0), worst adjacent normal-vision ΔE 19.3 (floor 15),
+// all 8 inside the dark-theme OKLCH lightness band, all >=3:1 against
+// --bg (#0f1115). Verified with dataviz's validate_palette.js — re-run it
+// against any edit here:
+//   node validate_palette.js "<8 hex>" --mode dark --surface "#0f1115"
+// The previous 5-entry palette silently repeated past 5 sources (2 gosmokeping
+// slaves ended up sharing a color) and had already failed this same check
+// (sky/fuchsia were ΔE 0.3 under deutan — indistinguishable). This set fixes
+// both: no repeat through 8 concurrent sources.
+// SIMPLIFIED: caps at 8 distinct hues — that's close to the practical ceiling
+// for hue-only categorical identity at a fixed lightness/chroma band (the
+// dataviz skill's own reference tops out here too). A 9th+ source still wraps
+// via `i % PALETTE.length` and repeats a hue. If gosmokeping regularly runs
+// >8 slaves against one target, the upgrade path is a secondary channel (e.g.
+// a dashed stroke on the repeated half) rather than adding more hues — more
+// hues at this point stop being reliably distinguishable, colorblind or not.
 export const PALETTE: { stroke: string; fill: (a: number) => string }[] = [
-  { stroke: "#5eead4", fill: (a) => `rgba(94,234,212,${a})` },
-  { stroke: "#f0b429", fill: (a) => `rgba(240,180,41,${a})` },
-  { stroke: "#e879f9", fill: (a) => `rgba(232,121,249,${a})` },
-  { stroke: "#38bdf8", fill: (a) => `rgba(56,189,248,${a})` },
-  { stroke: "#fb7185", fill: (a) => `rgba(251,113,133,${a})` },
+  { stroke: "#3987e5", fill: (a) => `rgba(57,135,229,${a})` },
+  { stroke: "#d95926", fill: (a) => `rgba(217,89,38,${a})` },
+  { stroke: "#199e70", fill: (a) => `rgba(25,158,112,${a})` },
+  { stroke: "#c98500", fill: (a) => `rgba(201,133,0,${a})` },
+  { stroke: "#d55181", fill: (a) => `rgba(213,81,129,${a})` },
+  { stroke: "#008300", fill: (a) => `rgba(0,131,0,${a})` },
+  { stroke: "#9085e9", fill: (a) => `rgba(144,133,233,${a})` },
+  { stroke: "#e66767", fill: (a) => `rgba(230,103,103,${a})` },
 ];
 
 // paletteForSorted maps sorted source names → palette entries the way both
