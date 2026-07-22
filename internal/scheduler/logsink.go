@@ -5,14 +5,13 @@ import (
 	"log/slog"
 )
 
-// LogSink is a Sink that logs every completed cycle. Useful as a placeholder
-// before storage/alerting are wired in.
+// LogSink is a Sink that logs every completed cycle at debug level.
 type LogSink struct {
 	Log *slog.Logger
 }
 
 func (l *LogSink) OnCycle(_ context.Context, c Cycle) {
-	l.Log.Info("cycle",
+	l.Log.Debug("cycle",
 		"target", c.Target.ID(),
 		"probe", c.ProbeName,
 		"sent", c.Sent,
