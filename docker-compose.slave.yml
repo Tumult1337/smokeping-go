@@ -56,6 +56,13 @@ services:
       - .env
     volumes:
       - ./config.slave.json:/opt/smokeping/config.json:ro
+    # json-file has no size cap by default — an unbounded log grows
+    # forever and can fill the disk. Cap it and keep a bit of history.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     # If ICMP probes start failing with "operation not permitted"
     # (some kernels strip file caps from bind-mounted layers):
     # cap_add:

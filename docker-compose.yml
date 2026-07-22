@@ -51,6 +51,13 @@ services:
       - .env
     volumes:
       - ./config.json:/opt/smokeping/config.json:ro
+    # json-file has no size cap by default — an unbounded log grows
+    # forever and can fill the disk. Cap it and keep a bit of history.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     # The image already grants cap_net_raw+ep on the binary via setcap
     # in the Dockerfile. Some kernels strip file caps from bind-mounted
     # layers; uncomment if ICMP probes start failing with "operation
