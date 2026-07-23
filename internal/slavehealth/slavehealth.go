@@ -13,7 +13,9 @@
 package slavehealth
 
 import (
+	"cmp"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,10 +53,21 @@ type Set struct {
 	peers []Peer
 }
 
-// NewSet copies peers so the caller's slice cannot mutate the snapshot.
+// NewSet copies peers so the caller's slice cannot mutate the snapshot, and
+// sorts the copy by Name (tie-break Addr) so every derived value —
+// Fingerprint(), Probe(), and Public() — is order-invariant regardless of
+// what order the caller passes peers in. A correctness property this
+// fundamental must not depend on an unenforced contract in a different
+// package.
 func NewSet(peers []Peer) *Set {
 	out := make([]Peer, len(peers))
 	copy(out, peers)
+	slices.SortFunc(out, func(a, b Peer) int {
+		if c := cmp.Compare(a.Name, b.Name); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Addr.String(), b.Addr.String())
+	})
 	return &Set{peers: out}
 }
 
@@ -105,6 +118,12 @@ func (s *Set) Probe(exclude string) []config.Group {
 func (s *Set) Public() []config.TargetRef {
 	out := make([]config.TargetRef, 0, len(s.peers))
 	for _, p := range s.peers {
+		// Public() must describe exactly the set Probe() probes — otherwise
+		// the API advertises a target nothing ever collects data for, and it
+		// shows up in the UI as a permanently-empty row.
+		if !p.Addr.IsValid() {
+			continue
+		}
 		out = append(out, config.TargetRef{
 			Group: Group,
 			Target: config.Target{

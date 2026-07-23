@@ -164,6 +164,49 @@ func TestFingerprintResistsSeparatorInjection(t *testing.T) {
 	}
 }
 
+// Membership is what matters, not the order the caller happened to build the
+// slice in — a reorder must not trigger a spurious scheduler rebuild.
+func TestFingerprintIsOrderInvariant(t *testing.T) {
+	forward := peers()
+	reversed := []Peer{forward[2], forward[0], forward[1]}
+
+	a := NewSet(forward).Fingerprint()
+	b := NewSet(reversed).Fingerprint()
+	if a != b {
+		t.Fatalf("fingerprint depends on peer order: forward %q, reversed %q", a, b)
+	}
+}
+
+// Probe() and Public() must agree on membership: a peer Probe() can't reach
+// (invalid address) must not appear in Public() either, or the API
+// advertises a target nothing ever collects data for.
+func TestInvalidAddrPeerExcludedFromBothViews(t *testing.T) {
+	set := NewSet([]Peer{
+		{Name: "good", Addr: netip.MustParseAddr("10.44.0.2")},
+		{Name: "bad", Addr: netip.Addr{}},
+	})
+
+	groups := set.Probe("")
+	if len(groups) != 1 || len(groups[0].Targets) != 1 {
+		t.Fatalf("got groups %+v, want exactly the valid peer", groups)
+	}
+	for _, tgt := range groups[0].Targets {
+		if tgt.Name == "bad" {
+			t.Fatal("Probe() must exclude a peer with an invalid address")
+		}
+	}
+
+	refs := set.Public()
+	if len(refs) != 1 {
+		t.Fatalf("got %d refs, want 1", len(refs))
+	}
+	for _, ref := range refs {
+		if ref.Target.Name == "bad" {
+			t.Fatal("Public() must exclude a peer with an invalid address")
+		}
+	}
+}
+
 func TestIsHealthGroup(t *testing.T) {
 	if !IsHealthGroup(Group) {
 		t.Fatalf("IsHealthGroup(%q) = false, want true", Group)
