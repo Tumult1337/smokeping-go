@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
 
@@ -73,12 +74,17 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allTargets := cfg.AllTargets()
+	// Health targets live outside the stored config, so the fleet view has to
+	// append them the same way listTargets and resolveTarget do — otherwise
+	// the overview (and its "By slave" filter) can never show a slave as down.
+	// Overview rows carry no address-bearing field, so the Public view is
+	// safe to render here in full.
+	allTargets := append(cfg.AllTargets(), s.healthTargets()...)
 	targets := allTargets
 	if source != "" {
 		targets = make([]config.TargetRef, 0, len(allTargets))
 		for _, t := range allTargets {
-			for _, src := range effectiveSources(t.Target, master, registered) {
+			for _, src := range sourcesFor(t, master, registered) {
 				if src == source {
 					targets = append(targets, t)
 					break
@@ -102,10 +108,12 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 		bySource[id] = append(bySource[id], row)
 	}
 
-	groupTitles := make(map[string]string, len(cfg.Targets))
+	groupTitles := make(map[string]string, len(cfg.Targets)+1)
 	for _, g := range cfg.Targets {
 		groupTitles[g.Group] = g.Title
 	}
+	// The health group has no config entry to read a title from.
+	groupTitles[slavehealth.Group] = slavehealth.GroupTitle
 
 	staleThreshold := time.Duration(silentCycleMultiplier) * cfg.Interval
 
@@ -178,6 +186,11 @@ func knownSource(name, master string, registered []string) bool {
 // probeType resolves a probe key to its Type. Empty if the key is unknown —
 // matches listTargets' behaviour.
 func probeType(cfg *config.Config, key string) string {
+	// The synthetic health probe is injected at scheduler-build time and is
+	// never in cfg.Probes, so resolve it from its definition instead.
+	if key == slavehealth.ProbeName {
+		return slavehealth.ProbeDef(0, false).Type
+	}
 	if p, ok := cfg.Probes[key]; ok {
 		return p.Type
 	}
