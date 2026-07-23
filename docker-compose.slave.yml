@@ -27,9 +27,17 @@
 #      master_url, name (this is how the master and the UI label this
 #      vantage point — pick something stable like "frankfurt-1"). Keep
 #      "token": "${CLUSTER_TOKEN}" untouched; .env does the interpolation.
-#   3. Make sure the slave can reach the master's UI/API URL (DNS,
+#   3. Set "advertise" to the IP other nodes can reach this host on — the
+#      mesh health check probes it, and every node probes every slave. This
+#      compose file uses network_mode: host, so the container sees the
+#      host's real interfaces; on a bridge network or under Kubernetes the
+#      container would only see its internal address (172.17.0.2), which is
+#      useless to peers and identical across every slave. It is never
+#      auto-detected for that reason. Leave it empty to opt this slave out
+#      of health probing entirely.
+#   4. Make sure the slave can reach the master's UI/API URL (DNS,
 #      firewall, TLS cert if you're behind a proxy that terminates).
-#   4. make deploy-slave
+#   5. make deploy-slave
 
 services:
   gosmokeping-slave:

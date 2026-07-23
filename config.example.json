@@ -3,6 +3,16 @@
   "interval": "30s",
   "pings": 10,
 
+  "cluster": {
+    "token": "${CLUSTER_TOKEN}",
+    "source": "master",
+    "slave_addrs": {
+      "frankfurt-1": "10.44.0.2",
+      "tokyo-1": "10.44.0.7"
+    },
+    "health_hops": true
+  },
+
   "storage": {
     "clickhouse": {
       "addr": "127.0.0.1:9000",
@@ -49,8 +59,9 @@
   ],
 
   "alerts": {
-    "high-loss":    { "condition": "loss_pct > 5",      "sustained": 3, "actions": ["log"] },
-    "high-latency": { "condition": "rtt_median > 50ms", "sustained": 5, "actions": ["log"] }
+    "high-loss":         { "condition": "loss_pct > 5",      "sustained": 3, "actions": ["log"] },
+    "high-latency":      { "condition": "rtt_median > 50ms", "sustained": 5, "actions": ["log"] },
+    "slave-unreachable": { "condition": "loss_pct > 50",     "sustained": 3, "quorum": "majority", "actions": ["log"] }
   },
 
   "actions": {

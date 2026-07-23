@@ -184,6 +184,48 @@ Key points a reader can't derive from a single file:
   pick up target-list changes. Any positive duration is used verbatim;
   unparseable / negative values log a warning and fall back to 60s.
 
+- **Slave health mesh:** every node ICMP-probes every registered slave.
+  The master synthesizes one target per slave into the reserved
+  `_cluster` group / `_slave_health` probe (`internal/slavehealth`,
+  group and probe names rejected in user config so a real target can't
+  shadow one), injected at scheduler-build time and never written to
+  `config.Store`. Addresses come only from the slave's own explicit
+  `cluster.advertise` — never auto-detected, because a bridge-networked
+  container reports `172.17.0.2` and no range check distinguishes that
+  from a real WireGuard mesh address; empty opts a slave out entirely.
+  `cluster.slave_addrs` optionally pins a slave to one address — a
+  mismatch is refused a health entry, but unpinned slaves are accepted
+  so the feature works zero-config. `cluster.health_hops` (default true)
+  drops traceroute-hop collection for health targets at the probe, for
+  meshes where N slaves would otherwise write N×(N+1) hop streams.
+
+  The address never reaches the API: `slavehealth.Set` exposes `Probe()`
+  (real hosts — scheduler and `BuildClusterConfig` only) and `Public()`
+  (stripped — the API's `HealthLister` only). Hop redaction differs by
+  endpoint because it's positional, never an address comparison:
+  `/hops` pins one timestamp per source, so the terminal hop is
+  unambiguous and only its `IP` is blanked to `""`; `/hops/timeline`
+  buckets across `(bucket_ts, source, ttl, hop_addr)`, so no positional
+  rule identifies a terminal row and every non-empty `IP` there is
+  replaced with the sentinel `"redacted"` instead — not `""`, because
+  the heatmap reads `IP` as a did-this-hop-reply flag. Because health
+  targets live outside the stored config,
+  `scheduler.LifecycleOptions.ExtraFingerprint` carries mesh membership
+  into the rebuild decision (`Fingerprint(cfg)` alone can't see it), and
+  registry changes share the debounced SIGHUP signal path so a fleet
+  restart costs one rebuild, not one per registration.
+
+- **Alert quorum:** `alerts.<name>.quorum` accepts `"majority"`
+  (strictly more than half the live sources) or a positive integer
+  (absolute minimum), gating dispatch only — per-source `sustained`
+  counters stay independent. Sources stale beyond 3× the probe interval
+  are pruned from the live count so a dead slave can't suppress a real
+  alert. A quorum alert also has a warm-up: it won't dispatch FIRING
+  until either 2 distinct sources have reported for that target+alert or
+  the 3×-interval window has elapsed, so a master restart doesn't page
+  and immediately resolve on partial data. Webhook/log templates get
+  `{{.Firing}}` and `{{.Live}}` (both 0 for non-quorum alerts).
+
 ## Config
 
 `config.example.json` is the canonical reference. Env expansion happens on the
