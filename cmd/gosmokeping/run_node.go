@@ -91,6 +91,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 
 	var clusterHandler http.Handler
 	var slaveLister api.SlaveLister
+	var healthLister api.HealthLister
 	if cfg.Cluster != nil && cfg.Cluster.Token != "" {
 		clusterRegistry := master.NewRegistry(log)
 
@@ -120,6 +121,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 
 		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token, healthSet).Handler()
 		slaveLister = clusterRegistry
+		healthLister = clusterRegistry
 		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
 		// Evict slaves that haven't checked in for 24 hours to prevent unbounded
 		// registry growth in environments with ephemeral or renamed slaves.
@@ -144,6 +146,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		UIFS:           ui.FS(),
 		ClusterHandler: clusterHandler,
 		Slaves:         slaveLister,
+		Health:         healthLister,
 		Version:        version,
 	})
 	serverDone := make(chan error, 1)

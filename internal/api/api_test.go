@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
 
@@ -68,13 +69,26 @@ func (s *stubReader) QueryOverview(ctx context.Context, from, to time.Time, targ
 	return s.overview, s.err
 }
 
-func newTestServer(t *testing.T, reader storage.Reader) http.Handler {
+// testOpt customises the Options a test server is built with, applied after
+// the shared defaults (Log, Store) so a test only needs to name what it cares
+// about.
+type testOpt func(*Options)
+
+func withReader(r storage.Reader) testOpt {
+	return func(o *Options) { o.Reader = r }
+}
+
+func withHealth(h HealthLister) testOpt {
+	return func(o *Options) { o.Health = h }
+}
+
+func newTestServer(t *testing.T, opts ...testOpt) http.Handler {
 	t.Helper()
 	cfg := &config.Config{
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -87,16 +101,42 @@ func newTestServer(t *testing.T, reader storage.Reader) http.Handler {
 		t.Fatalf("invalid test config: %v", err)
 	}
 	store := config.NewStore("/dev/null", cfg)
-	s := New(Options{
-		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Store:  store,
-		Reader: reader,
-	})
+	o := Options{
+		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store: store,
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	s := New(o)
 	return s.Router()
 }
 
+// do issues a request against the router and returns the status code and raw
+// body, for tests that only care about status or want to unmarshal manually.
+func do(t *testing.T, h http.Handler, method, path string) (int, []byte) {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr.Code, rr.Body.Bytes()
+}
+
+// doJSON issues a request and decodes a 200 JSON body into v, failing the
+// test on a non-200 status or a decode error.
+func doJSON(t *testing.T, h http.Handler, method, path string, v any) {
+	t.Helper()
+	code, body := do(t, h, method, path)
+	if code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", code, body)
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		t.Fatalf("decode: %v\nbody=%s", err, body)
+	}
+}
+
 func TestHealth(t *testing.T) {
-	h := newTestServer(t, nil)
+	h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -111,7 +151,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestListTargets(t *testing.T) {
-	h := newTestServer(t, nil)
+	h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -130,7 +170,7 @@ func TestListTargetsTitles(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -165,7 +205,7 @@ func TestListTargetsTitles(t *testing.T) {
 }
 
 func TestListSourcesStandalone(t *testing.T) {
-	h := newTestServer(t, nil)
+	h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sources", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -190,7 +230,7 @@ func TestListSourcesMasterWithRegisteredSlaves(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -228,7 +268,7 @@ func TestListSourcesMasterWithRegisteredSlaves(t *testing.T) {
 }
 
 func TestListTargetsStandaloneSources(t *testing.T) {
-	h := newTestServer(t, nil)
+	h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -250,7 +290,7 @@ func TestListTargetsPerTargetSources(t *testing.T) {
 		Listen:   ":0",
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Targets: []config.Group{{
 			Group: "core",
@@ -308,7 +348,7 @@ func equalStrings(a, b []string) bool {
 }
 
 func TestGetCyclesMissingTarget(t *testing.T) {
-	h := newTestServer(t, &stubReader{})
+	h := newTestServer(t, withReader(&stubReader{}))
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets/doesnotexist/cycles", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -319,7 +359,7 @@ func TestGetCyclesMissingTarget(t *testing.T) {
 
 func TestGetCyclesReturnsPoints(t *testing.T) {
 	r := &stubReader{cycles: []storage.CyclePoint{{Time: time.Now(), Median: 5.0}}}
-	h := newTestServer(t, r)
+	h := newTestServer(t, withReader(r))
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets/core/gw/cycles?from=-1h", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -372,10 +412,10 @@ func twoTargetServer(t *testing.T, reader storage.Reader) http.Handler {
 // overviewBody is the JSON shape /api/v1/overview returns. Kept as a test-local
 // struct to keep the contract tightly pinned.
 type overviewBody struct {
-	Window string             `json:"window"`
-	From   string             `json:"from"`
-	To     string             `json:"to"`
-	Rows   []overviewRowBody  `json:"rows"`
+	Window string            `json:"window"`
+	From   string            `json:"from"`
+	To     string            `json:"to"`
+	Rows   []overviewRowBody `json:"rows"`
 }
 
 type overviewRowBody struct {
@@ -635,7 +675,7 @@ func TestOverviewSilentByStaleness(t *testing.T) {
 
 func TestGetCyclesThreadsSourceParam(t *testing.T) {
 	r := &stubReader{}
-	h := newTestServer(t, r)
+	h := newTestServer(t, withReader(r))
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets/core/gw/cycles?from=-1h&source=eu-west", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -644,5 +684,136 @@ func TestGetCyclesThreadsSourceParam(t *testing.T) {
 	}
 	if r.lastSource != "eu-west" {
 		t.Errorf("reader.lastSource = %q, want eu-west", r.lastSource)
+	}
+}
+
+type stubHealth struct{ refs []config.TargetRef }
+
+func (s stubHealth) PublicTargets() []config.TargetRef { return s.refs }
+
+func healthStub() stubHealth {
+	return stubHealth{refs: []config.TargetRef{
+		{Group: slavehealth.Group, Target: config.Target{
+			Name: "frankfurt-1", Title: "frankfurt-1", Probe: slavehealth.ProbeName,
+		}},
+		{Group: slavehealth.Group, Target: config.Target{
+			Name: "tokyo-1", Title: "tokyo-1", Probe: slavehealth.ProbeName,
+		}},
+	}}
+}
+
+func TestListTargetsIncludesHealthGroup(t *testing.T) {
+	srv := newTestServer(t, withHealth(healthStub()))
+
+	var got []map[string]any
+	doJSON(t, srv, "GET", "/api/v1/targets", &got)
+
+	var found int
+	for _, row := range got {
+		if row["group"] != slavehealth.Group {
+			continue
+		}
+		found++
+		if host, present := row["host"]; present && host != "" {
+			t.Fatalf("health target %v leaked host %q", row["id"], host)
+		}
+		if row["group_title"] != slavehealth.GroupTitle {
+			t.Fatalf("got group_title %v, want %q", row["group_title"], slavehealth.GroupTitle)
+		}
+	}
+	if found != 2 {
+		t.Fatalf("got %d health rows, want 2", found)
+	}
+}
+
+// Ordinary targets must keep their host — the stripping is scoped.
+func TestListTargetsKeepsOrdinaryHosts(t *testing.T) {
+	srv := newTestServer(t, withHealth(healthStub()))
+
+	var got []map[string]any
+	doJSON(t, srv, "GET", "/api/v1/targets", &got)
+
+	for _, row := range got {
+		if row["group"] == "core" && row["host"] == "" {
+			t.Fatalf("ordinary target %v lost its host", row["id"])
+		}
+	}
+}
+
+// Health targets are absent from the stored config, so resolveTarget must
+// consult the health view or every chart request 404s.
+func TestResolveHealthTarget(t *testing.T) {
+	srv := newTestServer(t, withHealth(healthStub()))
+
+	code, _ := do(t, srv, "GET", "/api/v1/targets/_cluster/frankfurt-1/cycles?range=1h")
+	if code == http.StatusNotFound {
+		t.Fatal("health target did not resolve")
+	}
+}
+
+func TestResolveUnknownHealthTargetIs404(t *testing.T) {
+	srv := newTestServer(t, withHealth(healthStub()))
+
+	code, _ := do(t, srv, "GET", "/api/v1/targets/_cluster/nonexistent/cycles?range=1h")
+	if code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404", code)
+	}
+}
+
+func TestHealthTargetsAbsentWithoutHealthLister(t *testing.T) {
+	srv := newTestServer(t) // no health option
+
+	var got []map[string]any
+	doJSON(t, srv, "GET", "/api/v1/targets", &got)
+	for _, row := range got {
+		if row["group"] == slavehealth.Group {
+			t.Fatal("health rows present without a HealthLister")
+		}
+	}
+}
+
+func TestRedactTerminalHop(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "master", Index: 1, IP: "198.51.100.1"},
+		{Source: "master", Index: 2, IP: "198.51.100.9"},
+		{Source: "master", Index: 3, IP: "10.44.0.2"},
+		{Source: "tokyo-1", Index: 1, IP: "203.0.113.1"},
+		{Source: "tokyo-1", Index: 2, IP: "10.44.0.2"},
+	}
+	got := redactTerminalHops(hops)
+
+	for _, h := range got {
+		if h.IP == "10.44.0.2" {
+			t.Fatalf("terminal hop not redacted for source %q index %d", h.Source, h.Index)
+		}
+	}
+	// Intermediates survive.
+	if got[0].IP != "198.51.100.1" {
+		t.Fatalf("intermediate hop altered: %q", got[0].IP)
+	}
+	if got[3].IP != "203.0.113.1" {
+		t.Fatalf("intermediate hop altered for second source: %q", got[3].IP)
+	}
+}
+
+// Redaction is per-source: each observer's trace has its own terminal hop, and
+// redacting only the global maximum index would leak the shorter paths.
+func TestRedactTerminalHopIsPerSource(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "a", Index: 1, IP: "10.0.0.1"},
+		{Source: "a", Index: 9, IP: "10.44.0.2"},
+		{Source: "b", Index: 1, IP: "10.44.0.2"},
+	}
+	got := redactTerminalHops(hops)
+	for _, h := range got {
+		if h.IP == "10.44.0.2" {
+			t.Fatalf("terminal hop for source %q not redacted", h.Source)
+		}
+	}
+}
+
+func TestRedactTerminalHopEmpty(t *testing.T) {
+	if got := redactTerminalHops(nil); len(got) != 0 {
+		t.Fatalf("got %d hops, want 0", len(got))
 	}
 }

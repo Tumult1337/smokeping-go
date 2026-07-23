@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
 
@@ -26,6 +27,14 @@ type SlaveLister interface {
 	Names() []string
 }
 
+// HealthLister reports the synthetic slave-health targets, with addresses
+// already stripped. The API is deliberately wired to this narrow interface
+// rather than to the registry: there is no accessor here that could return an
+// address, so no handler can leak one.
+type HealthLister interface {
+	PublicTargets() []config.TargetRef
+}
+
 type Server struct {
 	log            *slog.Logger
 	store          *config.Store
@@ -33,6 +42,7 @@ type Server struct {
 	uiFS           fs.FS
 	clusterHandler http.Handler
 	slaves         SlaveLister
+	healthLister   HealthLister
 	version        string
 	startAt        time.Time
 }
@@ -50,6 +60,9 @@ type Options struct {
 	// Slaves is the live slave registry used to compute /sources. Nil when
 	// not in master mode.
 	Slaves SlaveLister
+	// Health lists synthetic slave-health targets. Nil in standalone and
+	// slave mode; set when the master runs a health mesh.
+	Health HealthLister
 	// Version is the build version reported by /health. Empty falls back to "dev".
 	Version string
 }
@@ -66,9 +79,19 @@ func New(opts Options) *Server {
 		uiFS:           opts.UIFS,
 		clusterHandler: opts.ClusterHandler,
 		slaves:         opts.Slaves,
+		healthLister:   opts.Health,
 		version:        v,
 		startAt:        time.Now(),
 	}
+}
+
+// healthTargets returns the address-stripped health targets, or nil when
+// health probing is not wired.
+func (s *Server) healthTargets() []config.TargetRef {
+	if s.healthLister == nil {
+		return nil
+	}
+	return s.healthLister.PublicTargets()
 }
 
 func (s *Server) Router() http.Handler {
@@ -235,7 +258,39 @@ func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
 			Sources:    effectiveSources(t.Target, masterSource, registered),
 		})
 	}
+	// Health targets live outside the stored config, so they are appended
+	// here. Sources is every registered slave plus the master: the mesh is
+	// full, minus each node probing itself, and the difference does not
+	// change the filter chips the UI renders.
+	for _, t := range s.healthTargets() {
+		out = append(out, targetDTO{
+			ID:         t.ID(),
+			Group:      t.Group,
+			GroupTitle: slavehealth.GroupTitle,
+			Name:       t.Target.Name,
+			Title:      t.Target.Title,
+			Probe:      t.Target.Probe,
+			ProbeType:  "icmp",
+			// Host and URL stay zero: the whole point of the Public view.
+			Sources: healthSources(t.Target.Name, masterSource, registered),
+		})
+	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// healthSources lists the nodes that probe a given health target: the master
+// plus every registered slave except the target itself, which never probes
+// its own address.
+func healthSources(targetName, masterSource string, registered []string) []string {
+	out := make([]string, 0, len(registered)+1)
+	out = append(out, masterSource)
+	for _, s := range registered {
+		if s == targetName {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // effectiveSources returns the probe origins that currently ping this target.
@@ -388,6 +443,9 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "query failed")
 		return
 	}
+	if slavehealth.IsHealthGroup(ref.Group) {
+		hops = redactTerminalHops(hops)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"target": ref.ID(), "hops": hops})
 }
 
@@ -418,6 +476,9 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("query hops timeline", "err", err)
 		writeErr(w, http.StatusBadGateway, "query failed")
 		return
+	}
+	if slavehealth.IsHealthGroup(ref.Group) {
+		hops = redactTerminalHops(hops)
 	}
 	// Slim DTO: the heatmap renders only LossPct + MaxLossPct, so the
 	// per-row RTT fields (Min/Max/Mean/Median) the storage row carries
@@ -465,6 +526,39 @@ type hopTimelineDTO struct {
 	WorstTime time.Time `json:"WorstTime"`
 }
 
+// redactTerminalHops blanks the address of each source's furthest hop.
+//
+// For a health target that hop is the slave itself, and it is the one address
+// this whole feature exists to keep out of the API. Redaction is positional
+// rather than a comparison against the real address, because comparing would
+// mean handing this package the addresses — reintroducing exactly the leak the
+// Probe/Public split prevents.
+//
+// On a trace that never reached the slave the furthest hop is an intermediate,
+// so this over-redacts by one row. That is the fail-closed direction.
+//
+// Per-source: each observer's path has its own terminal hop, and redacting
+// only the global maximum index would expose the shorter paths' endpoints.
+func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
+	if len(hops) == 0 {
+		return hops
+	}
+	maxIndex := make(map[string]int64, 4)
+	for _, h := range hops {
+		if cur, ok := maxIndex[h.Source]; !ok || h.Index > cur {
+			maxIndex[h.Source] = h.Index
+		}
+	}
+	out := make([]storage.HopPoint, len(hops))
+	copy(out, hops)
+	for i := range out {
+		if out[i].Index == maxIndex[out[i].Source] {
+			out[i].IP = ""
+		}
+	}
+	return out
+}
+
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	ref, ok := s.resolveTarget(w, r)
 	if !ok {
@@ -509,6 +603,11 @@ func (s *Server) resolveTarget(w http.ResponseWriter, r *http.Request) (config.T
 	id := group + "/" + name
 	cfg := s.store.Current()
 	for _, t := range cfg.AllTargets() {
+		if t.ID() == id {
+			return t, true
+		}
+	}
+	for _, t := range s.healthTargets() {
 		if t.ID() == id {
 			return t, true
 		}
