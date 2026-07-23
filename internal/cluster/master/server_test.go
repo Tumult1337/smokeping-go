@@ -130,6 +130,45 @@ func TestIngestResolvesHealthTargets(t *testing.T) {
 	}
 }
 
+// A slave holding a valid token must not be able to forge the per-cycle
+// Source field to impersonate "master" or another slave — that would let it
+// manufacture phantom quorum votes (mask a real outage or trigger a false
+// page). handleCycles pins batch.Source to the authenticated X-Slave-Name
+// header; ingestBatch must apply that pinned value to every cycle
+// unconditionally, not just when the wire-provided per-cycle Source is empty.
+func TestIngestBatchOverridesForgedPerCycleSource(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := config.NewStore("", &config.Config{
+		Targets: []config.Group{
+			{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}},
+		},
+	})
+	sink := &captureSink{}
+	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, "tok", nil)
+
+	body := `{"source":"frankfurt-1","cycles":[` +
+		`{"group":"g","name":"t","probe":"icmp","source":"master","sent":5,"loss_count":0},` +
+		`{"group":"g","name":"t","probe":"icmp","source":"tokyo-1","sent":5,"loss_count":0}` +
+		`]}`
+	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("X-Slave-Name", "frankfurt-1")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /cycles: got %d, want 200", rec.Code)
+	}
+	if len(sink.got) != 2 {
+		t.Fatalf("sink saw %d cycles, want 2", len(sink.got))
+	}
+	for i, cy := range sink.got {
+		if cy.Source != "frankfurt-1" {
+			t.Errorf("cycle %d: source = %q, want authenticated %q (forged wire source not overridden)", i, cy.Source, "frankfurt-1")
+		}
+	}
+}
+
 func TestHandleConfigRejectsInvalidName(t *testing.T) {
 	srv := newTestServer()
 	req := httptest.NewRequest(http.MethodGet, "/config", nil)

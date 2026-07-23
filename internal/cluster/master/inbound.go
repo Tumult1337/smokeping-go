@@ -50,11 +50,16 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) int {
 			s.log.Debug("cluster cycle for unknown target, dropping", "target", key, "source", p.Source)
 			continue
 		}
-		// Trust the batch-level Source when a cycle doesn't carry its own —
-		// older slave payloads may omit it per-cycle.
-		if p.Source == "" {
-			p.Source = batch.Source
-		}
+		// Unconditionally overwrite with the batch-level Source, which
+		// handleCycles already pinned to the authenticated X-Slave-Name
+		// header. A per-cycle Source is wire-provided and untrusted — a
+		// slave could populate it with "master" or another slave's name to
+		// forge alert-quorum votes (manufacture phantom healthy sources to
+		// mask a real outage, or phantom firing ones to trigger a false
+		// page). The scheduler always stamps a slave's own name on cycles
+		// it produces locally, so nothing legitimate depends on trusting
+		// the wire value here.
+		p.Source = batch.Source
 		cycle := p.ToCycle(target)
 		s.sink.OnCycle(sinkCtx, cycle)
 		accepted++
