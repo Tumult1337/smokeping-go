@@ -26,6 +26,14 @@ type SlaveInfo struct {
 	// race, or failed its pin. Never serialised to JSON: the registry snapshot
 	// feeds debug and UI paths, and the address must not reach either.
 	Advertise netip.Addr `json:"-"`
+
+	// AdvertiseLogState is the dedup key for the last resolveAdvertise log
+	// line emitted for this slave: the outcome kind plus the raw claimed
+	// value. Touch fires on every authenticated request — roughly every 5s
+	// per slave, forever — so without this a rejected or NAT'd slave would
+	// re-log its condition on every heartbeat. Never serialised to JSON, same
+	// as Advertise: it's log bookkeeping, not registry state.
+	AdvertiseLogState string `json:"-"`
 }
 
 // Registry tracks slaves that have recently checked in. Lookups and writes
@@ -92,7 +100,7 @@ func (r *Registry) Touch(name, version, addr, advertise string) {
 	info.LastSeen = time.Now()
 
 	prev := info.Advertise
-	next := r.resolveAdvertise(name, advertise, addr)
+	next := r.resolveAdvertise(info, advertise, addr)
 	if next != prev {
 		if prev.IsValid() {
 			delete(r.byAddr, prev)
@@ -111,30 +119,62 @@ func (r *Registry) Touch(name, version, addr, advertise string) {
 	}
 }
 
+// Outcome kinds for resolveAdvertise's log dedup key. Each is combined with
+// the raw claimed value to form info.AdvertiseLogState; comparing the
+// combined key (not just next != prev on the resolved Addr) is what lets a
+// rejection log on its first occurrence — a rejected claim resolves to the
+// zero Addr on every call, so prev == next from the second call onward even
+// though nothing about the rejection state has been logged yet.
+const (
+	advLogNone    = ""        // advertise empty; nothing to validate or log
+	advLogInvalid = "invalid" // failed ParseAdvertise
+	advLogPin     = "pin"     // pin configured, claimed address doesn't match
+	advLogDup     = "dup"     // address already claimed by another slave
+	advLogInfo    = "info"    // accepted, but differs from observed source (NAT)
+	advLogOK      = "ok"      // accepted, matches observed source (or unparseable)
+)
+
 // resolveAdvertise validates a claimed address against the pin list and the
 // current address ownership map. Must be called with r.mu held.
 //
 // Every rejection path returns the zero Addr, which means "no health entry" —
 // the fail-closed outcome. A slave is never dropped from the registry for a
 // bad advertise value; it just doesn't join the mesh.
-func (r *Registry) resolveAdvertise(name, advertise, remoteAddr string) netip.Addr {
+//
+// Each of the four log lines below fires on first occurrence and whenever
+// the (kind, claimed value) pair changes, not on every call — Touch runs on
+// every authenticated request, roughly every 5s per slave, forever. A slave
+// that keeps claiming the same bad value logs once; one that starts claiming
+// a different bad value, or flips between rejected and accepted, logs again.
+func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr string) netip.Addr {
+	name := info.Name
 	if advertise == "" {
+		info.AdvertiseLogState = advLogNone
 		return netip.Addr{}
 	}
 	addr, err := ParseAdvertise(advertise)
 	if err != nil {
-		r.log.Warn("slave advertise address rejected", "slave", name, "err", err)
+		if key := advLogInvalid + ":" + advertise; info.AdvertiseLogState != key {
+			r.log.Warn("slave advertise address rejected", "slave", name, "err", err)
+			info.AdvertiseLogState = key
+		}
 		return netip.Addr{}
 	}
 	if pin, pinned := r.pins[name]; pinned && pin != addr {
-		r.log.Warn("slave advertise address does not match its pin, excluded from health mesh",
-			"slave", name, "claimed", addr, "pinned", pin)
+		if key := advLogPin + ":" + advertise; info.AdvertiseLogState != key {
+			r.log.Warn("slave advertise address does not match its pin, excluded from health mesh",
+				"slave", name, "claimed", addr, "pinned", pin)
+			info.AdvertiseLogState = key
+		}
 		return netip.Addr{}
 	}
 	if owner, taken := r.byAddr[addr]; taken && owner != name {
-		r.log.Warn("slave advertise address already claimed, excluded from health mesh",
-			"slave", name, "addr", addr, "owner", owner,
-			"hint", "containers on a bridge network all report the same internal address; set cluster.advertise to the host's reachable IP")
+		if key := advLogDup + ":" + advertise; info.AdvertiseLogState != key {
+			r.log.Warn("slave advertise address already claimed, excluded from health mesh",
+				"slave", name, "addr", addr, "owner", owner,
+				"hint", "containers on a bridge network all report the same internal address; set cluster.advertise to the host's reachable IP")
+			info.AdvertiseLogState = key
+		}
 		return netip.Addr{}
 	}
 	// A mismatch against the observed source address is legitimate under NAT,
@@ -142,11 +182,16 @@ func (r *Registry) resolveAdvertise(name, advertise, remoteAddr string) netip.Ad
 	// reporting its internal address, so it is worth a line in the log.
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		if observed, perr := netip.ParseAddr(host); perr == nil && observed.Unmap() != addr {
-			r.log.Info("slave advertise address differs from its observed source address",
-				"slave", name, "advertise", addr, "observed", observed.Unmap(),
-				"hint", "expected under NAT; unexpected otherwise — check cluster.advertise")
+			if key := advLogInfo + ":" + advertise; info.AdvertiseLogState != key {
+				r.log.Info("slave advertise address differs from its observed source address",
+					"slave", name, "advertise", addr, "observed", observed.Unmap(),
+					"hint", "expected under NAT; unexpected otherwise — check cluster.advertise")
+				info.AdvertiseLogState = key
+			}
+			return addr
 		}
 	}
+	info.AdvertiseLogState = advLogOK + ":" + advertise
 	return addr
 }
 

@@ -1,11 +1,26 @@
 package master
 
 import (
+	"bufio"
+	"bytes"
 	"log/slog"
 	"net/netip"
 	"sync/atomic"
 	"testing"
 )
+
+// countLogLines returns the number of non-empty lines written to buf — one
+// per slog record with the standard text handler.
+func countLogLines(buf *bytes.Buffer) int {
+	n := 0
+	scanner := bufio.NewScanner(bytes.NewReader(buf.Bytes()))
+	for scanner.Scan() {
+		if len(scanner.Bytes()) > 0 {
+			n++
+		}
+	}
+	return n
+}
 
 func TestRegistryStoresAdvertise(t *testing.T) {
 	r := NewRegistry(slog.New(slog.DiscardHandler))
@@ -103,7 +118,7 @@ func TestRegistryOnChangeFiresOnlyOnHealthChange(t *testing.T) {
 	}
 
 	// Heartbeats with an identical tuple.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		r.Touch("frankfurt-1", "v1", "203.0.113.9:5555", "10.44.0.2")
 	}
 	if got := fired.Load(); got != 1 {
@@ -160,5 +175,112 @@ func TestRegistryPeersSorted(t *testing.T) {
 		if peers[i-1].Name >= peers[i].Name {
 			t.Fatalf("peers not sorted by name: %v", peers)
 		}
+	}
+}
+
+// Touch runs on every authenticated request — roughly every 5s per slave,
+// forever. A repeated identical rejection must log once, not once per Touch.
+func TestRegistryRepeatedRejectionLogsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	// First call: a rejection must still log (this is the one that matters).
+	r.Touch("second", "v1", "203.0.113.10:5555", "not-an-ip")
+	if got := countLogLines(&buf); got != 1 {
+		t.Fatalf("after first rejection: got %d log lines, want 1", got)
+	}
+
+	// Repeated identical rejection must stay quiet.
+	for range 5 {
+		r.Touch("second", "v1", "203.0.113.10:5555", "not-an-ip")
+	}
+	if got := countLogLines(&buf); got != 1 {
+		t.Fatalf("after 5 identical repeated rejections: got %d log lines, want 1 (still)", got)
+	}
+}
+
+// A rejection changing to a *different* bad value must log again. This is
+// the case the naive fix (gating on info.Advertise != prev) gets wrong: the
+// resolved Addr is the zero value for every rejection, so next == prev holds
+// across different bad claims too — that would wrongly stay silent here.
+func TestRegistryChangedRejectionLogsAgain(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	r.Touch("second", "v1", "203.0.113.10:5555", "not-an-ip")
+	if got := countLogLines(&buf); got != 1 {
+		t.Fatalf("after first rejection: got %d log lines, want 1", got)
+	}
+
+	// Same bad value again: still quiet.
+	r.Touch("second", "v1", "203.0.113.10:5555", "not-an-ip")
+	if got := countLogLines(&buf); got != 1 {
+		t.Fatalf("after repeat of same bad value: got %d log lines, want 1", got)
+	}
+
+	// A different bad value is a new condition and must log again.
+	r.Touch("second", "v1", "203.0.113.10:5555", "also-not-an-ip")
+	if got := countLogLines(&buf); got != 2 {
+		t.Fatalf("after a different bad value: got %d log lines, want 2", got)
+	}
+}
+
+// A slave transitioning from rejected to accepted (a change in outcome, not
+// just in claimed value) must log again — proven here via the NAT-mismatch
+// Info line, which only fires once the address is actually accepted.
+func TestRegistryRejectedToAcceptedLogsAgain(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	// Rejected: invalid value.
+	r.Touch("nat-slave", "v1", "203.0.113.9:5555", "not-an-ip")
+	if got := countLogLines(&buf); got != 1 {
+		t.Fatalf("after rejection: got %d log lines, want 1", got)
+	}
+
+	// Accepted, but the claimed address differs from the observed source —
+	// expected under NAT, and worth its own Info line on first occurrence.
+	r.Touch("nat-slave", "v1", "203.0.113.9:5555", "10.44.0.2")
+	if got := countLogLines(&buf); got != 2 {
+		t.Fatalf("after transition to accepted (NAT mismatch): got %d log lines, want 2", got)
+	}
+	if got := r.Peers(); len(got) != 1 {
+		t.Fatalf("got %d health peers after acceptance, want 1", len(got))
+	}
+
+	// Repeated identical NAT mismatch must stay quiet.
+	for range 5 {
+		r.Touch("nat-slave", "v1", "203.0.113.9:5555", "10.44.0.2")
+	}
+	if got := countLogLines(&buf); got != 2 {
+		t.Fatalf("after 5 identical NAT-mismatch heartbeats: got %d log lines, want 2 (still)", got)
+	}
+}
+
+// The motivating scenario: several bridge-networked containers all claiming
+// the same address. The losing claimant's rejection must log once, not on
+// every push cycle for the lifetime of the process.
+func TestRegistryDuplicateRejectionLogsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	// The claimed address differs from the observed source (both slaves are
+	// bridge-networked containers reporting their internal IP), so the first
+	// claimant's own registration logs the expected NAT-mismatch Info line.
+	r.Touch("first", "v1", "203.0.113.9:5555", "172.17.0.2")
+	if got := countLogLines(&buf); got != 1 {
+		t.Fatalf("after first claimant: got %d log lines, want 1 (NAT-mismatch info)", got)
+	}
+
+	r.Touch("second", "v1", "203.0.113.10:5555", "172.17.0.2")
+	if got := countLogLines(&buf); got != 2 {
+		t.Fatalf("after second (losing) claimant: got %d log lines, want 2", got)
+	}
+
+	for range 5 {
+		r.Touch("second", "v1", "203.0.113.10:5555", "172.17.0.2")
+	}
+	if got := countLogLines(&buf); got != 2 {
+		t.Fatalf("after 5 repeated duplicate heartbeats: got %d log lines, want 2 (still)", got)
 	}
 }
