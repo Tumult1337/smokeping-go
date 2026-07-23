@@ -26,6 +26,21 @@ type LifecycleOptions struct {
 	Build    func(cfg *config.Config) (*Scheduler, error)
 	Reloads  <-chan struct{}
 	OnReload func(cfg *config.Config)
+
+	// ExtraFingerprint contributes to the rebuild decision from outside the
+	// stored config. Cluster health targets are injected inside Build and
+	// never appear in the config, so Fingerprint(cfg) cannot see a mesh
+	// membership change on its own. Optional; nil contributes nothing.
+	ExtraFingerprint func() string
+}
+
+// fingerprint combines the config fingerprint with any external contribution.
+func (o LifecycleOptions) fingerprint(cfg *config.Config) string {
+	fp := Fingerprint(cfg)
+	if o.ExtraFingerprint != nil {
+		fp += "\x1d" + o.ExtraFingerprint()
+	}
+	return fp
 }
 
 // RunLifecycle blocks until ctx is cancelled. On each receive from Reloads:
@@ -42,7 +57,7 @@ func RunLifecycle(ctx context.Context, opts LifecycleOptions) error {
 	if err != nil {
 		return err
 	}
-	fp := Fingerprint(opts.Initial)
+	fp := opts.fingerprint(opts.Initial)
 
 	run := func(sch *Scheduler) (context.CancelFunc, chan struct{}) {
 		sctx, cancel := context.WithCancel(ctx)
@@ -71,7 +86,7 @@ func RunLifecycle(ctx context.Context, opts LifecycleOptions) error {
 			if opts.OnReload != nil {
 				opts.OnReload(newCfg)
 			}
-			newFP := Fingerprint(newCfg)
+			newFP := opts.fingerprint(newCfg)
 			if newFP == fp {
 				opts.Log.Debug("config reload: scheduler fingerprint unchanged, keeping existing goroutines")
 				continue

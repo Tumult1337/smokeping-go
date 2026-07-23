@@ -236,3 +236,74 @@ func TestSupervisorRebuildsOnTargetChange(t *testing.T) {
 		t.Error("target b never fired after reload — scheduler didn't pick up the new target")
 	}
 }
+
+// testConfig returns a minimal valid config for lifecycle tests that exercise
+// the rebuild decision rather than real probing. Deliberately zero targets:
+// these tests commonly build a Scheduler with a nil registry/sink (only the
+// build-count and fingerprint behavior matters), and Scheduler.Run would nil
+// dereference on a real target with no registry behind it.
+func testConfig() *config.Config {
+	return &config.Config{
+		Interval: 20 * time.Millisecond,
+		Pings:    1,
+		Probes:   map[string]config.Probe{"fake": {Type: "icmp", Timeout: time.Second}},
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("condition not met within 2s")
+}
+
+// Health targets are injected inside Build and are absent from the stored
+// config, so the config fingerprint alone cannot see a mesh change. Without
+// ExtraFingerprint a registry change signals a reload that then no-ops.
+func TestLifecycleRebuildsOnExtraFingerprintChange(t *testing.T) {
+	cfg := testConfig()
+	var builds atomic.Int64
+	var extra atomic.Value
+	extra.Store("mesh-a")
+
+	reloads := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RunLifecycle(ctx, LifecycleOptions{
+			Log:     slog.New(slog.DiscardHandler),
+			Initial: cfg,
+			Current: func() *config.Config { return cfg },
+			Build: func(*config.Config) (*Scheduler, error) {
+				builds.Add(1)
+				return New(slog.New(slog.DiscardHandler), nil, nil, cfg), nil
+			},
+			Reloads:          reloads,
+			ExtraFingerprint: func() string { return extra.Load().(string) },
+		})
+	}()
+
+	waitFor(t, func() bool { return builds.Load() == 1 })
+
+	// Same config, same extra — no rebuild.
+	reloads <- struct{}{}
+	time.Sleep(50 * time.Millisecond)
+	if got := builds.Load(); got != 1 {
+		t.Fatalf("got %d builds, want 1 (unchanged fingerprint must not rebuild)", got)
+	}
+
+	// Same config, changed extra — rebuild.
+	extra.Store("mesh-b")
+	reloads <- struct{}{}
+	waitFor(t, func() bool { return builds.Load() == 2 })
+
+	cancel()
+	<-done
+}

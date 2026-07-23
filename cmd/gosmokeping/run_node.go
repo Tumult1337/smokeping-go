@@ -14,6 +14,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 	"github.com/tumult/gosmokeping/internal/storage"
 	"github.com/tumult/gosmokeping/internal/ui"
 )
@@ -83,13 +84,41 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	// sinks as locally-probed ones (Writer, alert evaluator, log sink).
 	fanout := scheduler.Fanout(log, sinks...)
 
+	// schedulerSignals is the single wakeup channel the Supervisor subscribes
+	// to. Both config reloads and cluster registry changes feed it.
+	schedulerSignals := make(chan struct{}, 1)
+	healthSet := func() *slavehealth.Set { return nil }
+
 	var clusterHandler http.Handler
 	var slaveLister api.SlaveLister
 	if cfg.Cluster != nil && cfg.Cluster.Token != "" {
 		clusterRegistry := master.NewRegistry(log)
-		// Wired fully in a later task: health is nil until the mesh registry
-		// accessor is threaded through here.
-		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token, nil).Handler()
+
+		pins, err := cfg.Cluster.ParsedSlaveAddrs()
+		if err != nil {
+			return fmt.Errorf("cluster.slave_addrs: %w", err)
+		}
+		clusterRegistry.SetPins(pins)
+
+		// healthSet is read on every scheduler build and on every /config
+		// request, so it is a closure over the live registry rather than a
+		// snapshot captured once.
+		healthSet = func() *slavehealth.Set {
+			return slavehealth.NewSet(clusterRegistry.Peers())
+		}
+
+		// Registry changes drive a scheduler rebuild through the same channel
+		// as a SIGHUP reload, debounced so a fleet restart costs one rebuild.
+		rawSignals := make(chan struct{}, 64)
+		clusterRegistry.SetOnChange(func() {
+			select {
+			case rawSignals <- struct{}{}:
+			default: // a rebuild is already pending; nothing to add
+			}
+		})
+		go debounce(ctx, rawSignals, schedulerSignals, healthSignalDelay)
+
+		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token, healthSet).Handler()
 		slaveLister = clusterRegistry
 		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
 		// Evict slaves that haven't checked in for 24 hours to prevent unbounded
@@ -127,16 +156,17 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	// reload so slave reassignments and probe-timeout edits take effect live.
 	// OnReload re-parses alert conditions on the same thread.
 	sup := &scheduler.Supervisor{
-		Log:   log,
-		Store: store,
+		Log:     log,
+		Store:   store,
+		Signals: schedulerSignals,
 		Build: func(c *config.Config) (*scheduler.Scheduler, error) {
 			registry, err := probe.Build(c.Probes)
 			if err != nil {
 				return nil, err
 			}
-			// health is nil until Task 6 wires the live mesh accessor here.
-			return scheduler.New(log, registry, fanout, master.LocalTargets(c, nil)), nil
+			return scheduler.New(log, registry, fanout, master.LocalTargets(c, healthSet())), nil
 		},
+		ExtraFingerprint: func() string { return healthSet().Fingerprint() },
 		OnReload: func(c *config.Config) {
 			if err := evaluator.Refresh(); err != nil {
 				log.Error("alert refresh failed, keeping previous conditions", "err", err)

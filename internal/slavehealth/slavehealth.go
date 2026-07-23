@@ -92,6 +92,9 @@ func ProbeDef(timeout time.Duration) config.Probe {
 // Returns nil rather than an empty group when nothing remains, so an empty
 // group never reaches the sidebar as a stray heading.
 func (s *Set) Probe(exclude string) []config.Group {
+	if s == nil {
+		return nil
+	}
 	targets := make([]config.Target, 0, len(s.peers))
 	for _, p := range s.peers {
 		if p.Name == exclude || !p.Addr.IsValid() {
@@ -116,6 +119,9 @@ func (s *Set) Probe(exclude string) []config.Group {
 // Public returns the health targets with every address-bearing field cleared.
 // This is the only view the API is wired to.
 func (s *Set) Public() []config.TargetRef {
+	if s == nil {
+		return nil
+	}
 	out := make([]config.TargetRef, 0, len(s.peers))
 	for _, p := range s.peers {
 		// Public() must describe exactly the set Probe() probes — otherwise
@@ -147,7 +153,13 @@ func (s *Set) Public() []config.TargetRef {
 // Field and record separators are escaped: the fingerprint drives a rebuild
 // decision, and a peer name containing a raw separator must not be able to
 // forge the fingerprint of a different membership set.
+//
+// Fingerprint tolerates a nil Set so callers wired for standalone mode need
+// no nil check on the hot reload path.
 func (s *Set) Fingerprint() string {
+	if s == nil {
+		return ""
+	}
 	var b strings.Builder
 	for _, p := range s.peers {
 		b.WriteString(escapeSep(p.Name))

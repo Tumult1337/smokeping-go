@@ -266,3 +266,16 @@ func TestReservedNamesMatchConfigValidation(t *testing.T) {
 		t.Fatalf("config.Validate() accepted probe %q; the reserved name has drifted", ProbeName)
 	}
 }
+
+func TestNilSetIsSafe(t *testing.T) {
+	var s *Set
+	if got := s.Fingerprint(); got != "" {
+		t.Fatalf("got %q, want empty", got)
+	}
+	if got := s.Probe(""); got != nil {
+		t.Fatalf("got %v, want nil", got)
+	}
+	if got := s.Public(); len(got) != 0 {
+		t.Fatalf("got %d refs, want 0", len(got))
+	}
+}

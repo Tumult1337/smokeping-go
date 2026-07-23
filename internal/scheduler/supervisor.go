@@ -20,20 +20,33 @@ type Supervisor struct {
 	Store    *config.Store
 	Build    func(cfg *config.Config) (*Scheduler, error)
 	OnReload func(cfg *config.Config)
+
+	// Signals, when non-nil, is used as the store subscription channel so
+	// other producers — notably cluster registry changes — can request a
+	// rebuild through the same coalescing path as a config reload. Must be
+	// buffered; sends from other producers must be non-blocking.
+	Signals chan struct{}
+
+	// ExtraFingerprint is forwarded to LifecycleOptions. See the field there.
+	ExtraFingerprint func() string
 }
 
 // Run blocks until ctx is cancelled. Returns non-nil only if the initial
 // Build fails.
 func (s *Supervisor) Run(ctx context.Context) error {
-	reloads := make(chan struct{}, 1)
+	reloads := s.Signals
+	if reloads == nil {
+		reloads = make(chan struct{}, 1)
+	}
 	s.Store.Subscribe(reloads)
 
 	return RunLifecycle(ctx, LifecycleOptions{
-		Log:      s.Log,
-		Initial:  s.Store.Current(),
-		Current:  s.Store.Current,
-		Build:    s.Build,
-		Reloads:  reloads,
-		OnReload: s.OnReload,
+		Log:              s.Log,
+		Initial:          s.Store.Current(),
+		Current:          s.Store.Current,
+		Build:            s.Build,
+		Reloads:          reloads,
+		OnReload:         s.OnReload,
+		ExtraFingerprint: s.ExtraFingerprint,
 	})
 }
