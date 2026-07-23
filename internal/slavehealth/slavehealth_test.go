@@ -167,6 +167,53 @@ func TestFingerprintResistsSeparatorInjection(t *testing.T) {
 	}
 }
 
+// The evaluator reads the alert names baked into the scheduler's targets at
+// Build time, so a health_alerts edit only takes effect if the fingerprint
+// moves and forces a rebuild. Without this the API would advertise an alert
+// that can never fire until the process restarts.
+func TestFingerprintChangesWithAlerts(t *testing.T) {
+	base := NewSet(peers(), nil).Fingerprint()
+
+	if withAlert := NewSet(peers(), []string{"slave-down"}).Fingerprint(); withAlert == base {
+		t.Fatal("adding an alert must change the fingerprint")
+	}
+	if renamed := NewSet(peers(), []string{"slave-gone"}).Fingerprint(); renamed == NewSet(peers(), []string{"slave-down"}).Fingerprint() {
+		t.Fatal("renaming an alert must change the fingerprint")
+	}
+	// Order is deliberately significant for alerts: the list is stored as the
+	// operator wrote it, and a spurious rebuild is cheaper than missing a real
+	// edit that only permutes.
+	ab := NewSet(peers(), []string{"a", "b"}).Fingerprint()
+	ba := NewSet(peers(), []string{"b", "a"}).Fingerprint()
+	if ab == ba {
+		t.Fatal("alert reorder must change the fingerprint")
+	}
+	// Peers still dominate: an alert name must not be readable as a peer
+	// record, nor a peer set be forgeable out of alert names.
+	crafted := NewSet(peers()[:2], []string{"x"}).Fingerprint()
+	if crafted == NewSet(peers()[:2], nil).Fingerprint() {
+		t.Fatal("alert section collapsed into the peer section")
+	}
+}
+
+// A crafted alert or peer name must not be able to forge a different
+// membership set by injecting the section separator.
+func TestFingerprintResistsSectionInjection(t *testing.T) {
+	p := []Peer{{Name: "a", Addr: netip.MustParseAddr("10.0.0.1")}}
+	honest := NewSet(p, []string{"alpha"}).Fingerprint()
+	forged := NewSet([]Peer{{Name: "a", Addr: netip.MustParseAddr("10.0.0.1")}}, nil).Fingerprint()
+	if honest == forged {
+		t.Fatal("alert list vanished from the fingerprint")
+	}
+	// Peer name carrying the group separator plus a full alert record.
+	injected := NewSet([]Peer{
+		{Name: "a\x1f10.0.0.1\x1e\x1dalpha\x1e", Addr: netip.MustParseAddr("10.0.0.1")},
+	}, nil).Fingerprint()
+	if injected == honest {
+		t.Fatal("group-separator injection produced a colliding fingerprint")
+	}
+}
+
 // Membership is what matters, not the order the caller happened to build the
 // slice in — a reorder must not trigger a spurious scheduler rebuild.
 func TestFingerprintIsOrderInvariant(t *testing.T) {

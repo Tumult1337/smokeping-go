@@ -104,8 +104,10 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		// healthSet is read on every scheduler build, on every /config
 		// request and on every API target listing, so it is a closure over
 		// the live registry and the live config rather than a snapshot
-		// captured once — cluster.health_alerts must follow a SIGHUP the
-		// same way a target's own alerts do.
+		// captured once. A cluster.health_alerts edit therefore reaches the
+		// API immediately, and reaches the evaluator via the scheduler
+		// rebuild that ExtraFingerprint triggers — Set.Fingerprint covers the
+		// alert list precisely so the two views cannot disagree.
 		healthSet = func() *slavehealth.Set {
 			var alerts []string
 			if cl := store.Current().Cluster; cl != nil {

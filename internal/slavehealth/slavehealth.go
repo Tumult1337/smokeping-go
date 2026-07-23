@@ -160,14 +160,22 @@ func (s *Set) Public() []config.TargetRef {
 	return out
 }
 
-// Fingerprint is a stable key over membership, appended to the scheduler's
-// config fingerprint so a mesh change triggers a rebuild. Health targets are
-// injected at build time and are absent from the stored config, so the config
-// fingerprint alone cannot see them.
+// Fingerprint is a stable key over membership *and* the alert list, appended
+// to the scheduler's config fingerprint so a mesh change triggers a rebuild.
+// Health targets are injected at build time and are absent from the stored
+// config, so the config fingerprint alone cannot see them.
+//
+// The alert list is included because the evaluator reads the names baked into
+// the scheduler's targets at Build time, while the API reports Public()'s
+// names per request. Without this, editing cluster.health_alerts and sending
+// SIGHUP would make the UI claim an alert is attached that can never fire
+// until the process restarts.
 //
 // Field and record separators are escaped: the fingerprint drives a rebuild
-// decision, and a peer name containing a raw separator must not be able to
-// forge the fingerprint of a different membership set.
+// decision, and a peer or alert name containing a raw separator must not be
+// able to forge the fingerprint of a different membership set. The two
+// sections are additionally split by a group separator so no alert name can
+// be read back as a peer record.
 //
 // Fingerprint tolerates a nil Set so callers wired for standalone mode need
 // no nil check on the hot reload path.
@@ -182,14 +190,22 @@ func (s *Set) Fingerprint() string {
 		b.WriteString(p.Addr.String())
 		b.WriteByte(0x1e)
 	}
+	b.WriteByte(0x1d)
+	// Order is significant: the alert list is stored as given, so a reorder is
+	// treated as a change and rebuilds. That is a cheap false positive, and
+	// the alternative (sorting) would hide a genuine edit that only permutes.
+	for _, a := range s.alerts {
+		b.WriteString(escapeSep(a))
+		b.WriteByte(0x1e)
+	}
 	return b.String()
 }
 
 func escapeSep(s string) string {
-	if !strings.ContainsAny(s, "\x1e\x1f\\") {
+	if !strings.ContainsAny(s, "\x1d\x1e\x1f\\") {
 		return s
 	}
-	r := strings.NewReplacer("\\", `\\`, "\x1f", `\u`, "\x1e", `\r`)
+	r := strings.NewReplacer("\\", `\\`, "\x1f", `\u`, "\x1e", `\r`, "\x1d", `\g`)
 	return r.Replace(s)
 }
 
