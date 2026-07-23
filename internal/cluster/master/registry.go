@@ -130,7 +130,7 @@ const (
 	advLogInvalid = "invalid" // failed ParseAdvertise
 	advLogPin     = "pin"     // pin configured, claimed address doesn't match
 	advLogDup     = "dup"     // address already claimed by another slave
-	advLogInfo    = "info"    // accepted, but differs from observed source (NAT)
+	advLogInfo    = "info"    // accepted, but differs from observed source (NAT or proxy)
 	advLogOK      = "ok"      // accepted, matches observed source (or unparseable)
 )
 
@@ -146,6 +146,9 @@ const (
 // every authenticated request, roughly every 5s per slave, forever. A slave
 // that keeps claiming the same bad value logs once; one that starts claiming
 // a different bad value, or flips between rejected and accepted, logs again.
+// Three of the four (invalid, pin mismatch, duplicate claim) are Warn: they
+// are actionable regardless of network topology. The fourth (observed-source
+// mismatch) is Debug — see its comment below for why.
 func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr string) netip.Addr {
 	name := info.Name
 	if advertise == "" {
@@ -179,11 +182,18 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 	}
 	// A mismatch against the observed source address is legitimate under NAT,
 	// so it cannot be an error — but it is the signature of a container
-	// reporting its internal address, so it is worth a line in the log.
+	// reporting its internal address, so it's worth surfacing for direct-
+	// connection debugging. Debug rather than Info: when the master sits
+	// behind a reverse proxy or CDN, remoteAddr is the proxy's address, not
+	// the slave's, so every slave in the fleet trips this comparison and the
+	// line reports nothing actionable. This repo does no X-Forwarded-For /
+	// CF-Connecting-IP parsing (and won't, without a trusted-proxy allowlist
+	// to stop a client spoofing its own source), so remoteAddr is always the
+	// immediate peer — meaningful only when that peer is the slave itself.
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		if observed, perr := netip.ParseAddr(host); perr == nil && observed.Unmap() != addr {
 			if key := advLogInfo + ":" + advertise; info.AdvertiseLogState != key {
-				r.log.Info("slave advertise address differs from its observed source address",
+				r.log.Debug("slave advertise address differs from its observed source address",
 					"slave", name, "advertise", addr, "observed", observed.Unmap(),
 					"hint", "expected under NAT; unexpected otherwise — check cluster.advertise")
 				info.AdvertiseLogState = key

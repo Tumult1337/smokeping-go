@@ -226,11 +226,14 @@ func TestRegistryChangedRejectionLogsAgain(t *testing.T) {
 }
 
 // A slave transitioning from rejected to accepted (a change in outcome, not
-// just in claimed value) must log again — proven here via the NAT-mismatch
-// Info line, which only fires once the address is actually accepted.
+// just in claimed value) must log again — proven here via the observed-
+// source-mismatch line, which only fires once the address is actually
+// accepted. That line is Debug (see resolveAdvertise), so the handler must
+// opt into Debug to observe it here; the gating behavior under test is
+// unaffected by level.
 func TestRegistryRejectedToAcceptedLogsAgain(t *testing.T) {
 	var buf bytes.Buffer
-	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, nil)))
+	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	// Rejected: invalid value.
 	r.Touch("nat-slave", "v1", "203.0.113.9:5555", "not-an-ip")
@@ -239,37 +242,56 @@ func TestRegistryRejectedToAcceptedLogsAgain(t *testing.T) {
 	}
 
 	// Accepted, but the claimed address differs from the observed source —
-	// expected under NAT, and worth its own Info line on first occurrence.
+	// expected under NAT, and worth its own Debug line on first occurrence.
 	r.Touch("nat-slave", "v1", "203.0.113.9:5555", "10.44.0.2")
 	if got := countLogLines(&buf); got != 2 {
-		t.Fatalf("after transition to accepted (NAT mismatch): got %d log lines, want 2", got)
+		t.Fatalf("after transition to accepted (observed-address mismatch): got %d log lines, want 2", got)
 	}
 	if got := r.Peers(); len(got) != 1 {
 		t.Fatalf("got %d health peers after acceptance, want 1", len(got))
 	}
 
-	// Repeated identical NAT mismatch must stay quiet.
+	// Repeated identical mismatch must stay quiet.
 	for range 5 {
 		r.Touch("nat-slave", "v1", "203.0.113.9:5555", "10.44.0.2")
 	}
 	if got := countLogLines(&buf); got != 2 {
-		t.Fatalf("after 5 identical NAT-mismatch heartbeats: got %d log lines, want 2 (still)", got)
+		t.Fatalf("after 5 identical mismatch heartbeats: got %d log lines, want 2 (still)", got)
+	}
+}
+
+// The observed-address mismatch line is Debug, not Info: behind a reverse
+// proxy or CDN, remoteAddr is the proxy's address for every slave, so at the
+// default level this line must not appear even on first occurrence — a
+// regression back to Info would spam one line per slave per proxied fleet.
+func TestRegistryObservedMismatchIsQuietAtDefaultLevel(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	r.Touch("nat-slave", "v1", "203.0.113.9:5555", "10.44.0.2")
+	if got := countLogLines(&buf); got != 0 {
+		t.Fatalf("got %d log lines at default level, want 0 (mismatch line must be Debug)", got)
+	}
+	if got := r.Peers(); len(got) != 1 {
+		t.Fatalf("got %d health peers, want 1 (mismatch is not a rejection)", len(got))
 	}
 }
 
 // The motivating scenario: several bridge-networked containers all claiming
 // the same address. The losing claimant's rejection must log once, not on
-// every push cycle for the lifetime of the process.
+// every push cycle for the lifetime of the process. The handler runs at
+// Debug so the first claimant's observed-address-mismatch line is visible
+// too, keeping the line count exercising both log lines' gating.
 func TestRegistryDuplicateRejectionLogsOnce(t *testing.T) {
 	var buf bytes.Buffer
-	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, nil)))
+	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	// The claimed address differs from the observed source (both slaves are
 	// bridge-networked containers reporting their internal IP), so the first
-	// claimant's own registration logs the expected NAT-mismatch Info line.
+	// claimant's own registration logs the expected mismatch Debug line.
 	r.Touch("first", "v1", "203.0.113.9:5555", "172.17.0.2")
 	if got := countLogLines(&buf); got != 1 {
-		t.Fatalf("after first claimant: got %d log lines, want 1 (NAT-mismatch info)", got)
+		t.Fatalf("after first claimant: got %d log lines, want 1 (observed-address mismatch)", got)
 	}
 
 	r.Touch("second", "v1", "203.0.113.10:5555", "172.17.0.2")
