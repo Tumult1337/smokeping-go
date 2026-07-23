@@ -691,17 +691,31 @@ type stubHealth struct{ refs []config.TargetRef }
 
 func (s stubHealth) PublicTargets() []config.TargetRef { return s.refs }
 
+// healthStub returns refs with Target.Host populated, simulating a leaky
+// HealthLister implementation. listTargets's health-DTO construction must
+// never read Host regardless of what the lister hands it — the stripping
+// guarantee has to hold structurally, not because callers happen to leave
+// the field zero. TestListTargetsIncludesHealthGroup relies on this to be a
+// real assertion instead of a tautology (see its comment).
 func healthStub() stubHealth {
 	return stubHealth{refs: []config.TargetRef{
 		{Group: slavehealth.Group, Target: config.Target{
 			Name: "frankfurt-1", Title: "frankfurt-1", Probe: slavehealth.ProbeName,
+			Host: "198.51.100.10",
 		}},
 		{Group: slavehealth.Group, Target: config.Target{
 			Name: "tokyo-1", Title: "tokyo-1", Probe: slavehealth.ProbeName,
+			Host: "198.51.100.20",
 		}},
 	}}
 }
 
+// healthStub's refs carry a populated Target.Host (a leaky-lister
+// simulation) so this test actually exercises the address-stripping in
+// listTargets's health-DTO construction. Without that, a stub with Host
+// always unset would pass whether or not the DTO reads Host at all — two
+// independent reasons for the same green result, neither of which is the
+// property under test.
 func TestListTargetsIncludesHealthGroup(t *testing.T) {
 	srv := newTestServer(t, withHealth(healthStub()))
 
@@ -815,5 +829,156 @@ func TestRedactTerminalHopIsPerSource(t *testing.T) {
 func TestRedactTerminalHopEmpty(t *testing.T) {
 	if got := redactTerminalHops(nil); len(got) != 0 {
 		t.Fatalf("got %d hops, want 0", len(got))
+	}
+}
+
+// TestGetHopsRedactsHealthTarget exercises /hops end-to-end for a health
+// target, catching wiring bugs the isolated redactTerminalHops unit tests
+// can't: deleting the `if slavehealth.IsHealthGroup(ref.Group)` guard in
+// getHops leaves those unit tests untouched but would ship the slave's
+// address to the browser.
+func TestGetHopsRedactsHealthTarget(t *testing.T) {
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "tokyo-1", Index: 1, IP: "203.0.113.1"},
+		{Source: "tokyo-1", Index: 2, IP: "10.44.0.2"}, // terminal: the slave itself
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []storage.HopPoint `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops", &body)
+
+	if len(body.Hops) != 2 {
+		t.Fatalf("got %d hops, want 2: %+v", len(body.Hops), body.Hops)
+	}
+	for _, h := range body.Hops {
+		if h.Index == 2 && h.IP != "" {
+			t.Fatalf("terminal hop IP not redacted: %+v", h)
+		}
+	}
+}
+
+// TestGetHopsKeepsOrdinaryTargetIntact guards against an inverted or
+// over-broad IsHealthGroup check: an ordinary (non-health) target's terminal
+// hop must reach the client unredacted.
+func TestGetHopsKeepsOrdinaryTargetIntact(t *testing.T) {
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "master", Index: 1, IP: "203.0.113.1"},
+		{Source: "master", Index: 2, IP: "10.44.0.2"},
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []storage.HopPoint `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops", &body)
+
+	if len(body.Hops) != 2 {
+		t.Fatalf("got %d hops, want 2: %+v", len(body.Hops), body.Hops)
+	}
+	for _, h := range body.Hops {
+		if h.Index == 2 && h.IP != "10.44.0.2" {
+			t.Fatalf("ordinary target's terminal hop was redacted: %+v", h)
+		}
+	}
+}
+
+// TestGetHopsTimelineRedactsHealthTarget is the /hops/timeline counterpart
+// to TestGetHopsRedactsHealthTarget — the two endpoints have separate guard
+// call sites in getHops and getHopsTimeline, so each needs its own coverage.
+func TestGetHopsTimelineRedactsHealthTarget(t *testing.T) {
+	now := time.Now()
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "tokyo-1", Time: now, Index: 1, IP: "203.0.113.1"},
+		{Source: "tokyo-1", Time: now, Index: 2, IP: "10.44.0.2"}, // terminal
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []hopTimelineDTO `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops/timeline", &body)
+
+	if len(body.Hops) != 2 {
+		t.Fatalf("got %d hops, want 2: %+v", len(body.Hops), body.Hops)
+	}
+	for _, h := range body.Hops {
+		if h.Index == 2 && h.IP != "" {
+			t.Fatalf("terminal hop IP not redacted: %+v", h)
+		}
+	}
+}
+
+// TestGetHopsTimelineKeepsOrdinaryTargetIntact is the /hops/timeline
+// counterpart to TestGetHopsKeepsOrdinaryTargetIntact.
+func TestGetHopsTimelineKeepsOrdinaryTargetIntact(t *testing.T) {
+	now := time.Now()
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "master", Time: now, Index: 1, IP: "203.0.113.1"},
+		{Source: "master", Time: now, Index: 2, IP: "10.44.0.2"},
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []hopTimelineDTO `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline", &body)
+
+	if len(body.Hops) != 2 {
+		t.Fatalf("got %d hops, want 2: %+v", len(body.Hops), body.Hops)
+	}
+	for _, h := range body.Hops {
+		if h.Index == 2 && h.IP != "10.44.0.2" {
+			t.Fatalf("ordinary target's terminal hop was redacted: %+v", h)
+		}
+	}
+}
+
+// TestRedactTerminalHopPerTimestamp covers /hops/timeline, where
+// QueryHopsTimeline returns one row per (bucket_timestamp, source, ttl,
+// hop_addr) spanning a whole window rather than a single pinned timestamp.
+// A route change partway through the window shortens or lengthens the path,
+// so the terminal index for the same source differs bucket to bucket. Keying
+// the max by source alone (the /hops-only-correct behaviour) computes one
+// window-wide maximum and misses the terminal hop at every bucket whose path
+// length is shorter than the window's longest — leaking the slave's address
+// for those buckets straight into hopTimelineDTO.IP.
+func TestRedactTerminalHopPerTimestamp(t *testing.T) {
+	t1 := time.Unix(1_700_000_000, 0)
+	t2 := time.Unix(1_700_003_600, 0) // 1h later: route change adds a hop
+
+	hops := []storage.HopPoint{
+		// t1: tokyo-1 reaches the slave in 8 hops.
+		{Source: "tokyo-1", Time: t1, Index: 1, IP: "203.0.113.1"},
+		{Source: "tokyo-1", Time: t1, Index: 8, IP: "10.44.0.2"}, // terminal @ t1
+		// t2: route change — tokyo-1 now takes 9 hops.
+		{Source: "tokyo-1", Time: t2, Index: 1, IP: "203.0.113.1"},
+		{Source: "tokyo-1", Time: t2, Index: 8, IP: "198.51.100.9"}, // now intermediate @ t2
+		{Source: "tokyo-1", Time: t2, Index: 9, IP: "10.44.0.2"},    // terminal @ t2
+	}
+	got := redactTerminalHops(hops)
+
+	byKey := make(map[[2]int64]storage.HopPoint, len(got))
+	for _, h := range got {
+		byKey[[2]int64{h.Time.Unix(), h.Index}] = h
+	}
+
+	if h := byKey[[2]int64{t1.Unix(), 8}]; h.IP != "" {
+		t.Fatalf("t1 terminal hop (index 8) not redacted: got IP %q", h.IP)
+	}
+	if h := byKey[[2]int64{t2.Unix(), 9}]; h.IP != "" {
+		t.Fatalf("t2 terminal hop (index 9) not redacted: got IP %q", h.IP)
+	}
+	// Index 8 at t2 is now an intermediate hop and must survive.
+	if h := byKey[[2]int64{t2.Unix(), 8}]; h.IP != "198.51.100.9" {
+		t.Fatalf("t2 intermediate hop (index 8) altered: got IP %q, want 198.51.100.9", h.IP)
+	}
+	// Index 1 at both timestamps is an intermediate hop and must survive.
+	if h := byKey[[2]int64{t1.Unix(), 1}]; h.IP != "203.0.113.1" {
+		t.Fatalf("t1 intermediate hop (index 1) altered: got IP %q", h.IP)
+	}
+	if h := byKey[[2]int64{t2.Unix(), 1}]; h.IP != "203.0.113.1" {
+		t.Fatalf("t2 intermediate hop (index 1) altered: got IP %q", h.IP)
 	}
 }

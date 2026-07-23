@@ -537,22 +537,37 @@ type hopTimelineDTO struct {
 // On a trace that never reached the slave the furthest hop is an intermediate,
 // so this over-redacts by one row. That is the fail-closed direction.
 //
-// Per-source: each observer's path has its own terminal hop, and redacting
-// only the global maximum index would expose the shorter paths' endpoints.
+// Per-(source, timestamp): /hops pins a single timestamp per source (via
+// QueryLatestHops/QueryHopsAt), so keying by source alone was equivalent to
+// keying by (source, timestamp) there. /hops/timeline's QueryHopsTimeline
+// returns one row per (bucket timestamp, source, ttl, hop_addr) spanning the
+// whole window, and path length legitimately varies bucket to bucket (ECMP,
+// route flaps, added/removed hops). A source-only maximum picks one
+// window-wide terminal index and leaves every bucket whose path was shorter
+// unredacted — exposing the slave's address for those buckets. Keying by
+// (source, timestamp) computes the terminal index per row's own trace instead,
+// and collapses to exactly the old behaviour when every row shares one
+// timestamp.
 func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 	if len(hops) == 0 {
 		return hops
 	}
-	maxIndex := make(map[string]int64, 4)
+	type sourceTime struct {
+		source string
+		unix   int64
+	}
+	maxIndex := make(map[sourceTime]int64, 4)
 	for _, h := range hops {
-		if cur, ok := maxIndex[h.Source]; !ok || h.Index > cur {
-			maxIndex[h.Source] = h.Index
+		key := sourceTime{h.Source, h.Time.UnixNano()}
+		if cur, ok := maxIndex[key]; !ok || h.Index > cur {
+			maxIndex[key] = h.Index
 		}
 	}
 	out := make([]storage.HopPoint, len(hops))
 	copy(out, hops)
 	for i := range out {
-		if out[i].Index == maxIndex[out[i].Source] {
+		key := sourceTime{out[i].Source, out[i].Time.UnixNano()}
+		if out[i].Index == maxIndex[key] {
 			out[i].IP = ""
 		}
 	}
