@@ -4,6 +4,9 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/tumult/gosmokeping/internal/config"
 )
 
 func peers() []Peer {
@@ -229,5 +232,37 @@ func TestProbeDefIsICMP(t *testing.T) {
 func TestGroupNameIsReserved(t *testing.T) {
 	if !strings.HasPrefix(Group, "_") {
 		t.Fatalf("group %q must start with _ to stay outside the user namespace", Group)
+	}
+}
+
+// The config package duplicates these names to avoid an import cycle. If they
+// drift, config would stop reserving the namespace the mesh actually uses.
+func TestReservedNamesMatchConfigValidation(t *testing.T) {
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    20,
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "127.0.0.1:9000"}},
+		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+		Targets: []config.Group{{
+			Group:   Group,
+			Targets: []config.Target{{Name: "x", Probe: "icmp", Host: "192.0.2.1"}},
+		}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("config.Validate() accepted group %q; the reserved name has drifted", Group)
+	}
+
+	cfg2 := &config.Config{
+		Interval: time.Minute,
+		Pings:    20,
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "127.0.0.1:9000"}},
+		Probes:   map[string]config.Probe{ProbeName: {Type: "icmp", Timeout: time.Second}},
+		Targets: []config.Group{{
+			Group:   "core",
+			Targets: []config.Target{{Name: "x", Probe: ProbeName, Host: "192.0.2.1"}},
+		}},
+	}
+	if err := cfg2.Validate(); err == nil {
+		t.Fatalf("config.Validate() accepted probe %q; the reserved name has drifted", ProbeName)
 	}
 }

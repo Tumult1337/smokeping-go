@@ -4,11 +4,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
 	"sort"
 	"time"
+)
+
+// Reserved names owned by the cluster health mesh. Duplicated from
+// internal/slavehealth (which imports this package, so the dependency cannot
+// run the other way); slavehealth's tests assert the values match.
+const (
+	reservedGroup = "_cluster"
+	reservedProbe = "_slave_health"
 )
 
 type Config struct {
@@ -401,9 +410,19 @@ func (c *Config) Validate() error {
 	}
 
 	seenTargets := make(map[string]string)
+	if _, taken := c.Probes[reservedProbe]; taken {
+		return fmt.Errorf("probe %q is reserved for cluster slave health", reservedProbe)
+	}
+
 	for _, g := range c.Targets {
 		if g.Group == "" {
 			return fmt.Errorf("group name is required")
+		}
+		// The health mesh owns this group. A user-defined target here would
+		// shadow a synthetic one and inherit its address-stripping treatment
+		// in the API, so reject it at load rather than resolve it silently.
+		if g.Group == reservedGroup {
+			return fmt.Errorf("group %q is reserved for cluster slave health", reservedGroup)
 		}
 		for _, t := range g.Targets {
 			if t.Name == "" {
@@ -450,7 +469,68 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.Cluster != nil {
+		if _, err := c.Cluster.ParsedSlaveAddrs(); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// ParseReachableAddr validates a single IP literal meant to name a peer the
+// health mesh can probe — never a hostname, prefix, or host:port. It is the
+// single source of truth for "can this address be a probe destination
+// between mesh peers", shared by master.ParseAdvertise (a slave-reported
+// value) and Cluster.ParsedSlaveAddrs (an operator-written pin); callers
+// should wrap the returned error with call-site context.
+//
+// Private and unique-local ranges are deliberately accepted: mesh
+// deployments (WireGuard and similar) address peers entirely within
+// RFC1918 / fc00::/7, so rejecting them would break the common case.
+// Addresses that cannot name a reachable peer — unspecified, loopback,
+// multicast, link-local — are rejected.
+func ParseReachableAddr(raw string) (netip.Addr, error) {
+	if raw == "" {
+		return netip.Addr{}, fmt.Errorf("address is empty")
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("%q: not an IP literal: %w", raw, err)
+	}
+	// Normalise ::ffff:a.b.c.d to a.b.c.d so two spellings of one address
+	// collide in duplicate checks rather than registering as two peers.
+	addr = addr.Unmap()
+	switch {
+	case addr.IsUnspecified():
+		return netip.Addr{}, fmt.Errorf("%q: unspecified address", raw)
+	case addr.IsLoopback():
+		return netip.Addr{}, fmt.Errorf("%q: loopback is not reachable from peers", raw)
+	case addr.IsMulticast(), addr.IsInterfaceLocalMulticast(), addr.IsLinkLocalMulticast():
+		return netip.Addr{}, fmt.Errorf("%q: multicast is not a probe destination", raw)
+	case addr.IsLinkLocalUnicast():
+		return netip.Addr{}, fmt.Errorf("%q: link-local is not routable between peers", raw)
+	}
+	return addr, nil
+}
+
+// ParsedSlaveAddrs converts the optional name→address pin map into netip form.
+// Parsing happens once at load so a typo surfaces at startup rather than
+// silently leaving a slave unpinned at registration time — a pin that fails
+// open is worse than no pin, because the operator believes it is enforced.
+func (c *Cluster) ParsedSlaveAddrs() (map[string]netip.Addr, error) {
+	if len(c.SlaveAddrs) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]netip.Addr, len(c.SlaveAddrs))
+	for name, raw := range c.SlaveAddrs {
+		addr, err := ParseReachableAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf("cluster.slave_addrs[%q]: %w", name, err)
+		}
+		out[name] = addr
+	}
+	return out, nil
 }
 
 func (c *Config) AllTargets() []TargetRef {

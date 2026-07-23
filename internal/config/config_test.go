@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -255,5 +256,75 @@ func TestStoreReload(t *testing.T) {
 		}
 	default:
 		t.Error("subscriber not notified")
+	}
+}
+
+func minimalValidConfig(t *testing.T) *Config {
+	t.Helper()
+	return &Config{
+		Interval: 60 * time.Second,
+		Pings:    20,
+		Storage:  Storage{ClickHouse: ClickHouse{Addr: "127.0.0.1:9000"}},
+		Probes:   map[string]Probe{"icmp": {Type: "icmp", Timeout: 2 * time.Second}},
+		Targets: []Group{{
+			Group:   "core",
+			Targets: []Target{{Name: "gw", Probe: "icmp", Host: "192.0.2.1"}},
+		}},
+	}
+}
+
+func TestValidateRejectsReservedGroup(t *testing.T) {
+	c := minimalValidConfig(t)
+	c.Targets = append(c.Targets, Group{
+		Group:   "_cluster",
+		Targets: []Target{{Name: "impostor", Probe: "icmp", Host: "example.com"}},
+	})
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want an error for the reserved _cluster group")
+	}
+	if !strings.Contains(err.Error(), "_cluster") {
+		t.Fatalf("error %q does not mention the reserved group", err)
+	}
+}
+
+func TestValidateRejectsReservedProbeName(t *testing.T) {
+	c := minimalValidConfig(t)
+	c.Probes["_slave_health"] = Probe{Type: "icmp", Timeout: time.Second}
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for the reserved probe name")
+	}
+}
+
+func TestParsedSlaveAddrs(t *testing.T) {
+	cl := &Cluster{SlaveAddrs: map[string]string{
+		"frankfurt-1": "10.44.0.2",
+		"tokyo-1":     "2001:db8::7",
+	}}
+	pins, err := cl.ParsedSlaveAddrs()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pins) != 2 {
+		t.Fatalf("got %d pins, want 2", len(pins))
+	}
+	if pins["frankfurt-1"] != netip.MustParseAddr("10.44.0.2") {
+		t.Fatalf("got %v for frankfurt-1", pins["frankfurt-1"])
+	}
+}
+
+// A malformed pin must fail loudly at load. Silently dropping it would leave
+// the operator believing a slave is pinned when it is not.
+func TestParsedSlaveAddrsRejectsGarbage(t *testing.T) {
+	cl := &Cluster{SlaveAddrs: map[string]string{"frankfurt-1": "not-an-ip"}}
+	if _, err := cl.ParsedSlaveAddrs(); err == nil {
+		t.Fatal("ParsedSlaveAddrs() = nil error, want a parse failure")
+	}
+}
+
+func TestParsedSlaveAddrsRejectsUnreachable(t *testing.T) {
+	cl := &Cluster{SlaveAddrs: map[string]string{"frankfurt-1": "127.0.0.1"}}
+	if _, err := cl.ParsedSlaveAddrs(); err == nil {
+		t.Fatal("ParsedSlaveAddrs() = nil error, want loopback to be rejected")
 	}
 }
