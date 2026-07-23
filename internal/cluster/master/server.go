@@ -96,7 +96,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `name required: ≤128 bytes, not "master", no control chars`, http.StatusBadRequest)
 		return
 	}
-	s.registry.Touch(req.Name, req.Version, r.RemoteAddr)
+	s.registry.Touch(req.Name, req.Version, r.RemoteAddr, req.Advertise)
 	s.log.Info("slave registered", "name", req.Name, "version", req.Version, "addr", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, cluster.RegisterResp{Ack: true})
 }
@@ -113,7 +113,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid slave name", http.StatusBadRequest)
 			return
 		}
-		s.registry.Touch(slaveName, r.Header.Get("X-Slave-Version"), r.RemoteAddr)
+		s.registry.Touch(slaveName, r.Header.Get("X-Slave-Version"), r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
 	}
 
 	resp := BuildClusterConfig(cfg, slaveName)
@@ -151,7 +151,7 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid slave name", http.StatusBadRequest)
 			return
 		}
-		s.registry.Touch(name, version, r.RemoteAddr)
+		s.registry.Touch(name, version, r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
 		batch.Source = name
 	}
 	n := s.ingestBatch(r, batch)

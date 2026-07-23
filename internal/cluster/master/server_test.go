@@ -41,7 +41,7 @@ func (nopSink) OnCycle(context.Context, scheduler.Cycle) {}
 func newTestServer() *Server {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := config.NewStore("", &config.Config{})
-	return NewServer(log, store, NewRegistry(), nopSink{}, "tok")
+	return NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), nopSink{}, "tok")
 }
 
 func postCycles(t *testing.T, srv *Server, slaveName, bodySource string) int {

@@ -86,7 +86,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	var clusterHandler http.Handler
 	var slaveLister api.SlaveLister
 	if cfg.Cluster != nil && cfg.Cluster.Token != "" {
-		clusterRegistry := master.NewRegistry()
+		clusterRegistry := master.NewRegistry(log)
 		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token).Handler()
 		slaveLister = clusterRegistry
 		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
