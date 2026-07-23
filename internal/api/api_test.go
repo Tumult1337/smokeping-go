@@ -741,16 +741,29 @@ func TestListTargetsIncludesHealthGroup(t *testing.T) {
 }
 
 // Ordinary targets must keep their host — the stripping is scoped.
+//
+// Asserting against "" here is non-discriminating: targetDTO.Host is
+// `json:"host,omitempty"`, so a stripped host omits the key entirely and
+// row["host"] decodes to nil, not "". nil == "" is false, so the guard never
+// fires either way. Assert the actual expected value instead.
 func TestListTargetsKeepsOrdinaryHosts(t *testing.T) {
 	srv := newTestServer(t, withHealth(healthStub()))
 
 	var got []map[string]any
 	doJSON(t, srv, "GET", "/api/v1/targets", &got)
 
+	found := false
 	for _, row := range got {
-		if row["group"] == "core" && row["host"] == "" {
-			t.Fatalf("ordinary target %v lost its host", row["id"])
+		if row["group"] != "core" {
+			continue
 		}
+		found = true
+		if row["host"] != "1.1.1.1" {
+			t.Fatalf("ordinary target %v lost its host: got %v, want %q", row["id"], row["host"], "1.1.1.1")
+		}
+	}
+	if !found {
+		t.Fatal("no core-group target in response")
 	}
 }
 
@@ -887,11 +900,17 @@ func TestGetHopsKeepsOrdinaryTargetIntact(t *testing.T) {
 // TestGetHopsTimelineRedactsHealthTarget is the /hops/timeline counterpart
 // to TestGetHopsRedactsHealthTarget — the two endpoints have separate guard
 // call sites in getHops and getHopsTimeline, so each needs its own coverage.
+//
+// Unlike /hops, /hops/timeline redacts every non-empty address, not just the
+// apparent terminal one — queryHopsBucketed's GROUP BY makes "terminal" an
+// ambiguous notion within a bucket (see redactAllHopAddresses). Both
+// addresses here must come back as the sentinel, never blank and never the
+// real value.
 func TestGetHopsTimelineRedactsHealthTarget(t *testing.T) {
 	now := time.Now()
 	r := &stubReader{hops: []storage.HopPoint{
 		{Source: "tokyo-1", Time: now, Index: 1, IP: "203.0.113.1"},
-		{Source: "tokyo-1", Time: now, Index: 2, IP: "10.44.0.2"}, // terminal
+		{Source: "tokyo-1", Time: now, Index: 2, IP: "10.44.0.2"}, // the slave
 	}}
 	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
 
@@ -904,8 +923,11 @@ func TestGetHopsTimelineRedactsHealthTarget(t *testing.T) {
 		t.Fatalf("got %d hops, want 2: %+v", len(body.Hops), body.Hops)
 	}
 	for _, h := range body.Hops {
-		if h.Index == 2 && h.IP != "" {
-			t.Fatalf("terminal hop IP not redacted: %+v", h)
+		if h.IP == "203.0.113.1" || h.IP == "10.44.0.2" {
+			t.Fatalf("real address leaked on hops/timeline: %+v", h)
+		}
+		if h.IP != hopAddrSentinel {
+			t.Fatalf("non-empty hop address not sentinelized: %+v", h)
 		}
 	}
 }
@@ -980,5 +1002,49 @@ func TestRedactTerminalHopPerTimestamp(t *testing.T) {
 	}
 	if h := byKey[[2]int64{t2.Unix(), 1}]; h.IP != "203.0.113.1" {
 		t.Fatalf("t2 intermediate hop (index 1) altered: got IP %q", h.IP)
+	}
+}
+
+// TestRedactAllHopAddressesClosesIntraBucketLeak proves the intra-bucket case
+// redactTerminalHops cannot close: queryHopsBucketed groups by (bucket_ts,
+// source, ttl, hop_addr), so a single (source, bucket) pair can carry more
+// than one row at the *same* ttl with different addresses (a mid-bucket
+// route change), and a longer trace than whichever row happens to sit at the
+// apparent maximum index. A positional "blank only the max index" pass —
+// exactly what redactTerminalHops does — leaves every other row's address
+// intact, including one carrying the slave's real address at the same ttl
+// as a still-shorter trace. redactAllHopAddresses must not have this gap:
+// no real address may survive regardless of how the rows are shaped.
+func TestRedactAllHopAddressesClosesIntraBucketLeak(t *testing.T) {
+	tBucket := time.Unix(1_700_000_000, 0)
+	hops := []storage.HopPoint{
+		// Same (source, time, ttl=8), two distinct addresses: mid-bucket route
+		// change. One is the slave, reached via the old (shorter) route.
+		{Source: "tokyo-1", Time: tBucket, Index: 8, IP: "10.44.0.2"},
+		{Source: "tokyo-1", Time: tBucket, Index: 8, IP: "198.51.100.9"},
+		// Same (source, time), one row longer: the new route reaches the slave
+		// at ttl 9 instead.
+		{Source: "tokyo-1", Time: tBucket, Index: 9, IP: "10.44.0.2"},
+	}
+	got := redactAllHopAddresses(hops)
+	for _, h := range got {
+		if h.IP == "10.44.0.2" || h.IP == "198.51.100.9" {
+			t.Fatalf("real address survived redaction: %+v", h)
+		}
+	}
+}
+
+// TestRedactAllHopAddressesKeepsNoReplyEmpty guards the other half of the
+// contract: a hop that genuinely never replied must stay "", not become the
+// sentinel. ui/src/MtrHeatmap.tsx reads IP=="" as "no reply" and colors the
+// cell accordingly — sentinelizing empty addresses would flip every
+// no-reply cell to look like a reply.
+func TestRedactAllHopAddressesKeepsNoReplyEmpty(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "tokyo-1", Index: 3, IP: ""},
+	}
+	got := redactAllHopAddresses(hops)
+	if got[0].IP != "" {
+		t.Fatalf("no-reply hop was sentinelized: got IP %q, want empty", got[0].IP)
 	}
 }

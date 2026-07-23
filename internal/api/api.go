@@ -478,7 +478,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if slavehealth.IsHealthGroup(ref.Group) {
-		hops = redactTerminalHops(hops)
+		hops = redactAllHopAddresses(hops)
 	}
 	// Slim DTO: the heatmap renders only LossPct + MaxLossPct, so the
 	// per-row RTT fields (Min/Max/Mean/Median) the storage row carries
@@ -569,6 +569,47 @@ func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 		key := sourceTime{out[i].Source, out[i].Time.UnixNano()}
 		if out[i].Index == maxIndex[key] {
 			out[i].IP = ""
+		}
+	}
+	return out
+}
+
+// hopAddrSentinel replaces every non-empty hop address on /hops/timeline.
+// It must not be "": ui/src/MtrHeatmap.tsx reads HopPoint.IP purely as a
+// reply/no-reply flag (`p.IP ? lossColor(...) : noReply`), keyed separately
+// by Index, and never displays the address itself — blanking to "" would
+// make every hop render as no-reply and silently break the heatmap. It must
+// also not be a real address, so any fixed, address-free string works; this
+// one is chosen to be obviously not an IP if it ever leaks into a log or a
+// debugger.
+const hopAddrSentinel = "redacted"
+
+// redactAllHopAddresses replaces every non-empty hop address with
+// hopAddrSentinel, unlike redactTerminalHops which blanks only the
+// apparent terminal row.
+//
+// queryHopsBucketed groups by (bucket_ts, source, ttl, hop_addr), so one
+// bucket can hold multiple rows at the same ttl with different addresses
+// (a route change mid-bucket) and traces of differing length (path flaps
+// are ordinary within a 15m bucket at a 1m probe interval, per T8). There is
+// no per-row signal for "this is the terminal hop" left once cycles are
+// aggregated — the only way to find it would be comparing rows against the
+// real slave address, which is exactly the leak the Probe/Public split
+// exists to prevent. So every row is redacted here, not just the row at the
+// bucket's apparent max index: any positional heuristic can be defeated by
+// an ordinary route change within the bucket. This is the fail-closed
+// choice mandated for the timeline endpoint; /hops keeps terminal-only
+// redaction because QueryLatestHops/QueryHopsAt pin one cycle per
+// (source, time), so the terminal row is unambiguous there.
+//
+// Genuinely empty addresses (a hop that never replied) are left empty —
+// see hopAddrSentinel for why that bit must survive unmolested.
+func redactAllHopAddresses(hops []storage.HopPoint) []storage.HopPoint {
+	out := make([]storage.HopPoint, len(hops))
+	copy(out, hops)
+	for i := range out {
+		if out[i].IP != "" {
+			out[i].IP = hopAddrSentinel
 		}
 	}
 	return out
