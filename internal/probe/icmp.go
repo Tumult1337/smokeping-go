@@ -30,6 +30,8 @@ type ICMP struct {
 	timeout time.Duration
 	// inter-probe spacing within a cycle
 	spacing time.Duration
+	// noTrace disables the opportunistic TTL walk below, from config.Probe.NoTrace.
+	noTrace bool
 	// trace parameters — small rounds count keeps the trace well under one
 	// cycle even when many hops time out.
 	traceRounds  int
@@ -38,7 +40,7 @@ type ICMP struct {
 	traceSpacing time.Duration
 }
 
-func NewICMP(name string, timeout time.Duration) *ICMP {
+func NewICMP(name string, timeout time.Duration, noTrace bool) *ICMP {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -46,6 +48,7 @@ func NewICMP(name string, timeout time.Duration) *ICMP {
 		name:         name,
 		timeout:      timeout,
 		spacing:      200 * time.Millisecond,
+		noTrace:      noTrace,
 		traceRounds:  3,
 		traceMaxTTL:  30,
 		traceTimeout: time.Second,
@@ -106,12 +109,19 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	// visible at startup rather than silently missing MTR for every target.
 	// The "reached" signal is irrelevant here: echo latency is already measured
 	// from the target; we only want the hops list.
-	if hops, _, terr := traceHops(ctx, t.Host, t.Family, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing); terr == nil {
-		result.Hops = hops
-	} else if errors.Is(terr, errRawUnavailable) {
-		logRawUnavailableOnce(terr)
-	} else {
-		slog.Debug("icmp trace error", "probe", i.name, "host", t.Host, "err", terr)
+	//
+	// noTrace opts a target out of the walk entirely (e.g. cluster.health_hops
+	// = false): the echo results above are unaffected, only the hops view goes
+	// away. This is a config choice, not a permission failure, so it bypasses
+	// errRawUnavailable handling rather than routing through it.
+	if !i.noTrace {
+		if hops, _, terr := traceHops(ctx, t.Host, t.Family, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing); terr == nil {
+			result.Hops = hops
+		} else if errors.Is(terr, errRawUnavailable) {
+			logRawUnavailableOnce(terr)
+		} else {
+			slog.Debug("icmp trace error", "probe", i.name, "host", t.Host, "err", terr)
+		}
 	}
 	return result, nil
 }

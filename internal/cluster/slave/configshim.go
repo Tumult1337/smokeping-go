@@ -19,6 +19,7 @@ func buildShim(resp cluster.ClusterConfigResp, local *config.Cluster) *config.Co
 			Type:     p.Type,
 			Timeout:  p.Timeout,
 			Insecure: p.Insecure,
+			NoTrace:  p.NoTrace,
 		}
 	}
 	return &config.Config{

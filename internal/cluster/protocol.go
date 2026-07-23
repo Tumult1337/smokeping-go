@@ -52,6 +52,7 @@ type ProbeDTO struct {
 	Type     string        `json:"type"`
 	Timeout  time.Duration `json:"timeout,omitempty"`
 	Insecure bool          `json:"insecure,omitempty"`
+	NoTrace  bool          `json:"no_trace,omitempty"`
 }
 
 // CycleBatch is posted by a slave on POST /cluster/cycles. The wrapper lets

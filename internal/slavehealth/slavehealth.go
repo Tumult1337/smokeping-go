@@ -77,12 +77,13 @@ func IsHealthGroup(group string) bool { return group == Group }
 // ProbeDef returns the synthesized probe definition. ICMP is deliberate: the
 // icmp probe already performs an opportunistic TTL walk after its echo batch,
 // so one probe yields both echo statistics and traceroute hops with no second
-// target. A non-positive timeout falls back to the package default.
-func ProbeDef(timeout time.Duration) config.Probe {
+// target. hops=false disables that walk. A non-positive timeout falls back to
+// the package default.
+func ProbeDef(timeout time.Duration, hops bool) config.Probe {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return config.Probe{Type: "icmp", Timeout: timeout}
+	return config.Probe{Type: "icmp", Timeout: timeout, NoTrace: !hops}
 }
 
 // Probe returns the health group with real addresses, omitting the named peer.

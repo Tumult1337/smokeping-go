@@ -220,12 +220,24 @@ func TestIsHealthGroup(t *testing.T) {
 }
 
 func TestProbeDefIsICMP(t *testing.T) {
-	p := ProbeDef(0)
+	p := ProbeDef(0, true)
 	if p.Type != "icmp" {
 		t.Fatalf("got probe type %q, want icmp", p.Type)
 	}
 	if p.Timeout <= 0 {
 		t.Fatalf("got timeout %v, want a positive default", p.Timeout)
+	}
+}
+
+func TestProbeDefHopsEnabled(t *testing.T) {
+	if p := ProbeDef(0, true); p.NoTrace {
+		t.Fatal("ProbeDef(_, true) must leave tracing on")
+	}
+}
+
+func TestProbeDefHopsDisabled(t *testing.T) {
+	if p := ProbeDef(0, false); !p.NoTrace {
+		t.Fatal("ProbeDef(_, false) must disable tracing")
 	}
 }
 

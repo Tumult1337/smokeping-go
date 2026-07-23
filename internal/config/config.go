@@ -83,6 +83,12 @@ type Probe struct {
 	// self-signed or expired certs where reachability matters more than cert
 	// validity. Ignored by non-HTTP probe types.
 	Insecure bool `json:"insecure,omitempty"`
+	// NoTrace disables the opportunistic TTL walk the icmp probe runs after
+	// its echo batch. Set for slave-health probes when cluster.health_hops is
+	// false: on a wide mesh the N*(N+1) hop streams dominate storage, and
+	// intermediate hops disclose a slave's transit provider. Ignored by
+	// probe types that never trace.
+	NoTrace bool `json:"no_trace,omitempty"`
 }
 
 type Group struct {
@@ -531,6 +537,13 @@ func (c *Cluster) ParsedSlaveAddrs() (map[string]netip.Addr, error) {
 		out[name] = addr
 	}
 	return out, nil
+}
+
+// HopsEnabled reports whether health targets collect traceroute hops.
+// Defaults to true: the hops view is the reason the mesh uses ICMP rather
+// than a bare echo, so an operator must opt out explicitly.
+func (c *Cluster) HopsEnabled() bool {
+	return c == nil || c.HealthHops == nil || *c.HealthHops
 }
 
 func (c *Config) AllTargets() []TargetRef {

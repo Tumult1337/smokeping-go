@@ -28,7 +28,7 @@ import (
 func BuildClusterConfig(cfg *config.Config, slaveName string, health *slavehealth.Set) cluster.ClusterConfigResp {
 	probes := make(map[string]cluster.ProbeDTO, len(cfg.Probes)+1)
 	for k, p := range cfg.Probes {
-		probes[k] = cluster.ProbeDTO{Type: p.Type, Timeout: p.Timeout, Insecure: p.Insecure}
+		probes[k] = cluster.ProbeDTO{Type: p.Type, Timeout: p.Timeout, Insecure: p.Insecure, NoTrace: p.NoTrace}
 	}
 
 	groups := make([]config.Group, 0, len(cfg.Targets)+1)
@@ -49,11 +49,11 @@ func BuildClusterConfig(cfg *config.Config, slaveName string, health *slavehealt
 	if health != nil {
 		if hg := health.Probe(slaveName); len(hg) > 0 {
 			groups = append(groups, hg...)
-			// ProbeDef(0) takes the package default timeout. Passing the
+			// ProbeDef(0, ...) takes the package default timeout. Passing the
 			// cycle interval here would be a category error: the interval is
 			// how often to probe (60s), not how long to wait for a reply.
-			hp := slavehealth.ProbeDef(0)
-			probes[slavehealth.ProbeName] = cluster.ProbeDTO{Type: hp.Type, Timeout: hp.Timeout}
+			hp := slavehealth.ProbeDef(0, cfg.Cluster.HopsEnabled())
+			probes[slavehealth.ProbeName] = cluster.ProbeDTO{Type: hp.Type, Timeout: hp.Timeout, NoTrace: hp.NoTrace}
 		}
 	}
 
@@ -127,7 +127,7 @@ func LocalTargets(cfg *config.Config, health *slavehealth.Set) *config.Config {
 			for k, v := range cfg.Probes {
 				probes[k] = v
 			}
-			probes[slavehealth.ProbeName] = slavehealth.ProbeDef(0)
+			probes[slavehealth.ProbeName] = slavehealth.ProbeDef(0, cfg.Cluster.HopsEnabled())
 			out.Probes = probes
 		}
 	}

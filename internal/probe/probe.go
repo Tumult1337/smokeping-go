@@ -110,7 +110,7 @@ func familyNetwork(base, family string) string {
 func build(name string, pc config.Probe) (Probe, error) {
 	switch pc.Type {
 	case "icmp":
-		return NewICMP(name, pc.Timeout), nil
+		return NewICMP(name, pc.Timeout, pc.NoTrace), nil
 	case "tcp":
 		return NewTCP(name, pc.Timeout), nil
 	case "http":
