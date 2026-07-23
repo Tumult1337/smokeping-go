@@ -701,7 +701,7 @@ func healthStub() stubHealth {
 	return stubHealth{refs: []config.TargetRef{
 		{Group: slavehealth.Group, Target: config.Target{
 			Name: "frankfurt-1", Title: "frankfurt-1", Probe: slavehealth.ProbeName,
-			Host: "198.51.100.10",
+			Host: "198.51.100.10", Alerts: []string{"slave-down"},
 		}},
 		{Group: slavehealth.Group, Target: config.Target{
 			Name: "tokyo-1", Title: "tokyo-1", Probe: slavehealth.ProbeName,
@@ -784,6 +784,31 @@ func TestResolveUnknownHealthTargetIs404(t *testing.T) {
 	code, _ := do(t, srv, "GET", "/api/v1/targets/_cluster/nonexistent/cycles?range=1h")
 	if code != http.StatusNotFound {
 		t.Fatalf("got %d, want 404", code)
+	}
+}
+
+// Alert names are operator-chosen labels with no address content. Dropping
+// them from the health DTO would render an alerting slave as unmonitored in
+// the UI — the exact state Public() exposes them to avoid.
+func TestListTargetsSurfacesHealthAlerts(t *testing.T) {
+	srv := newTestServer(t, withHealth(healthStub()))
+
+	var got []map[string]any
+	doJSON(t, srv, "GET", "/api/v1/targets", &got)
+
+	found := false
+	for _, row := range got {
+		if row["group"] != slavehealth.Group || row["name"] != "frankfurt-1" {
+			continue
+		}
+		found = true
+		alerts, _ := row["alerts"].([]any)
+		if len(alerts) != 1 || alerts[0] != "slave-down" {
+			t.Fatalf("health target alerts = %v, want [slave-down]", row["alerts"])
+		}
+	}
+	if !found {
+		t.Fatal("frankfurt-1 health row missing")
 	}
 }
 

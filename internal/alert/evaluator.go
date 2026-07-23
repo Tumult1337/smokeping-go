@@ -328,6 +328,11 @@ func scrubHealthAddresses(ev Event) Event {
 	ev.Target.Target.Family = ""
 	ev.Cycle.Target = ev.Target
 	ev.Cycle.Hops = nil
+	// HTTPSamples carries no address today and health probes are ICMP so it is
+	// never populated, but clearing it makes the scrub exhaustive over
+	// scheduler.Cycle's address-capable fields — a future field addition then
+	// fails visibly here rather than silently reopening the egress.
+	ev.Cycle.HTTPSamples = nil
 	return ev
 }
 

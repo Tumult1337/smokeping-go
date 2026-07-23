@@ -271,6 +271,10 @@ func (s *Server) listTargets(w http.ResponseWriter, r *http.Request) {
 			Title:      t.Target.Title,
 			Probe:      t.Target.Probe,
 			ProbeType:  "icmp",
+			// Alerts are operator-chosen labels with no address content, and
+			// omitting them would render a health target as unmonitored while
+			// it is in fact alerting.
+			Alerts: t.Target.Alerts,
 			// Host and URL stay zero: the whole point of the Public view.
 			Sources: healthSources(t.Target.Name, masterSource, registered),
 		})

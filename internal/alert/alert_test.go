@@ -747,6 +747,10 @@ func TestDispatchedHealthEventCarriesNoAddress(t *testing.T) {
 			{Index: 1, IP: "203.0.113.1"},
 			{Index: 2, IP: slaveAddr},
 		},
+		// Never populated for an ICMP health probe in practice; set here so
+		// the scrub is asserted to be exhaustive over scheduler.Cycle rather
+		// than only over the fields that happen to carry an address today.
+		HTTPSamples: []probe.HTTPSample{{Status: 200, Err: slaveAddr + ": refused"}},
 	}
 	e.OnCycle(context.Background(), cy)
 
@@ -769,6 +773,9 @@ func TestDispatchedHealthEventCarriesNoAddress(t *testing.T) {
 	}
 	if len(ev.Cycle.Hops) != 0 {
 		t.Errorf("Cycle.Hops survived on a health event: %+v", ev.Cycle.Hops)
+	}
+	if len(ev.Cycle.HTTPSamples) != 0 {
+		t.Errorf("Cycle.HTTPSamples survived on a health event: %+v", ev.Cycle.HTTPSamples)
 	}
 	// The identifying fields must survive — a scrubbed event still has to say
 	// which slave went down.
