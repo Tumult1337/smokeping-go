@@ -14,6 +14,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
 // Caps on ingest body size. Register is tiny JSON; /cycles carries at most
@@ -33,20 +34,35 @@ type Server struct {
 	registry *Registry
 	sink     scheduler.Sink
 	token    string
+	health   func() *slavehealth.Set
 }
 
 // NewServer builds a master-side cluster handler. token is the shared bearer
 // secret checked on every request. The caller must not mount this with an
 // empty token; BearerAuth panics on an empty token to prevent an open ingest
 // endpoint (see cluster.BearerAuth).
-func NewServer(log *slog.Logger, store *config.Store, registry *Registry, sink scheduler.Sink, token string) *Server {
+//
+// health is a live accessor rather than a snapshot: the mesh changes as
+// slaves register, but the Server is constructed once at startup. Pass nil
+// for standalone tests and deployments with no health mesh wired.
+func NewServer(log *slog.Logger, store *config.Store, registry *Registry, sink scheduler.Sink, token string, health func() *slavehealth.Set) *Server {
 	return &Server{
 		log:      log,
 		store:    store,
 		registry: registry,
 		sink:     sink,
 		token:    token,
+		health:   health,
 	}
+}
+
+// healthSet returns the current mesh snapshot, or nil when health probing is
+// not wired (standalone tests, or a master with no registry).
+func (s *Server) healthSet() *slavehealth.Set {
+	if s.health == nil {
+		return nil
+	}
+	return s.health()
 }
 
 // Handler returns the sub-router with bearer auth already applied. Mount it
@@ -116,7 +132,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.registry.Touch(slaveName, r.Header.Get("X-Slave-Version"), r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
 	}
 
-	resp := BuildClusterConfig(cfg, slaveName)
+	resp := BuildClusterConfig(cfg, slaveName, s.healthSet())
 	etag := cluster.ETag(resp)
 	if etag != "" && r.Header.Get("If-None-Match") == etag {
 		w.Header().Set("ETag", etag)

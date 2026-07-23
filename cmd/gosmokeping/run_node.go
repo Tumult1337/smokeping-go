@@ -87,7 +87,9 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	var slaveLister api.SlaveLister
 	if cfg.Cluster != nil && cfg.Cluster.Token != "" {
 		clusterRegistry := master.NewRegistry(log)
-		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token).Handler()
+		// Wired fully in a later task: health is nil until the mesh registry
+		// accessor is threaded through here.
+		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token, nil).Handler()
 		slaveLister = clusterRegistry
 		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
 		// Evict slaves that haven't checked in for 24 hours to prevent unbounded
@@ -132,7 +134,8 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 			if err != nil {
 				return nil, err
 			}
-			return scheduler.New(log, registry, fanout, master.LocalTargets(c)), nil
+			// health is nil until Task 6 wires the live mesh accessor here.
+			return scheduler.New(log, registry, fanout, master.LocalTargets(c, nil)), nil
 		},
 		OnReload: func(c *config.Config) {
 			if err := evaluator.Refresh(); err != nil {

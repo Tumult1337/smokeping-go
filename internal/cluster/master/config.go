@@ -5,6 +5,7 @@ import (
 
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
 // BuildClusterConfig returns the scrubbed target+probe set the named slave
@@ -19,13 +20,18 @@ import (
 // Alerts are stripped unconditionally: they are evaluated master-side, and a
 // stale slave config must never carry alert references. The Slaves list is
 // also stripped so slaves cannot see their peers' assignments.
-func BuildClusterConfig(cfg *config.Config, slaveName string) cluster.ClusterConfigResp {
-	probes := make(map[string]cluster.ProbeDTO, len(cfg.Probes))
+//
+// The health group is the one thing that does ship to slaves: every node
+// probes every other node, so a slave needs its peers' addresses. It receives
+// the group minus itself — a node health-probing itself measures nothing and
+// would double-count in a quorum.
+func BuildClusterConfig(cfg *config.Config, slaveName string, health *slavehealth.Set) cluster.ClusterConfigResp {
+	probes := make(map[string]cluster.ProbeDTO, len(cfg.Probes)+1)
 	for k, p := range cfg.Probes {
 		probes[k] = cluster.ProbeDTO{Type: p.Type, Timeout: p.Timeout, Insecure: p.Insecure}
 	}
 
-	groups := make([]config.Group, 0, len(cfg.Targets))
+	groups := make([]config.Group, 0, len(cfg.Targets)+1)
 	for _, g := range cfg.Targets {
 		targets := make([]config.Target, 0, len(g.Targets))
 		for _, t := range g.Targets {
@@ -38,6 +44,17 @@ func BuildClusterConfig(cfg *config.Config, slaveName string) cluster.ClusterCon
 			continue
 		}
 		groups = append(groups, config.Group{Group: g.Group, Title: g.Title, Targets: targets})
+	}
+
+	if health != nil {
+		if hg := health.Probe(slaveName); len(hg) > 0 {
+			groups = append(groups, hg...)
+			// ProbeDef(0) takes the package default timeout. Passing the
+			// cycle interval here would be a category error: the interval is
+			// how often to probe (60s), not how long to wait for a reply.
+			hp := slavehealth.ProbeDef(0)
+			probes[slavehealth.ProbeName] = cluster.ProbeDTO{Type: hp.Type, Timeout: hp.Timeout}
+		}
 	}
 
 	return cluster.ClusterConfigResp{
@@ -76,15 +93,20 @@ func sanitizeTarget(t config.Target) config.Target {
 }
 
 // LocalTargets returns a copy of cfg with any target that has a non-empty
-// Slaves list removed. This is what the master's own scheduler sees: the
-// stored cfg remains authoritative for the UI and /cluster/config, but the
-// local probe loop skips anything that's been assigned elsewhere.
+// Slaves list removed, plus the synthetic health group appended. This is what
+// the master's own scheduler sees: the stored cfg remains authoritative for
+// the UI and /cluster/config, but the local probe loop skips anything that's
+// been assigned elsewhere and picks up every health peer.
 //
-// The returned *Config is a shallow copy: Probes, Alerts, Actions, and Cluster
-// alias the original maps. Treat it as read-only.
-func LocalTargets(cfg *config.Config) *config.Config {
+// The master is not itself a health peer, so it probes all of them.
+//
+// The returned *Config is a shallow copy in every respect except Probes, which
+// is cloned when a health probe has to be added — mutating the stored config's
+// probe map would leak the synthetic probe into the UI and into Validate.
+// Treat the result as read-only.
+func LocalTargets(cfg *config.Config, health *slavehealth.Set) *config.Config {
 	out := *cfg
-	groups := make([]config.Group, 0, len(cfg.Targets))
+	groups := make([]config.Group, 0, len(cfg.Targets)+1)
 	for _, g := range cfg.Targets {
 		targets := make([]config.Target, 0, len(g.Targets))
 		for _, t := range g.Targets {
@@ -97,6 +119,19 @@ func LocalTargets(cfg *config.Config) *config.Config {
 		}
 		groups = append(groups, config.Group{Group: g.Group, Title: g.Title, Targets: targets})
 	}
+
+	if health != nil {
+		if hg := health.Probe(""); len(hg) > 0 {
+			groups = append(groups, hg...)
+			probes := make(map[string]config.Probe, len(cfg.Probes)+1)
+			for k, v := range cfg.Probes {
+				probes[k] = v
+			}
+			probes[slavehealth.ProbeName] = slavehealth.ProbeDef(0)
+			out.Probes = probes
+		}
+	}
+
 	out.Targets = groups
 	return &out
 }
