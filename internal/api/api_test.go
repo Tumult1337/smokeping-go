@@ -869,6 +869,13 @@ func TestGetHopsRedactsHealthTarget(t *testing.T) {
 		if h.Index == 2 && h.IP != "" {
 			t.Fatalf("terminal hop IP not redacted: %+v", h)
 		}
+		// The intermediate hop must survive: /hops feeds the MTR path table,
+		// and this assertion is what distinguishes the endpoint's contract
+		// from /hops/timeline's blanket redaction. Without it the test would
+		// pass against a blanket-redact implementation.
+		if h.Index == 1 && h.IP != "203.0.113.1" {
+			t.Fatalf("intermediate hop redacted on /hops: %+v", h)
+		}
 	}
 }
 
@@ -957,15 +964,14 @@ func TestGetHopsTimelineKeepsOrdinaryTargetIntact(t *testing.T) {
 	}
 }
 
-// TestRedactTerminalHopPerTimestamp covers /hops/timeline, where
-// QueryHopsTimeline returns one row per (bucket_timestamp, source, ttl,
-// hop_addr) spanning a whole window rather than a single pinned timestamp.
-// A route change partway through the window shortens or lengthens the path,
-// so the terminal index for the same source differs bucket to bucket. Keying
-// the max by source alone (the /hops-only-correct behaviour) computes one
-// window-wide maximum and misses the terminal hop at every bucket whose path
-// length is shorter than the window's longest — leaking the slave's address
-// for those buckets straight into hopTimelineDTO.IP.
+// TestRedactTerminalHopPerTimestamp pins redactTerminalHops' (source,
+// timestamp) keying against a row set spanning two traces of different
+// lengths. No current caller produces such a set — /hops pins one timestamp
+// per source, and /hops/timeline uses redactAllHopAddresses instead — so this
+// guards the property, not a live code path: keying the max by source alone
+// computes one set-wide maximum and misses the terminal hop of every shorter
+// trace, leaking the slave's address for those rows. Any future caller handing
+// multi-timestamp rows to this function inherits the correct behaviour.
 func TestRedactTerminalHopPerTimestamp(t *testing.T) {
 	t1 := time.Unix(1_700_000_000, 0)
 	t2 := time.Unix(1_700_003_600, 0) // 1h later: route change adds a hop

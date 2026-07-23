@@ -197,7 +197,21 @@ Key points a reader can't derive from a single file:
   mismatch is refused a health entry, but unpinned slaves are accepted
   so the feature works zero-config. `cluster.health_hops` (default true)
   drops traceroute-hop collection for health targets at the probe, for
-  meshes where N slaves would otherwise write N×(N+1) hop streams.
+  meshes where N slaves would otherwise write N² hop streams (the master
+  probes all N, each slave probes the other N−1).
+
+  `cluster.health_alerts` names alerts stamped onto every synthesized
+  health target — the only way to alert on a slave going down, since a
+  user cannot write a `_cluster` target. The names ship nowhere near a
+  slave (`sanitizeTarget` strips them, health group included) and the
+  alert evaluator scrubs `Host`/`URL`/`Family`/`Cycle.Hops` off every
+  Event for a health target before dispatch, because action templates
+  render over the raw `Event` and would otherwise publish the address.
+
+  The master's own scheduler builds its probe registry from
+  `master.LocalTargets`' returned config, not from `cfg.Probes` — the
+  synthetic `_slave_health` probe exists only in that clone
+  (`localView` in `cmd/gosmokeping/run_node.go` keeps the two joined).
 
   The address never reaches the API: `slavehealth.Set` exposes `Probe()`
   (real hosts — scheduler and `BuildClusterConfig` only) and `Public()`

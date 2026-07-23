@@ -293,6 +293,17 @@ func healthSources(targetName, masterSource string, registered []string) []strin
 	return out
 }
 
+// sourcesFor returns the probe origins for any target ref, health or not.
+// Health targets need healthSources rather than effectiveSources: their
+// Slaves list is empty, so effectiveSources would claim a slave probes its
+// own health target — which it never does.
+func sourcesFor(t config.TargetRef, masterSource string, registered []string) []string {
+	if slavehealth.IsHealthGroup(t.Group) {
+		return healthSources(t.Target.Name, masterSource, registered)
+	}
+	return effectiveSources(t.Target, masterSource, registered)
+}
+
 // effectiveSources returns the probe origins that currently ping this target.
 // Unassigned targets (empty t.Slaves) are probed by the master plus every
 // registered slave. Assigned targets are probed only by the named slaves;
@@ -537,17 +548,21 @@ type hopTimelineDTO struct {
 // On a trace that never reached the slave the furthest hop is an intermediate,
 // so this over-redacts by one row. That is the fail-closed direction.
 //
-// Per-(source, timestamp): /hops pins a single timestamp per source (via
-// QueryLatestHops/QueryHopsAt), so keying by source alone was equivalent to
-// keying by (source, timestamp) there. /hops/timeline's QueryHopsTimeline
-// returns one row per (bucket timestamp, source, ttl, hop_addr) spanning the
-// whole window, and path length legitimately varies bucket to bucket (ECMP,
-// route flaps, added/removed hops). A source-only maximum picks one
-// window-wide terminal index and leaves every bucket whose path was shorter
-// unredacted — exposing the slave's address for those buckets. Keying by
-// (source, timestamp) computes the terminal index per row's own trace instead,
-// and collapses to exactly the old behaviour when every row shares one
-// timestamp.
+// Intermediate hops survive, which is the whole point: /hops feeds the MTR
+// path table, and a path with every address blanked tells an operator nothing.
+// /hops/timeline is the asymmetric case and does not call this — it blanks
+// every address via redactAllHopAddresses, because its bucketed rows make
+// "terminal" ambiguous within a bucket.
+//
+// The maximum is keyed by (source, timestamp), not source alone, even though
+// every current caller — QueryLatestHops and QueryHopsAt, the only two feeding
+// this — pins exactly one timestamp per source, which makes the two keyings
+// identical today. It stays per-timestamp because it is the keying that is
+// correct for *any* row set: over rows spanning multiple traces, path length
+// varies (ECMP, route flaps, added/removed hops), and a source-wide maximum
+// would leave the terminal hop of every shorter trace unredacted. A future
+// caller handing this multi-timestamp rows therefore cannot reintroduce that
+// leak.
 func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 	if len(hops) == 0 {
 		return hops
