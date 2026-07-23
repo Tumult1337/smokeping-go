@@ -53,11 +53,21 @@ func (o LifecycleOptions) fingerprint(cfg *config.Config) string {
 // Returns the Build error if the initial config cannot be built; otherwise
 // returns nil once ctx is done and the scheduler has exited.
 func RunLifecycle(ctx context.Context, opts LifecycleOptions) error {
+	// Fingerprint before Build, not after: both read live mesh state via
+	// ExtraFingerprint, and the API server starts accepting slave
+	// registrations before this runs. Fingerprinting second would let a
+	// slave register in between, recording a fingerprint for a mesh
+	// smaller than what Build actually picked up — the next wakeup would
+	// then see no change and skip the rebuild, silently never probing
+	// that slave. Fingerprinting first means a mid-window registration
+	// makes the running scheduler a superset of the recorded fingerprint,
+	// so the next wakeup sees a difference and rebuilds: extra work
+	// instead of a silent gap.
+	fp := opts.fingerprint(opts.Initial)
 	sched, err := opts.Build(opts.Initial)
 	if err != nil {
 		return err
 	}
-	fp := opts.fingerprint(opts.Initial)
 
 	run := func(sch *Scheduler) (context.CancelFunc, chan struct{}) {
 		sctx, cancel := context.WithCancel(ctx)
