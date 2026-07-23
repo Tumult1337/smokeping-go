@@ -31,3 +31,54 @@ func TestICMPProbeNoTraceSkipsHops(t *testing.T) {
 		t.Fatalf("got %d hops, want 0 with NoTrace set", len(res.Hops))
 	}
 }
+
+// TestICMPProbeNoTraceGatesTraceCall replaces the trace seam with a spy so
+// the gating logic is exercised directly, without depending on CAP_NET_RAW.
+// This is what actually discriminates a correct guard from a deleted or
+// inverted one: TestICMPProbeNoTraceSkipsHops alone cannot, because without
+// raw-socket privilege traceHops fails regardless of the flag and Hops ends
+// up empty either way.
+func TestICMPProbeNoTraceGatesTraceCall(t *testing.T) {
+	t.Run("NoTrace set: trace is not called", func(t *testing.T) {
+		p := NewICMP("icmp", time.Second, true)
+		p.spacing = time.Millisecond
+		called := false
+		p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+			called = true
+			return []Hop{{Index: 1, IP: "10.0.0.1"}}, true, nil
+		}
+
+		res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1)
+		if err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+		if called {
+			t.Fatal("trace func called despite NoTrace set")
+		}
+		if len(res.Hops) != 0 {
+			t.Fatalf("got %d hops, want 0 with NoTrace set", len(res.Hops))
+		}
+	})
+
+	t.Run("NoTrace clear: trace is called and its hops flow through", func(t *testing.T) {
+		p := NewICMP("icmp", time.Second, false)
+		p.spacing = time.Millisecond
+		called := false
+		want := []Hop{{Index: 1, IP: "10.0.0.1"}, {Index: 2, IP: "10.0.0.2"}}
+		p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+			called = true
+			return want, true, nil
+		}
+
+		res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1)
+		if err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+		if !called {
+			t.Fatal("trace func not called with NoTrace clear")
+		}
+		if len(res.Hops) != len(want) {
+			t.Fatalf("got %d hops, want %d from trace func", len(res.Hops), len(want))
+		}
+	})
+}

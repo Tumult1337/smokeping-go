@@ -15,7 +15,7 @@ func respWithHealthGroup() cluster.ClusterConfigResp {
 		Pings:    20,
 		Probes: map[string]cluster.ProbeDTO{
 			"icmp":                {Type: "icmp", Timeout: 2 * time.Second},
-			slavehealth.ProbeName: {Type: "icmp", Timeout: 2 * time.Second},
+			slavehealth.ProbeName: {Type: "icmp", Timeout: 2 * time.Second, NoTrace: true},
 		},
 		Targets: []config.Group{
 			{Group: "core", Targets: []config.Target{{Name: "gw", Probe: "icmp", Host: "192.0.2.1"}}},
@@ -60,6 +60,31 @@ func TestBuildShimDropsEmptyHealthGroup(t *testing.T) {
 		if g.Group == slavehealth.Group {
 			t.Fatalf("empty health group retained with %d targets", len(g.Targets))
 		}
+	}
+}
+
+// NoTrace must survive the wire round trip per-probe: the health probe has it
+// set (health targets never need hop rows) while an ordinary icmp probe
+// doesn't. If buildShim dropped the field, a slave would keep tracing on
+// health targets despite the master disabling it, silently reinflating the
+// storage cost the option exists to avoid.
+func TestBuildShimCopiesNoTrace(t *testing.T) {
+	shim := buildShim(respWithHealthGroup(), &config.Cluster{Name: "frankfurt-1"})
+
+	health, ok := shim.Probes[slavehealth.ProbeName]
+	if !ok {
+		t.Fatal("health probe missing from shim")
+	}
+	if !health.NoTrace {
+		t.Fatal("NoTrace not copied onto health probe: slave would keep tracing health targets")
+	}
+
+	icmp, ok := shim.Probes["icmp"]
+	if !ok {
+		t.Fatal("icmp probe missing from shim")
+	}
+	if icmp.NoTrace {
+		t.Fatal("NoTrace incorrectly set on ordinary icmp probe")
 	}
 }
 

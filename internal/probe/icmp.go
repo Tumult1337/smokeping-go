@@ -25,6 +25,11 @@ import (
 // target gets a hops view for free. The trace needs a raw socket — when that
 // fails (e.g., no CAP_NET_RAW), the probe still returns normal ping stats and
 // just leaves Hops unset.
+// traceFunc matches traceHops' signature. Injected on ICMP so tests can
+// substitute a spy and assert the noTrace gate actually calls (or doesn't
+// call) tracing — without needing CAP_NET_RAW.
+type traceFunc func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error)
+
 type ICMP struct {
 	name    string
 	timeout time.Duration
@@ -38,6 +43,9 @@ type ICMP struct {
 	traceMaxTTL  int
 	traceTimeout time.Duration
 	traceSpacing time.Duration
+	// trace is the injectable seam over traceHops; defaults to the real
+	// implementation and is only overridden in tests.
+	trace traceFunc
 }
 
 func NewICMP(name string, timeout time.Duration, noTrace bool) *ICMP {
@@ -53,6 +61,7 @@ func NewICMP(name string, timeout time.Duration, noTrace bool) *ICMP {
 		traceMaxTTL:  30,
 		traceTimeout: time.Second,
 		traceSpacing: 50 * time.Millisecond,
+		trace:        traceHops,
 	}
 }
 
@@ -115,7 +124,7 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	// away. This is a config choice, not a permission failure, so it bypasses
 	// errRawUnavailable handling rather than routing through it.
 	if !i.noTrace {
-		if hops, _, terr := traceHops(ctx, t.Host, t.Family, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing); terr == nil {
+		if hops, _, terr := i.trace(ctx, t.Host, t.Family, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing); terr == nil {
 			result.Hops = hops
 		} else if errors.Is(terr, errRawUnavailable) {
 			logRawUnavailableOnce(terr)
