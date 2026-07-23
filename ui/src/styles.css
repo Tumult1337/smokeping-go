@@ -866,13 +866,9 @@ body {
 .slave-section {
   margin-top: 4px;
 }
-.slave-section-label {
-  padding: 8px 12px 4px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-}
+/* .slave-section .group-title needs no override: it renders the same button
+   markup as real target-group headers, and group-title's own margin/padding
+   already gives it identical spacing and typography. */
 .slave-item {
   padding-left: 20px;
 }

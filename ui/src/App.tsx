@@ -21,6 +21,10 @@ type YScale = "lin" | "log";
 const CHART_STYLE_KEY = "gosmokeping.chartStyle";
 const Y_SCALE_KEY = "gosmokeping.yScale";
 const COLLAPSED_GROUPS_KEY = "gosmokeping.collapsedGroups";
+// Reserved collapse key for the By-slave section. It shares the persisted
+// collapsedGroups set with real target groups; the leading underscores keep it
+// clear of any group name a config could define.
+const BY_SLAVE_KEY = "__byslave";
 const OVERVIEW_WINDOW_KEY = "gosmokeping.overviewWindow";
 const OVERVIEW_SORT_KEY = "gosmokeping.overviewSort";
 
@@ -589,19 +593,31 @@ export default function App() {
         </button>
         {sources.length > 1 && (
           <div className="slave-section">
-            <div className="slave-section-label">By slave</div>
-            {sources.map((src) => (
-              <button
-                key={src}
-                type="button"
-                className={`target-item slave-item ${
-                  slaveView === src ? "active" : ""
-                }`}
-                onClick={() => pickSlave(src)}
-              >
-                {src}
-              </button>
-            ))}
+            <button
+              type="button"
+              className="group-title"
+              aria-expanded={!collapsedGroups.has(BY_SLAVE_KEY)}
+              onClick={() => toggleGroup(BY_SLAVE_KEY)}
+            >
+              <span className="group-caret">
+                {collapsedGroups.has(BY_SLAVE_KEY) ? "▸" : "▾"}
+              </span>
+              By slave
+              <span className="group-count">{sources.length}</span>
+            </button>
+            {!collapsedGroups.has(BY_SLAVE_KEY) &&
+              sources.map((src) => (
+                <button
+                  key={src}
+                  type="button"
+                  className={`target-item slave-item ${
+                    slaveView === src ? "active" : ""
+                  }`}
+                  onClick={() => pickSlave(src)}
+                >
+                  {src}
+                </button>
+              ))}
           </div>
         )}
         {searchResults !== null ? (
