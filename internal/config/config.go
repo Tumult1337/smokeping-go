@@ -87,7 +87,7 @@ type Probe struct {
 	Insecure bool `json:"insecure,omitempty"`
 	// NoTrace disables the opportunistic TTL walk the icmp probe runs after
 	// its echo batch. Set for slave-health probes when cluster.health_hops is
-	// false: on a wide mesh the N*(N+1) hop streams dominate storage, and
+	// false: on a wide mesh the N^2 hop streams dominate storage, and
 	// intermediate hops disclose a slave's transit provider. Ignored by
 	// probe types that never trace.
 	NoTrace bool `json:"no_trace,omitempty"`
@@ -148,9 +148,16 @@ type Cluster struct {
 	// rejected. Unpinned slaves are accepted as-is, so zero-config works.
 	SlaveAddrs map[string]string `json:"slave_addrs,omitempty"`
 
+	// HealthAlerts names the alerts attached to every synthesized slave
+	// health target (master-side). Health targets live outside the stored
+	// config — a user cannot write them, so this is the only way to attach
+	// an alert to one. Each name must exist in the top-level alerts block.
+	HealthAlerts []string `json:"health_alerts,omitempty"`
+
 	// HealthHops enables traceroute hop collection for health targets.
-	// Defaults to true; set false on large meshes where N*(N+1) hop
-	// streams dominate storage, or where intermediate-hop disclosure of a
+	// Defaults to true; set false on large meshes where N^2 hop streams
+	// (master probes N slaves, each slave probes the other N-1) dominate
+	// storage, or where intermediate-hop disclosure of a
 	// slave's transit provider is unwanted.
 	HealthHops *bool `json:"health_hops,omitempty"`
 
@@ -551,6 +558,11 @@ func (c *Config) Validate() error {
 	if c.Cluster != nil {
 		if _, err := c.Cluster.ParsedSlaveAddrs(); err != nil {
 			return err
+		}
+		for _, a := range c.Cluster.HealthAlerts {
+			if _, ok := c.Alerts[a]; !ok {
+				return fmt.Errorf("cluster.health_alerts: alert %q not defined", a)
+			}
 		}
 	}
 

@@ -10,7 +10,8 @@
       "frankfurt-1": "10.44.0.2",
       "tokyo-1": "10.44.0.7"
     },
-    "health_hops": true
+    "health_hops": true,
+    "health_alerts": ["slave-unreachable"]
   },
 
   "storage": {

@@ -328,3 +328,58 @@ func TestParsedSlaveAddrsRejectsUnreachable(t *testing.T) {
 		t.Fatal("ParsedSlaveAddrs() = nil error, want loopback to be rejected")
 	}
 }
+
+// TestValidateHealthAlertsMustExist covers the only validation that can catch
+// a typo in cluster.health_alerts: health targets are synthesized, so there is
+// no target-level alerts list to check the name against, and an unknown name
+// would otherwise be silently skipped by the evaluator — a slave outage that
+// never alerts, with nothing in the logs to say why.
+func TestValidateHealthAlertsMustExist(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Interval: time.Minute,
+			Pings:    10,
+			Storage:  Storage{ClickHouse: ClickHouse{Addr: "ch:9000"}},
+			Probes:   map[string]Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+			Alerts: map[string]Alert{
+				"slave-unreachable": {Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"}},
+			},
+			Actions: map[string]Action{"log": {Type: "log"}},
+		}
+	}
+
+	cfg := base()
+	cfg.Cluster = &Cluster{Token: "t", HealthAlerts: []string{"slave-unreachable"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("defined alert rejected: %v", err)
+	}
+
+	cfg = base()
+	cfg.Cluster = &Cluster{Token: "t", HealthAlerts: []string{"slave-unreachable", "typo-alert"}}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("undefined alert accepted")
+	}
+	if !strings.Contains(err.Error(), "typo-alert") {
+		t.Errorf("error must name the offending entry, got: %v", err)
+	}
+}
+
+// TestExampleConfigWiresHealthAlerts keeps the canonical reference honest:
+// slave-unreachable exists as an alert but a user cannot attach it to a
+// _cluster target, so cluster.health_alerts is the only thing that makes it
+// anything other than dead config.
+func TestExampleConfigWiresHealthAlerts(t *testing.T) {
+	cfg, err := Load("../../config.example.json")
+	if err != nil {
+		t.Fatalf("example config: %v", err)
+	}
+	if cfg.Cluster == nil || len(cfg.Cluster.HealthAlerts) == 0 {
+		t.Fatal("example config declares no cluster.health_alerts")
+	}
+	for _, name := range cfg.Cluster.HealthAlerts {
+		if _, ok := cfg.Alerts[name]; !ok {
+			t.Errorf("health alert %q is not defined", name)
+		}
+	}
+}

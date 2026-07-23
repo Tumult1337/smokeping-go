@@ -48,7 +48,17 @@ func BuildClusterConfig(cfg *config.Config, slaveName string, health *slavehealt
 
 	if health != nil {
 		if hg := health.Probe(slaveName); len(hg) > 0 {
-			groups = append(groups, hg...)
+			// The health group carries cluster.health_alerts, so it goes
+			// through the same stripping as every user target: alerts are
+			// evaluated master-side and a slave has no business holding
+			// their names.
+			for _, g := range hg {
+				targets := make([]config.Target, 0, len(g.Targets))
+				for _, t := range g.Targets {
+					targets = append(targets, sanitizeTarget(t))
+				}
+				groups = append(groups, config.Group{Group: g.Group, Title: g.Title, Targets: targets})
+			}
 			// ProbeDef(0, ...) takes the package default timeout. Passing the
 			// cycle interval here would be a category error: the interval is
 			// how often to probe (60s), not how long to wait for a reply.

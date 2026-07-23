@@ -17,6 +17,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 	"github.com/tumult/gosmokeping/internal/stats"
 )
 
@@ -697,3 +698,138 @@ func testCycle(source string, lossPct float64) scheduler.Cycle {
 
 func lossyCycle(source string, lossPct float64) scheduler.Cycle { return testCycle(source, lossPct) }
 func healthyCycle(source string) scheduler.Cycle                { return testCycle(source, 0) }
+
+// TestDispatchedHealthEventCarriesNoAddress guards the second egress the
+// Probe/Public split does not cover. Event.Target comes from the scheduler's
+// LocalTargets view, which holds the slave's real address, and
+// ActionDispatcher renders operator-supplied templates directly over the
+// Event — so an unscrubbed Event publishes the address to any webhook or exec
+// action the moment cluster.health_alerts makes health alerts reachable.
+func TestDispatchedHealthEventCarriesNoAddress(t *testing.T) {
+	const slaveAddr = "10.44.0.7"
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    10,
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+		Alerts: map[string]config.Alert{
+			"slave-unreachable": {Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"}},
+		},
+		Actions: map[string]config.Action{"log": {Type: "log"}},
+	}
+	store := config.NewStore("/dev/null", cfg)
+	disp := &fakeDispatcher{}
+	e, err := NewEvaluator(slog.New(slog.NewTextHandler(io.Discard, nil)), store, disp)
+	if err != nil {
+		t.Fatalf("new evaluator: %v", err)
+	}
+
+	// Exactly what master.LocalTargets hands the scheduler: the synthetic
+	// health target with its real address still attached.
+	ref := config.TargetRef{
+		Group: slavehealth.Group,
+		Target: config.Target{
+			Name:   "tokyo-1",
+			Title:  "tokyo-1",
+			Host:   slaveAddr,
+			Probe:  slavehealth.ProbeName,
+			Family: "v4",
+			Alerts: []string{"slave-unreachable"},
+		},
+	}
+	cy := scheduler.Cycle{
+		Target:    ref,
+		ProbeName: slavehealth.ProbeName,
+		Source:    "master",
+		Sent:      10,
+		LossCount: 10,
+		Hops: []probe.Hop{
+			{Index: 1, IP: "203.0.113.1"},
+			{Index: 2, IP: slaveAddr},
+		},
+	}
+	e.OnCycle(context.Background(), cy)
+
+	events := disp.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %+v", len(events), events)
+	}
+	ev := events[0]
+	for name, got := range map[string]string{
+		"Target.Target.Host":         ev.Target.Target.Host,
+		"Target.Target.URL":          ev.Target.Target.URL,
+		"Target.Target.Family":       ev.Target.Target.Family,
+		"Cycle.Target.Target.Host":   ev.Cycle.Target.Target.Host,
+		"Cycle.Target.Target.URL":    ev.Cycle.Target.Target.URL,
+		"Cycle.Target.Target.Family": ev.Cycle.Target.Target.Family,
+	} {
+		if got != "" {
+			t.Errorf("%s = %q on a dispatched health event, want empty", name, got)
+		}
+	}
+	if len(ev.Cycle.Hops) != 0 {
+		t.Errorf("Cycle.Hops survived on a health event: %+v", ev.Cycle.Hops)
+	}
+	// The identifying fields must survive — a scrubbed event still has to say
+	// which slave went down.
+	if ev.Target.ID() != slavehealth.Group+"/tokyo-1" {
+		t.Errorf("target identity lost: %q", ev.Target.ID())
+	}
+}
+
+// TestDispatchedOrdinaryEventKeepsAddress is the inverted-guard counterpart:
+// scrubbing must be scoped to the health group, or every alert template loses
+// {{.Target.Target.Host}} — the field operators most rely on.
+func TestDispatchedOrdinaryEventKeepsAddress(t *testing.T) {
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    10,
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+		Alerts: map[string]config.Alert{
+			"high-loss": {Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"}},
+		},
+		Actions: map[string]config.Action{"log": {Type: "log"}},
+		Targets: []config.Group{{
+			Group: "core",
+			Targets: []config.Target{
+				{Name: "gw", Host: "192.0.2.1", Probe: "icmp", Family: "v4", Alerts: []string{"high-loss"}},
+			},
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("invalid config: %v", err)
+	}
+	store := config.NewStore("/dev/null", cfg)
+	disp := &fakeDispatcher{}
+	e, err := NewEvaluator(slog.New(slog.NewTextHandler(io.Discard, nil)), store, disp)
+	if err != nil {
+		t.Fatalf("new evaluator: %v", err)
+	}
+
+	ref := cfg.AllTargets()[0]
+	e.OnCycle(context.Background(), scheduler.Cycle{
+		Target:    ref,
+		ProbeName: "icmp",
+		Source:    "master",
+		Sent:      10,
+		LossCount: 10,
+		Hops:      []probe.Hop{{Index: 1, IP: "203.0.113.1"}},
+	})
+
+	events := disp.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %+v", len(events), events)
+	}
+	ev := events[0]
+	if ev.Target.Target.Host != "192.0.2.1" || ev.Cycle.Target.Target.Host != "192.0.2.1" {
+		t.Errorf("ordinary target lost its host: %q / %q",
+			ev.Target.Target.Host, ev.Cycle.Target.Target.Host)
+	}
+	if ev.Target.Target.Family != "v4" {
+		t.Errorf("ordinary target lost its family: %q", ev.Target.Target.Family)
+	}
+	if len(ev.Cycle.Hops) != 1 {
+		t.Errorf("ordinary target lost its hops: %+v", ev.Cycle.Hops)
+	}
+}

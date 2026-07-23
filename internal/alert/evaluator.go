@@ -9,6 +9,7 @@ import (
 
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
 // State tracks where a (target, alert) pair is in its lifecycle.
@@ -300,8 +301,34 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
 			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
 			"firing", ev.Firing, "live", ev.Live)
-		e.dispatcher.Dispatch(ctx, ev)
+		e.dispatcher.Dispatch(ctx, scrubHealthAddresses(ev))
 	}
+}
+
+// scrubHealthAddresses blanks every address-bearing field of an Event for a
+// slave-health target, mirroring what slavehealth.Set.Public() strips.
+//
+// The Probe/Public split keeps addresses out of the API, but alert dispatch is
+// a second egress: Event carries the scheduler's TargetRef — built from
+// LocalTargets, which holds real addresses — and ActionDispatcher renders
+// operator-supplied templates directly over it, so a webhook or exec template
+// referencing {{.Target.Target.Host}} or {{range .Cycle.Hops}} would publish
+// the slave's address off-box. Scrubbing here covers every dispatcher, present
+// and future, because it happens before the Event leaves the evaluator.
+//
+// Cycle.Hops is dropped wholesale rather than per-field: the terminal hop is
+// the slave itself and intermediate hops disclose its transit path, and an
+// alert template has no legitimate use for either. Fail closed.
+func scrubHealthAddresses(ev Event) Event {
+	if !slavehealth.IsHealthGroup(ev.Target.Group) {
+		return ev
+	}
+	ev.Target.Target.Host = ""
+	ev.Target.Target.URL = ""
+	ev.Target.Target.Family = ""
+	ev.Cycle.Target = ev.Target
+	ev.Cycle.Hops = nil
+	return ev
 }
 
 // tally counts firing and live sources, evicting any that have gone stale.

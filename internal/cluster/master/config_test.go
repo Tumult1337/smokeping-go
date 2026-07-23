@@ -135,7 +135,7 @@ func healthSet(t *testing.T) *slavehealth.Set {
 	return slavehealth.NewSet([]slavehealth.Peer{
 		{Name: "frankfurt-1", Addr: netip.MustParseAddr("10.44.0.2")},
 		{Name: "tokyo-1", Addr: netip.MustParseAddr("10.44.0.7")},
-	})
+	}, nil)
 }
 
 func findGroup(groups []config.Group, name string) (config.Group, bool) {
@@ -182,7 +182,7 @@ func TestBuildClusterConfigShipsHealthProbe(t *testing.T) {
 func TestBuildClusterConfigOmitsEmptyHealthGroup(t *testing.T) {
 	solo := slavehealth.NewSet([]slavehealth.Peer{
 		{Name: "frankfurt-1", Addr: netip.MustParseAddr("10.44.0.2")},
-	})
+	}, nil)
 	resp := BuildClusterConfig(baseConfig(), "frankfurt-1", solo)
 	if _, ok := findGroup(resp.Targets, slavehealth.Group); ok {
 		t.Fatal("a slave that is the only peer must not receive an empty health group")
@@ -235,5 +235,50 @@ func TestLocalTargetsNilHealthSetUnchanged(t *testing.T) {
 	}
 	if len(local.Targets) != len(cfg.Targets) {
 		t.Fatalf("got %d groups, want %d", len(local.Targets), len(cfg.Targets))
+	}
+}
+
+// Alerts are evaluated master-side, so cluster.health_alerts must not ship to
+// a slave any more than a user target's own alerts do. The health group is
+// appended after the sanitizing loop, so it needs its own coverage — nothing
+// else would catch it bypassing sanitizeTarget.
+func TestBuildClusterConfigStripsHealthAlerts(t *testing.T) {
+	alerted := slavehealth.NewSet([]slavehealth.Peer{
+		{Name: "frankfurt-1", Addr: netip.MustParseAddr("10.44.0.2")},
+		{Name: "tokyo-1", Addr: netip.MustParseAddr("10.44.0.7")},
+	}, []string{"slave-unreachable"})
+
+	resp := BuildClusterConfig(baseConfig(), "frankfurt-1", alerted)
+	g, ok := findGroup(resp.Targets, slavehealth.Group)
+	if !ok {
+		t.Fatal("health group missing from the slave's config")
+	}
+	for _, tgt := range g.Targets {
+		if len(tgt.Alerts) != 0 {
+			t.Fatalf("health target %q shipped alerts to a slave: %v", tgt.Name, tgt.Alerts)
+		}
+		// Sanitizing must not cost the slave the address it needs to probe.
+		if tgt.Host == "" {
+			t.Fatalf("health target %q lost its host", tgt.Name)
+		}
+	}
+}
+
+// The master's own view is the one place the alerts must survive — that is
+// what makes alert.Evaluator see a health cycle at all.
+func TestLocalTargetsKeepsHealthAlerts(t *testing.T) {
+	alerted := slavehealth.NewSet([]slavehealth.Peer{
+		{Name: "tokyo-1", Addr: netip.MustParseAddr("10.44.0.7")},
+	}, []string{"slave-unreachable"})
+
+	local := LocalTargets(baseConfig(), alerted)
+	g, ok := findGroup(local.Targets, slavehealth.Group)
+	if !ok {
+		t.Fatal("health group missing from the master's local view")
+	}
+	for _, tgt := range g.Targets {
+		if len(tgt.Alerts) != 1 || tgt.Alerts[0] != "slave-unreachable" {
+			t.Fatalf("health target %q alerts = %v, want [slave-unreachable]", tgt.Name, tgt.Alerts)
+		}
 	}
 }

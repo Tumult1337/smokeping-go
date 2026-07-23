@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
@@ -221,13 +220,6 @@ func (r *Registry) Peers() []slavehealth.Peer {
 	}
 	slices.SortFunc(out, func(a, b slavehealth.Peer) int { return cmp.Compare(a.Name, b.Name) })
 	return out
-}
-
-// PublicTargets satisfies api.HealthLister. It returns the address-stripped
-// view; the registry's real addresses are reachable only through Peers, which
-// the API is never given.
-func (r *Registry) PublicTargets() []config.TargetRef {
-	return slavehealth.NewSet(r.Peers()).Public()
 }
 
 // Names returns the current set of registered slave names, sorted for stable

@@ -51,6 +51,11 @@ type Peer struct {
 // rebuild; never mutate one in place.
 type Set struct {
 	peers []Peer
+	// alerts is cluster.health_alerts: the alert names stamped onto every
+	// synthesized target. A required NewSet argument rather than an optional
+	// builder step, so a caller cannot silently produce alert-less health
+	// targets — the exact defect that made quorum unreachable.
+	alerts []string
 }
 
 // NewSet copies peers so the caller's slice cannot mutate the snapshot, and
@@ -59,7 +64,7 @@ type Set struct {
 // what order the caller passes peers in. A correctness property this
 // fundamental must not depend on an unenforced contract in a different
 // package.
-func NewSet(peers []Peer) *Set {
+func NewSet(peers []Peer, alerts []string) *Set {
 	out := make([]Peer, len(peers))
 	copy(out, peers)
 	slices.SortFunc(out, func(a, b Peer) int {
@@ -68,7 +73,7 @@ func NewSet(peers []Peer) *Set {
 		}
 		return cmp.Compare(a.Addr.String(), b.Addr.String())
 	})
-	return &Set{peers: out}
+	return &Set{peers: out, alerts: slices.Clone(alerts)}
 }
 
 // IsHealthGroup reports whether a group name is the reserved health group.
@@ -106,6 +111,9 @@ func (s *Set) Probe(exclude string) []config.Group {
 			Title: p.Name,
 			Host:  p.Addr.String(),
 			Probe: ProbeName,
+			// Cloned per target so a consumer that rewrites a target's alert
+			// list cannot reach back into the snapshot shared by its peers.
+			Alerts: slices.Clone(s.alerts),
 			// Family is pinned to the address we already hold, so the probe
 			// never re-resolves and never picks the other family.
 			Family: familyOf(p.Addr),
@@ -137,6 +145,12 @@ func (s *Set) Public() []config.TargetRef {
 				Name:  p.Name,
 				Title: p.Name,
 				Probe: ProbeName,
+				// Alerts are exposed deliberately: they are operator-chosen
+				// names with no address content, the API's targetDTO already
+				// surfaces them for ordinary targets, and hiding them here
+				// would make a health target look unmonitored in the UI while
+				// it is in fact alerting.
+				Alerts: slices.Clone(s.alerts),
 				// Host, URL and Family are left zero. Family would disclose
 				// whether a slave is reachable over v4 or v6, which is a weak
 				// but unnecessary signal.

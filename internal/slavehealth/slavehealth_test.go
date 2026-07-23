@@ -18,7 +18,7 @@ func peers() []Peer {
 }
 
 func TestProbeCarriesRealHosts(t *testing.T) {
-	groups := NewSet(peers()).Probe("")
+	groups := NewSet(peers(), nil).Probe("")
 	if len(groups) != 1 {
 		t.Fatalf("got %d groups, want 1", len(groups))
 	}
@@ -44,7 +44,7 @@ func TestProbeCarriesRealHosts(t *testing.T) {
 // A node must never health-probe itself: the result is meaningless and it
 // would double-count in a quorum.
 func TestProbeExcludesSelf(t *testing.T) {
-	groups := NewSet(peers()).Probe("frankfurt-1")
+	groups := NewSet(peers(), nil).Probe("frankfurt-1")
 	if len(groups) != 1 {
 		t.Fatalf("got %d groups, want 1", len(groups))
 	}
@@ -62,13 +62,13 @@ func TestProbeExcludesSelf(t *testing.T) {
 // an empty group would render as a stray sidebar heading.
 func TestProbeExcludingOnlyPeerYieldsNoGroup(t *testing.T) {
 	one := []Peer{{Name: "solo", Addr: netip.MustParseAddr("10.44.0.2")}}
-	if groups := NewSet(one).Probe("solo"); len(groups) != 0 {
+	if groups := NewSet(one, nil).Probe("solo"); len(groups) != 0 {
 		t.Fatalf("got %d groups, want 0", len(groups))
 	}
 }
 
 func TestEmptySetYieldsNothing(t *testing.T) {
-	s := NewSet(nil)
+	s := NewSet(nil, nil)
 	if groups := s.Probe(""); len(groups) != 0 {
 		t.Fatalf("got %d groups, want 0", len(groups))
 	}
@@ -79,7 +79,7 @@ func TestEmptySetYieldsNothing(t *testing.T) {
 
 // The core guarantee: nothing reachable from Public() carries an address.
 func TestPublicNeverCarriesAHost(t *testing.T) {
-	s := NewSet(peers())
+	s := NewSet(peers(), nil)
 	for _, ref := range s.Public() {
 		if ref.Target.Host != "" {
 			t.Fatalf("Public() leaked host %q for %q", ref.Target.Host, ref.ID())
@@ -96,7 +96,7 @@ func TestPublicNeverCarriesAHost(t *testing.T) {
 // Aliasing guard: if Public() shared a backing array with Probe(), mutating
 // one would corrupt the other and an address could surface through the API.
 func TestPublicDoesNotAliasProbe(t *testing.T) {
-	s := NewSet(peers())
+	s := NewSet(peers(), nil)
 
 	groups := s.Probe("")
 	refs := s.Public()
@@ -123,7 +123,7 @@ func TestPublicDoesNotAliasProbe(t *testing.T) {
 // Calling Probe twice must yield independent slices — Task 5 hands one copy to
 // the local scheduler and another to each slave's config.
 func TestProbeReturnsIndependentCopies(t *testing.T) {
-	s := NewSet(peers())
+	s := NewSet(peers(), nil)
 	a := s.Probe("")
 	b := s.Probe("")
 	a[0].Targets[0].Host = "mutated.example"
@@ -133,20 +133,20 @@ func TestProbeReturnsIndependentCopies(t *testing.T) {
 }
 
 func TestFingerprintChangesWithMembership(t *testing.T) {
-	base := NewSet(peers()).Fingerprint()
+	base := NewSet(peers(), nil).Fingerprint()
 
-	if same := NewSet(peers()).Fingerprint(); same != base {
+	if same := NewSet(peers(), nil).Fingerprint(); same != base {
 		t.Fatal("fingerprint must be stable for an identical peer set")
 	}
 
-	fewer := NewSet(peers()[:2]).Fingerprint()
+	fewer := NewSet(peers()[:2], nil).Fingerprint()
 	if fewer == base {
 		t.Fatal("removing a peer must change the fingerprint")
 	}
 
 	moved := peers()
 	moved[0].Addr = netip.MustParseAddr("10.44.0.99")
-	if NewSet(moved).Fingerprint() == base {
+	if NewSet(moved, nil).Fingerprint() == base {
 		t.Fatal("changing a peer address must change the fingerprint")
 	}
 }
@@ -158,10 +158,10 @@ func TestFingerprintResistsSeparatorInjection(t *testing.T) {
 	a := NewSet([]Peer{
 		{Name: "a", Addr: netip.MustParseAddr("10.0.0.1")},
 		{Name: "b", Addr: netip.MustParseAddr("10.0.0.2")},
-	}).Fingerprint()
+	}, nil).Fingerprint()
 	b := NewSet([]Peer{
 		{Name: "a\x1f10.0.0.1\x1eb", Addr: netip.MustParseAddr("10.0.0.2")},
-	}).Fingerprint()
+	}, nil).Fingerprint()
 	if a == b {
 		t.Fatal("separator injection produced a colliding fingerprint")
 	}
@@ -173,8 +173,8 @@ func TestFingerprintIsOrderInvariant(t *testing.T) {
 	forward := peers()
 	reversed := []Peer{forward[2], forward[0], forward[1]}
 
-	a := NewSet(forward).Fingerprint()
-	b := NewSet(reversed).Fingerprint()
+	a := NewSet(forward, nil).Fingerprint()
+	b := NewSet(reversed, nil).Fingerprint()
 	if a != b {
 		t.Fatalf("fingerprint depends on peer order: forward %q, reversed %q", a, b)
 	}
@@ -187,7 +187,7 @@ func TestInvalidAddrPeerExcludedFromBothViews(t *testing.T) {
 	set := NewSet([]Peer{
 		{Name: "good", Addr: netip.MustParseAddr("10.44.0.2")},
 		{Name: "bad", Addr: netip.Addr{}},
-	})
+	}, nil)
 
 	groups := set.Probe("")
 	if len(groups) != 1 || len(groups[0].Targets) != 1 {
@@ -289,5 +289,56 @@ func TestNilSetIsSafe(t *testing.T) {
 	}
 	if got := s.Public(); len(got) != 0 {
 		t.Fatalf("got %d refs, want 0", len(got))
+	}
+}
+
+// Health targets are synthesized, so cluster.health_alerts is the only way an
+// alert can ever be attached to one. Without the stamp, alert.Evaluator's
+// `len(alerts) == 0` early return drops every health cycle and a slave going
+// down can never fire — which also makes quorum's headline use case dead.
+func TestProbeStampsHealthAlerts(t *testing.T) {
+	s := NewSet(peers(), []string{"slave-unreachable"})
+	groups := s.Probe("")
+	if len(groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(groups))
+	}
+	for _, tgt := range groups[0].Targets {
+		if len(tgt.Alerts) != 1 || tgt.Alerts[0] != "slave-unreachable" {
+			t.Fatalf("target %q alerts = %v, want [slave-unreachable]", tgt.Name, tgt.Alerts)
+		}
+	}
+}
+
+// Public exposes alert names deliberately (see Public's comment): they are
+// operator-chosen labels with no address content, and targetDTO surfaces them
+// for ordinary targets.
+func TestPublicExposesHealthAlerts(t *testing.T) {
+	s := NewSet(peers(), []string{"slave-unreachable"})
+	refs := s.Public()
+	if len(refs) == 0 {
+		t.Fatal("no public refs")
+	}
+	for _, ref := range refs {
+		if len(ref.Target.Alerts) != 1 || ref.Target.Alerts[0] != "slave-unreachable" {
+			t.Fatalf("ref %q alerts = %v, want [slave-unreachable]", ref.ID(), ref.Target.Alerts)
+		}
+	}
+}
+
+// Per-target clones: a consumer rewriting one target's alert list must not
+// reach into the snapshot shared with its peers.
+func TestAlertsAreNotSharedAcrossTargets(t *testing.T) {
+	s := NewSet(peers(), []string{"slave-unreachable"})
+	groups := s.Probe("")
+	groups[0].Targets[0].Alerts[0] = "mutated"
+	for i, tgt := range groups[0].Targets[1:] {
+		if tgt.Alerts[0] != "slave-unreachable" {
+			t.Fatalf("target %d alerts corrupted: %v", i+1, tgt.Alerts)
+		}
+	}
+	for _, ref := range s.Public() {
+		if ref.Target.Alerts[0] != "slave-unreachable" {
+			t.Fatalf("Public() saw a mutated alert list: %v", ref.Target.Alerts)
+		}
 	}
 }
