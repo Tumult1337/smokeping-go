@@ -20,6 +20,22 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) int {
 	for _, t := range cfg.AllTargets() {
 		targets[t.ID()] = t.Target
 	}
+	// Health targets are synthesized at scheduler-build time and never stored
+	// in config, so AllTargets cannot see them — without this the mesh is
+	// one-directional: every peer-health cycle a slave pushes would resolve to
+	// nothing and be dropped, leaving the master the only observer and quorum
+	// permanently unreachable.
+	//
+	// Probe("") rather than Probe(slaveName): a slave never pushes a cycle for
+	// itself, so excluding self buys nothing, and the unfiltered set keeps
+	// resolution independent of who is posting.
+	if hs := s.healthSet(); hs != nil {
+		for _, g := range hs.Probe("") {
+			for _, t := range g.Targets {
+				targets[g.Group+"/"+t.Name] = t
+			}
+		}
+	}
 
 	// Use a detached context for sink delivery so a slave TCP disconnect
 	// mid-POST doesn't cancel cycles that are already being processed.

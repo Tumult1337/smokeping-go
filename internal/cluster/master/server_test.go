@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
 func TestValidSlaveName(t *testing.T) {
@@ -81,6 +83,50 @@ func TestHandleCyclesAcceptsValidName(t *testing.T) {
 	}
 	if !srv.registry.Has("edge-1") {
 		t.Error("valid slave not registered")
+	}
+}
+
+// captureSink records every cycle the master's fanout receives.
+type captureSink struct{ got []scheduler.Cycle }
+
+func (c *captureSink) OnCycle(_ context.Context, cy scheduler.Cycle) { c.got = append(c.got, cy) }
+
+// The health mesh is bidirectional: a slave probes its peers and pushes those
+// cycles back. Health targets never enter config.Store, so ingest resolution
+// must consult the health view or every peer-health cycle is silently dropped
+// and the master becomes the only observer — quorum then never sees a second
+// source.
+func TestIngestResolvesHealthTargets(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := config.NewStore("", &config.Config{})
+	sink := &captureSink{}
+	hs := slavehealth.NewSet([]slavehealth.Peer{
+		{Name: "frankfurt-1", Addr: netip.MustParseAddr("10.44.0.2")},
+		{Name: "tokyo-1", Addr: netip.MustParseAddr("10.44.0.7")},
+	}, nil)
+	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, "tok",
+		func() *slavehealth.Set { return hs })
+
+	body := `{"source":"frankfurt-1","cycles":[{"group":"` + slavehealth.Group +
+		`","name":"tokyo-1","probe":"` + slavehealth.ProbeName + `","sent":5,"loss_count":0}]}`
+	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("X-Slave-Name", "frankfurt-1")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /cycles: got %d, want 200", rec.Code)
+	}
+	if len(sink.got) != 1 {
+		t.Fatalf("sink saw %d cycles, want 1 — peer-health cycle was dropped", len(sink.got))
+	}
+	cy := sink.got[0]
+	if cy.Target.Group != slavehealth.Group || cy.Target.Target.Name != "tokyo-1" {
+		t.Errorf("resolved to %s/%s, want %s/tokyo-1", cy.Target.Group, cy.Target.Target.Name, slavehealth.Group)
+	}
+	if cy.Source != "frankfurt-1" {
+		t.Errorf("source = %q, want frankfurt-1", cy.Source)
 	}
 }
 
