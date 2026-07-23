@@ -1,0 +1,155 @@
+// Package slavehealth synthesizes the per-slave health targets every node in a
+// cluster probes.
+//
+// The package exists to enforce one invariant: a slave's address reaches the
+// scheduler and peer slaves, and nothing else. Two accessors over one snapshot
+// make that structural rather than a convention —
+//
+//	Probe()  real addresses; the scheduler and BuildClusterConfig only
+//	Public() addresses stripped; the API only
+//
+// so a handler that renders whatever it is given cannot leak an address, and a
+// reviewer checks the wiring rather than auditing every field access.
+package slavehealth
+
+import (
+	"net/netip"
+	"strings"
+	"time"
+
+	"github.com/tumult/gosmokeping/internal/config"
+)
+
+const (
+	// Group is the reserved group health targets live in. The leading
+	// underscore keeps it outside the user namespace; config validation
+	// rejects a user-defined group of the same name so a real target cannot
+	// shadow a health target and inherit its address-stripping behaviour.
+	Group = "_cluster"
+
+	// GroupTitle is the sidebar label for the group.
+	GroupTitle = "Slaves"
+
+	// ProbeName is the synthesized probe definition health targets use. It
+	// is injected into the probe registry at build time rather than required
+	// in the operator's config, so the mesh needs no probe setup.
+	ProbeName = "_slave_health"
+
+	// defaultTimeout applies when the caller has no interval-derived value.
+	defaultTimeout = 2 * time.Second
+)
+
+// Peer is one slave eligible for health probing.
+type Peer struct {
+	Name string
+	Addr netip.Addr
+}
+
+// Set is an immutable snapshot of the health peers. Build one per scheduler
+// rebuild; never mutate one in place.
+type Set struct {
+	peers []Peer
+}
+
+// NewSet copies peers so the caller's slice cannot mutate the snapshot.
+func NewSet(peers []Peer) *Set {
+	out := make([]Peer, len(peers))
+	copy(out, peers)
+	return &Set{peers: out}
+}
+
+// IsHealthGroup reports whether a group name is the reserved health group.
+func IsHealthGroup(group string) bool { return group == Group }
+
+// ProbeDef returns the synthesized probe definition. ICMP is deliberate: the
+// icmp probe already performs an opportunistic TTL walk after its echo batch,
+// so one probe yields both echo statistics and traceroute hops with no second
+// target. A non-positive timeout falls back to the package default.
+func ProbeDef(timeout time.Duration) config.Probe {
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	return config.Probe{Type: "icmp", Timeout: timeout}
+}
+
+// Probe returns the health group with real addresses, omitting the named peer.
+// Callers pass their own node name so a node never probes itself; the master
+// passes "" because it is not a peer.
+//
+// Returns nil rather than an empty group when nothing remains, so an empty
+// group never reaches the sidebar as a stray heading.
+func (s *Set) Probe(exclude string) []config.Group {
+	targets := make([]config.Target, 0, len(s.peers))
+	for _, p := range s.peers {
+		if p.Name == exclude || !p.Addr.IsValid() {
+			continue
+		}
+		targets = append(targets, config.Target{
+			Name:  p.Name,
+			Title: p.Name,
+			Host:  p.Addr.String(),
+			Probe: ProbeName,
+			// Family is pinned to the address we already hold, so the probe
+			// never re-resolves and never picks the other family.
+			Family: familyOf(p.Addr),
+		})
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	return []config.Group{{Group: Group, Title: GroupTitle, Targets: targets}}
+}
+
+// Public returns the health targets with every address-bearing field cleared.
+// This is the only view the API is wired to.
+func (s *Set) Public() []config.TargetRef {
+	out := make([]config.TargetRef, 0, len(s.peers))
+	for _, p := range s.peers {
+		out = append(out, config.TargetRef{
+			Group: Group,
+			Target: config.Target{
+				Name:  p.Name,
+				Title: p.Name,
+				Probe: ProbeName,
+				// Host, URL and Family are left zero. Family would disclose
+				// whether a slave is reachable over v4 or v6, which is a weak
+				// but unnecessary signal.
+			},
+		})
+	}
+	return out
+}
+
+// Fingerprint is a stable key over membership, appended to the scheduler's
+// config fingerprint so a mesh change triggers a rebuild. Health targets are
+// injected at build time and are absent from the stored config, so the config
+// fingerprint alone cannot see them.
+//
+// Field and record separators are escaped: the fingerprint drives a rebuild
+// decision, and a peer name containing a raw separator must not be able to
+// forge the fingerprint of a different membership set.
+func (s *Set) Fingerprint() string {
+	var b strings.Builder
+	for _, p := range s.peers {
+		b.WriteString(escapeSep(p.Name))
+		b.WriteByte(0x1f)
+		b.WriteString(p.Addr.String())
+		b.WriteByte(0x1e)
+	}
+	return b.String()
+}
+
+func escapeSep(s string) string {
+	if !strings.ContainsAny(s, "\x1e\x1f\\") {
+		return s
+	}
+	r := strings.NewReplacer("\\", `\\`, "\x1f", `\u`, "\x1e", `\r`)
+	return r.Replace(s)
+}
+
+func familyOf(addr netip.Addr) string {
+	if addr.Is4() {
+		return "v4"
+	}
+	return "v6"
+}

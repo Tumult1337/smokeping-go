@@ -1,0 +1,190 @@
+package slavehealth
+
+import (
+	"net/netip"
+	"strings"
+	"testing"
+)
+
+func peers() []Peer {
+	return []Peer{
+		{Name: "ashburn-1", Addr: netip.MustParseAddr("10.44.0.9")},
+		{Name: "frankfurt-1", Addr: netip.MustParseAddr("10.44.0.2")},
+		{Name: "tokyo-1", Addr: netip.MustParseAddr("2001:db8::7")},
+	}
+}
+
+func TestProbeCarriesRealHosts(t *testing.T) {
+	groups := NewSet(peers()).Probe("")
+	if len(groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(groups))
+	}
+	if groups[0].Group != Group {
+		t.Fatalf("got group %q, want %q", groups[0].Group, Group)
+	}
+	if groups[0].Title != GroupTitle {
+		t.Fatalf("got title %q, want %q", groups[0].Title, GroupTitle)
+	}
+	if len(groups[0].Targets) != 3 {
+		t.Fatalf("got %d targets, want 3", len(groups[0].Targets))
+	}
+	for _, tgt := range groups[0].Targets {
+		if tgt.Host == "" {
+			t.Fatalf("target %q has no host; Probe must carry real addresses", tgt.Name)
+		}
+		if tgt.Probe != ProbeName {
+			t.Fatalf("target %q uses probe %q, want %q", tgt.Name, tgt.Probe, ProbeName)
+		}
+	}
+}
+
+// A node must never health-probe itself: the result is meaningless and it
+// would double-count in a quorum.
+func TestProbeExcludesSelf(t *testing.T) {
+	groups := NewSet(peers()).Probe("frankfurt-1")
+	if len(groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(groups))
+	}
+	for _, tgt := range groups[0].Targets {
+		if tgt.Name == "frankfurt-1" {
+			t.Fatal("Probe(self) must exclude the caller")
+		}
+	}
+	if len(groups[0].Targets) != 2 {
+		t.Fatalf("got %d targets, want 2", len(groups[0].Targets))
+	}
+}
+
+// Excluding the only peer must yield no group at all, not an empty group —
+// an empty group would render as a stray sidebar heading.
+func TestProbeExcludingOnlyPeerYieldsNoGroup(t *testing.T) {
+	one := []Peer{{Name: "solo", Addr: netip.MustParseAddr("10.44.0.2")}}
+	if groups := NewSet(one).Probe("solo"); len(groups) != 0 {
+		t.Fatalf("got %d groups, want 0", len(groups))
+	}
+}
+
+func TestEmptySetYieldsNothing(t *testing.T) {
+	s := NewSet(nil)
+	if groups := s.Probe(""); len(groups) != 0 {
+		t.Fatalf("got %d groups, want 0", len(groups))
+	}
+	if refs := s.Public(); len(refs) != 0 {
+		t.Fatalf("got %d refs, want 0", len(refs))
+	}
+}
+
+// The core guarantee: nothing reachable from Public() carries an address.
+func TestPublicNeverCarriesAHost(t *testing.T) {
+	s := NewSet(peers())
+	for _, ref := range s.Public() {
+		if ref.Target.Host != "" {
+			t.Fatalf("Public() leaked host %q for %q", ref.Target.Host, ref.ID())
+		}
+		if ref.Target.URL != "" {
+			t.Fatalf("Public() leaked url %q for %q", ref.Target.URL, ref.ID())
+		}
+		if ref.Group != Group {
+			t.Fatalf("got group %q, want %q", ref.Group, Group)
+		}
+	}
+}
+
+// Aliasing guard: if Public() shared a backing array with Probe(), mutating
+// one would corrupt the other and an address could surface through the API.
+func TestPublicDoesNotAliasProbe(t *testing.T) {
+	s := NewSet(peers())
+
+	groups := s.Probe("")
+	refs := s.Public()
+
+	// Mutate the Probe view; Public must be unaffected.
+	groups[0].Targets[0].Host = "mutated.example"
+	for _, ref := range s.Public() {
+		if ref.Target.Host != "" {
+			t.Fatalf("mutating Probe() leaked into Public(): %q", ref.Target.Host)
+		}
+	}
+
+	// And the reverse: mutating Public must not reach Probe.
+	refs[0].Target.Name = "mutated"
+	for _, g := range s.Probe("") {
+		for _, tgt := range g.Targets {
+			if tgt.Name == "mutated" {
+				t.Fatal("mutating Public() leaked into Probe()")
+			}
+		}
+	}
+}
+
+// Calling Probe twice must yield independent slices — Task 5 hands one copy to
+// the local scheduler and another to each slave's config.
+func TestProbeReturnsIndependentCopies(t *testing.T) {
+	s := NewSet(peers())
+	a := s.Probe("")
+	b := s.Probe("")
+	a[0].Targets[0].Host = "mutated.example"
+	if b[0].Targets[0].Host == "mutated.example" {
+		t.Fatal("two Probe() calls share a backing array")
+	}
+}
+
+func TestFingerprintChangesWithMembership(t *testing.T) {
+	base := NewSet(peers()).Fingerprint()
+
+	if same := NewSet(peers()).Fingerprint(); same != base {
+		t.Fatal("fingerprint must be stable for an identical peer set")
+	}
+
+	fewer := NewSet(peers()[:2]).Fingerprint()
+	if fewer == base {
+		t.Fatal("removing a peer must change the fingerprint")
+	}
+
+	moved := peers()
+	moved[0].Addr = netip.MustParseAddr("10.44.0.99")
+	if NewSet(moved).Fingerprint() == base {
+		t.Fatal("changing a peer address must change the fingerprint")
+	}
+}
+
+// The fingerprint feeds a rebuild decision, so a name containing the field
+// separator must not be able to forge an identical fingerprint for a
+// different membership set.
+func TestFingerprintResistsSeparatorInjection(t *testing.T) {
+	a := NewSet([]Peer{
+		{Name: "a", Addr: netip.MustParseAddr("10.0.0.1")},
+		{Name: "b", Addr: netip.MustParseAddr("10.0.0.2")},
+	}).Fingerprint()
+	b := NewSet([]Peer{
+		{Name: "a\x1f10.0.0.1\x1eb", Addr: netip.MustParseAddr("10.0.0.2")},
+	}).Fingerprint()
+	if a == b {
+		t.Fatal("separator injection produced a colliding fingerprint")
+	}
+}
+
+func TestIsHealthGroup(t *testing.T) {
+	if !IsHealthGroup(Group) {
+		t.Fatalf("IsHealthGroup(%q) = false, want true", Group)
+	}
+	if IsHealthGroup("core") {
+		t.Fatal(`IsHealthGroup("core") = true, want false`)
+	}
+}
+
+func TestProbeDefIsICMP(t *testing.T) {
+	p := ProbeDef(0)
+	if p.Type != "icmp" {
+		t.Fatalf("got probe type %q, want icmp", p.Type)
+	}
+	if p.Timeout <= 0 {
+		t.Fatalf("got timeout %v, want a positive default", p.Timeout)
+	}
+}
+
+func TestGroupNameIsReserved(t *testing.T) {
+	if !strings.HasPrefix(Group, "_") {
+		t.Fatalf("group %q must start with _ to stay outside the user namespace", Group)
+	}
+}
