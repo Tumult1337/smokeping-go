@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -439,7 +441,12 @@ func TestQuorumAbsoluteAboveLiveCount(t *testing.T) {
 }
 
 // Per-source sustained counters must stay independent under quorum: a laggy
-// slave's hit streak must not advance the master's.
+// slave's hit streak must not advance the master's. The previous version of
+// this test alternated lossy/healthy per source, which resets on every
+// healthy cycle — a merged counter would also reset there and the test would
+// pass either way. This sequence never sends a healthy cycle, so a merged
+// counter (lossy, lossy, lossy = 3) and independent per-source counters
+// (master=2, tokyo-1=1) diverge, and only a real bug (merging) fires.
 func TestQuorumKeepsPerSourceSustainedIndependent(t *testing.T) {
 	ev, disp := newTestEvaluator(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
@@ -447,17 +454,186 @@ func TestQuorumKeepsPerSourceSustainedIndependent(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	// Two sources alternate bad cycles. Neither reaches 3 consecutive, so
-	// neither reaches StateFiring and the aggregate stays quiet.
-	for i := 0; i < 4; i++ {
-		ev.OnCycle(ctx, lossyCycle("master", 100))
-		ev.OnCycle(ctx, healthyCycle("master"))
-		ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
-		ev.OnCycle(ctx, healthyCycle("tokyo-1"))
-	}
+	ev.OnCycle(ctx, lossyCycle("master", 100))  // master: 1
+	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100)) // tokyo-1: 1
+	ev.OnCycle(ctx, lossyCycle("master", 100))  // master: 2 (still short of 3)
 
 	if got := len(disp.events()); got != 0 {
-		t.Fatalf("got %d events, want 0 (no source sustained 3 consecutive hits)", got)
+		t.Fatalf("got %d events, want 0 (master=2, tokyo-1=1 consecutive hits; merged would be 3)", got)
+	}
+}
+
+// An absolute quorum threshold met exactly (not just "never met") must
+// dispatch. Only the never-fires case was covered end to end before this.
+func TestQuorumAbsoluteDispatchesAtMin(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Min: 2},
+	})
+
+	ctx := context.Background()
+	ev.OnCycle(context.Background(), lossyCycle("master", 100))
+	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+
+	evs := disp.events()
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1", len(evs))
+	}
+	if evs[0].Next != StateFiring {
+		t.Fatalf("got next state %q, want %q", evs[0].Next, StateFiring)
+	}
+	if evs[0].Firing != 2 || evs[0].Live != 2 {
+		t.Fatalf("got %d/%d firing/live, want 2/2", evs[0].Firing, evs[0].Live)
+	}
+}
+
+// Finding 1: immediately after a restart, e.states is empty and only one
+// source has reported. Threshold(1) == 1, so an ungated quorum would treat
+// that lone source as a "majority" and dispatch FIRING, then dispatch OK the
+// instant a peer's first (healthy) cycle arrives — a fire-then-resolve flap
+// on every restart. Warm-up must suppress the FIRING dispatch until a second
+// source has reported.
+func TestQuorumWarmupSuppressesRestartFlap(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+
+	ctx := context.Background()
+	ev.OnCycle(ctx, lossyCycle("master", 100))
+	if got := len(disp.events()); got != 0 {
+		t.Fatalf("got %d events after a single source's first cycle, want 0 (warm-up should hold)", got)
+	}
+
+	ev.OnCycle(ctx, healthyCycle("tokyo-1"))
+	if got := len(disp.events()); got != 0 {
+		t.Fatalf("got %d events, want 0 (never fired, so must not resolve either — that's the flap)", got)
+	}
+}
+
+// The warm-up window keeps a genuinely single-source deployment working:
+// once the staleness window elapses since the key's first cycle, quorum
+// degrades to majority-of-1 rather than blocking forever.
+func TestQuorumWarmupWindowElapsesForSingleSourceDeployment(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+
+	ctx := context.Background()
+	base := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+
+	c := lossyCycle("master", 100)
+	c.Time = base
+	ev.OnCycle(ctx, c)
+	if got := len(disp.events()); got != 0 {
+		t.Fatalf("got %d events, want 0 (still inside the warm-up window)", got)
+	}
+
+	c2 := lossyCycle("master", 100)
+	c2.Time = base.Add(4 * time.Minute) // > 3x interval(1m) warm-up window
+	ev.OnCycle(ctx, c2)
+
+	evs := disp.events()
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1 (warm-up window elapsed; single source may fire)", len(evs))
+	}
+	if evs[0].Next != StateFiring {
+		t.Fatalf("got next state %q, want %q", evs[0].Next, StateFiring)
+	}
+}
+
+// Finding 2: e.agg must not survive an alert's Quorum.Enabled() flipping
+// across a config reload. Sources recovering while quorum is off (and
+// already reporting the resolve per-source) must not manufacture a stale
+// duplicate aggregate "resolve" the moment quorum is switched back on.
+func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	writeQuorumTestConfig(t, path, true)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+	disp := &recordingDispatcher{}
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, disp)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Quorum on: both sources go lossy, majority-of-2 fires.
+	ev.OnCycle(ctx, lossyCycle("master", 100))
+	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("setup: got %+v, want a single FIRING event", evs)
+	}
+	disp.reset()
+
+	// Turn quorum off and reload.
+	writeQuorumTestConfig(t, path, false)
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload (quorum off): %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh (quorum off): %v", err)
+	}
+
+	// Both sources recover under per-source dispatch — each gets its own
+	// resolve event, independent of the (now-inactive) aggregate.
+	ev.OnCycle(ctx, healthyCycle("master"))
+	ev.OnCycle(ctx, healthyCycle("tokyo-1"))
+	evs = disp.events()
+	if len(evs) != 2 {
+		t.Fatalf("got %d per-source resolve events, want 2: %+v", len(evs), evs)
+	}
+	disp.reset()
+
+	// Turn quorum back on and reload — nothing about the cycles has changed
+	// since the per-source resolves above.
+	writeQuorumTestConfig(t, path, true)
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload (quorum on): %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh (quorum on): %v", err)
+	}
+
+	// One more healthy cycle to force the aggregate to re-evaluate. Both
+	// sources are already OK, so a correct evaluator dispatches nothing.
+	ev.OnCycle(ctx, healthyCycle("master"))
+	if got := disp.events(); len(got) != 0 {
+		t.Fatalf("got %d events, want 0 (no phantom resolve from stale pre-toggle aggregate): %+v", len(got), got)
+	}
+}
+
+// writeQuorumTestConfig writes a config file with alert "quorum-test" on
+// target core/gw, matching the TargetRef built by testCycle so the alert
+// package's cycle helpers line up with a file-backed config.Store.
+func writeQuorumTestConfig(t *testing.T, path string, quorum bool) {
+	t.Helper()
+	alertBody := `"condition":"loss_pct > 50","sustained":1,"actions":["log"]`
+	if quorum {
+		alertBody += `,"quorum":"majority"`
+	}
+	raw := `{
+		"listen": ":8080",
+		"interval": "1m",
+		"pings": 20,
+		"storage": {"clickhouse": {"addr": "ch:9000"}},
+		"probes": {"icmp": {"type": "icmp", "timeout": "2s"}},
+		"targets": [{"group":"core","targets":[
+			{"name":"gw","host":"1.1.1.1","probe":"icmp","alerts":["quorum-test"]}
+		]}],
+		"alerts": {"quorum-test": {` + alertBody + `}},
+		"actions": {"log": {"type":"log"}}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 }
 

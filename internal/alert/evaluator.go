@@ -60,6 +60,30 @@ type alertState struct {
 	lastSeen time.Time
 }
 
+// aggWarmup tracks how much cross-source consensus a quorum aggregate has
+// accumulated since its key was first observed. It is kept separate from
+// tally's live/stale bookkeeping in bySource because tally deletes stale
+// sources outright — sourcesSeen must survive that deletion, otherwise a
+// slave that reported once and then died before a peer ever reported would
+// look identical to a slave that never reported at all, defeating the
+// "2 distinct sources" half of warm-up (see TestQuorumPrunesStaleSources).
+type aggWarmup struct {
+	firstSeen   time.Time
+	sourcesSeen map[string]struct{}
+}
+
+// ready reports whether a quorum aggregate has accumulated enough consensus
+// to trust a new FIRING transition. Guards against the majority-of-1 flap on
+// restart: with an empty e.states, the first source to report makes
+// Threshold(1) == 1, so a lone firing source looks like a "majority" until a
+// peer's first cycle arrives and immediately un-fires it. Two independently
+// reporting sources is real consensus; short of that, degrade to today's
+// single-observer behaviour once the staleness window has elapsed so a
+// genuinely single-source deployment still alerts.
+func (w *aggWarmup) ready(now time.Time, window time.Duration) bool {
+	return len(w.sourcesSeen) >= 2 || now.Sub(w.firstSeen) >= window
+}
+
 // Evaluator is a scheduler.Sink that evaluates each cycle against the alerts
 // configured on the target and emits state transitions to a Dispatcher.
 // State is kept in-memory per (target, alert, source); on restart all alerts
@@ -69,10 +93,15 @@ type Evaluator struct {
 	store      *config.Store
 	dispatcher Dispatcher
 	conds      map[string]Condition // alert name → parsed condition
+	// quorumEnabled snapshots each alert's Quorum.Enabled() as of the last
+	// refresh, so Refresh can detect an on/off flip across a config reload
+	// and drop the now-stale aggregate for that alert (see pruneStaleAggregates).
+	quorumEnabled map[string]bool
 
 	mu     sync.Mutex
 	states map[aggKey]map[string]*alertState // target+alert → source → per-source state
 	agg    map[aggKey]State                  // target+alert → last dispatched aggregate state (quorum alerts only)
+	warmup map[aggKey]*aggWarmup             // target+alert → warm-up bookkeeping (quorum alerts only)
 }
 
 func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) (*Evaluator, error) {
@@ -83,6 +112,7 @@ func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) 
 		conds:      make(map[string]Condition),
 		states:     make(map[aggKey]map[string]*alertState),
 		agg:        make(map[aggKey]State),
+		warmup:     make(map[aggKey]*aggWarmup),
 	}
 	if err := e.refreshConditions(); err != nil {
 		return nil, err
@@ -95,21 +125,59 @@ func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) 
 func (e *Evaluator) Refresh() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.refreshConditions()
+	oldEnabled := e.quorumEnabled
+	if err := e.refreshConditions(); err != nil {
+		return err
+	}
+	e.pruneStaleAggregates(oldEnabled)
+	return nil
 }
 
 func (e *Evaluator) refreshConditions() error {
 	cfg := e.store.Current()
 	conds := make(map[string]Condition, len(cfg.Alerts))
+	enabled := make(map[string]bool, len(cfg.Alerts))
 	for name, a := range cfg.Alerts {
 		c, err := ParseCondition(a.Condition)
 		if err != nil {
 			return fmt.Errorf("alert %q: %w", name, err)
 		}
 		conds[name] = c
+		enabled[name] = a.Quorum.Enabled()
 	}
 	e.conds = conds
+	e.quorumEnabled = enabled
 	return nil
+}
+
+// pruneStaleAggregates drops the aggregate + warm-up state for any alert
+// whose Quorum.Enabled() flipped across this reload (or that disappeared
+// from config entirely). Must be called with e.mu held.
+//
+// Without this, e.agg keeps whatever State it last dispatched under the old
+// mode. Toggling quorum off then back on would then compare a freshly
+// computed tally against that stale prevAgg and manufacture a phantom
+// transition — e.g. sources recover individually while quorum is off (and
+// are already reported per-source), then re-enabling quorum diffs the
+// now-OK tally against a leftover StateFiring and dispatches a duplicate,
+// stale "resolve" nobody asked for.
+//
+// Per-source states in e.states are deliberately left untouched: resetting
+// them to StateOK would be actively harmful, forcing a source that's still
+// genuinely firing back through Sustained before it could report firing
+// again. Per-source dispatch already recomputes prev-vs-next from that state
+// every cycle regardless of quorum mode, so a real recovery still dispatches
+// a correct resolve without any reset — only the cross-source aggregate
+// needs a clean slate.
+func (e *Evaluator) pruneStaleAggregates(oldEnabled map[string]bool) {
+	for key := range e.agg {
+		was, existed := oldEnabled[key.alert]
+		now, stillExists := e.quorumEnabled[key.alert]
+		if !existed || !stillExists || was != now {
+			delete(e.agg, key)
+			delete(e.warmup, key)
+		}
+	}
 }
 
 func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
@@ -183,7 +251,8 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			continue
 		}
 
-		firing, live := e.tally(bySource, cy.Time, quorumWindow(cfg.Interval))
+		window := quorumWindow(cfg.Interval)
+		firing, live := e.tally(bySource, cy.Time, window)
 		next := StateOK
 		if live > 0 && firing >= alertCfg.Quorum.Threshold(live) {
 			next = StateFiring
@@ -192,6 +261,21 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		if !seen {
 			prevAgg = StateOK
 		}
+
+		w, ok := e.warmup[key]
+		if !ok {
+			w = &aggWarmup{firstSeen: cy.Time, sourcesSeen: make(map[string]struct{}, 4)}
+			e.warmup[key] = w
+		}
+		w.sourcesSeen[cy.Source] = struct{}{}
+
+		// Only a *new* FIRING transition is gated — an already-firing
+		// aggregate staying firing, and any transition to OK, pass through
+		// untouched so a real resolve can never get stuck behind warm-up.
+		if next == StateFiring && prevAgg != StateFiring && !w.ready(cy.Time, window) {
+			next = prevAgg
+		}
+
 		if prevAgg != next {
 			e.agg[key] = next
 			toDispatch = append(toDispatch, Event{
