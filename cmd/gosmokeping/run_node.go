@@ -101,11 +101,17 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		}
 		clusterRegistry.SetPins(pins)
 
-		// healthSet is read on every scheduler build and on every /config
-		// request, so it is a closure over the live registry rather than a
-		// snapshot captured once.
+		// healthSet is read on every scheduler build, on every /config
+		// request and on every API target listing, so it is a closure over
+		// the live registry and the live config rather than a snapshot
+		// captured once — cluster.health_alerts must follow a SIGHUP the
+		// same way a target's own alerts do.
 		healthSet = func() *slavehealth.Set {
-			return slavehealth.NewSet(clusterRegistry.Peers())
+			var alerts []string
+			if cl := store.Current().Cluster; cl != nil {
+				alerts = cl.HealthAlerts
+			}
+			return slavehealth.NewSet(clusterRegistry.Peers(), alerts)
 		}
 
 		// Registry changes drive a scheduler rebuild through the same channel
@@ -121,7 +127,12 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 
 		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token, healthSet).Handler()
 		slaveLister = clusterRegistry
-		healthLister = clusterRegistry
+		// The API is handed the Public() view of the same snapshot the
+		// scheduler builds from, never the registry itself — Peers() carries
+		// real addresses and must not be reachable from a request handler.
+		healthLister = healthListerFunc(func() []config.TargetRef {
+			return healthSet().Public()
+		})
 		log.Info("cluster endpoints enabled", "source", cfg.Cluster.Source)
 		// Evict slaves that haven't checked in for 24 hours to prevent unbounded
 		// registry growth in environments with ephemeral or renamed slaves.
@@ -163,11 +174,11 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		Store:   store,
 		Signals: schedulerSignals,
 		Build: func(c *config.Config) (*scheduler.Scheduler, error) {
-			registry, err := probe.Build(c.Probes)
+			local, registry, err := localView(c, healthSet())
 			if err != nil {
 				return nil, err
 			}
-			return scheduler.New(log, registry, fanout, master.LocalTargets(c, healthSet())), nil
+			return scheduler.New(log, registry, fanout, local), nil
 		},
 		ExtraFingerprint: func() string { return healthSet().Fingerprint() },
 		OnReload: func(c *config.Config) {
@@ -193,3 +204,26 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	log.Info("gosmokeping shutting down")
 	return nil
 }
+
+// localView returns the master's own probe view and the probe registry built
+// from that same view.
+//
+// The two must be built together. LocalTargets injects the synthetic
+// _slave_health probe into a clone of the probe map, and config.Validate
+// rejects that name in user config, so a registry built from the stored
+// cfg.Probes can never resolve it — every health target would be dropped by
+// the scheduler with "probe not found for target" and the mesh would collect
+// nothing.
+func localView(c *config.Config, health *slavehealth.Set) (*config.Config, *probe.Registry, error) {
+	local := master.LocalTargets(c, health)
+	registry, err := probe.Build(local.Probes)
+	if err != nil {
+		return nil, nil, err
+	}
+	return local, registry, nil
+}
+
+// healthListerFunc adapts a closure to api.HealthLister.
+type healthListerFunc func() []config.TargetRef
+
+func (f healthListerFunc) PublicTargets() []config.TargetRef { return f() }
