@@ -57,7 +57,7 @@ func NewRunner(log *slog.Logger, local *config.Config, version string) *Runner {
 	return &Runner{
 		log:        log,
 		local:      local,
-		client:     NewClient(local.Cluster.MasterURL, local.Cluster.Token, local.Cluster.Name, version),
+		client:     NewClient(local.Cluster.MasterURL, local.Cluster.Token, local.Cluster.Name, version, local.Cluster.Advertise),
 		sink:       NewPushSink(log, 600),
 		pushEvery:  pushEvery,
 		pullEvery:  pullEvery,

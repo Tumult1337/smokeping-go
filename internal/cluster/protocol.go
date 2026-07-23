@@ -13,12 +13,21 @@ import (
 	"github.com/tumult/gosmokeping/internal/stats"
 )
 
+// HeaderAdvertise re-asserts a slave's health address on every request, so a
+// master restart re-learns the mesh from ordinary traffic instead of waiting
+// for the next /register.
+const HeaderAdvertise = "X-Slave-Advertise"
+
 // RegisterReq is posted by a slave on boot and repeated as a heartbeat. The
 // master records the last-seen time and the reported version so the UI can
 // surface slaves that have gone silent.
 type RegisterReq struct {
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
+
+	// Advertise is the IP peers should health-probe this slave at. Empty
+	// opts the slave out of the health mesh.
+	Advertise string `json:"advertise,omitempty"`
 }
 
 // RegisterResp is the ack returned from POST /cluster/register.
@@ -30,10 +39,10 @@ type RegisterResp struct {
 // needs to start probing. Storage/alerts/actions are deliberately excluded —
 // slaves never write storage or dispatch alerts.
 type ClusterConfigResp struct {
-	Interval time.Duration           `json:"interval"`
-	Pings    int                     `json:"pings"`
-	Probes   map[string]ProbeDTO     `json:"probes"`
-	Targets  []config.Group          `json:"targets"`
+	Interval time.Duration       `json:"interval"`
+	Pings    int                 `json:"pings"`
+	Probes   map[string]ProbeDTO `json:"probes"`
+	Targets  []config.Group      `json:"targets"`
 }
 
 // ProbeDTO mirrors config.Probe on the wire. Duplicated here so the cluster
@@ -58,17 +67,17 @@ type CycleBatch struct {
 // directly yields the same integer, which is stable and needs no decoding
 // on the master side.
 type CyclePayload struct {
-	Time        time.Time        `json:"time"`
-	Group       string           `json:"group"`
-	Name        string           `json:"name"`
-	ProbeName   string           `json:"probe"`
-	Source      string           `json:"source"`
-	RTTs        []time.Duration  `json:"rtts,omitempty"`
-	Sent        int              `json:"sent"`
-	LossCount   int              `json:"loss_count"`
-	Summary     stats.Summary    `json:"summary"`
-	Hops        []HopDTO         `json:"hops,omitempty"`
-	HTTPSamples []HTTPSampleDTO  `json:"http_samples,omitempty"`
+	Time        time.Time       `json:"time"`
+	Group       string          `json:"group"`
+	Name        string          `json:"name"`
+	ProbeName   string          `json:"probe"`
+	Source      string          `json:"source"`
+	RTTs        []time.Duration `json:"rtts,omitempty"`
+	Sent        int             `json:"sent"`
+	LossCount   int             `json:"loss_count"`
+	Summary     stats.Summary   `json:"summary"`
+	Hops        []HopDTO        `json:"hops,omitempty"`
+	HTTPSamples []HTTPSampleDTO `json:"http_samples,omitempty"`
 }
 
 // HopDTO mirrors probe.Hop. Kept separate from the domain type so adding a

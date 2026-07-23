@@ -117,6 +117,26 @@ type Cluster struct {
 	MasterURL string `json:"master_url,omitempty"`
 	Token     string `json:"token,omitempty"`
 	Name      string `json:"name,omitempty"`
+
+	// Advertise is the single IP address peers use to health-probe this
+	// slave. Explicit only — never auto-detected. A container on a bridge
+	// network sees only its internal address (172.17.0.2), and no range
+	// check can distinguish that from a legitimate WireGuard mesh address,
+	// so a detected value would be confidently wrong. Empty means this
+	// slave is excluded from the health mesh.
+	Advertise string `json:"advertise,omitempty"`
+
+	// SlaveAddrs optionally pins each slave to the one address it may
+	// advertise (master-side). A pinned slave claiming anything else is
+	// rejected. Unpinned slaves are accepted as-is, so zero-config works.
+	SlaveAddrs map[string]string `json:"slave_addrs,omitempty"`
+
+	// HealthHops enables traceroute hop collection for health targets.
+	// Defaults to true; set false on large meshes where N*(N+1) hop
+	// streams dominate storage, or where intermediate-hop disclosure of a
+	// slave's transit provider is unwanted.
+	HealthHops *bool `json:"health_hops,omitempty"`
+
 	Source    string `json:"source,omitempty"`
 	PushEvery string `json:"push_every,omitempty"`
 	// PullEvery controls how often a slave re-pulls its config from the

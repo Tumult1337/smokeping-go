@@ -46,15 +46,17 @@ type Client struct {
 	token     string
 	name      string
 	version   string
+	advertise string
 	http      *http.Client
 }
 
-func NewClient(masterURL, token, name, version string) *Client {
+func NewClient(masterURL, token, name, version, advertise string) *Client {
 	return &Client{
 		masterURL: strings.TrimRight(masterURL, "/"),
 		token:     token,
 		name:      name,
 		version:   version,
+		advertise: advertise,
 		http:      &http.Client{Timeout: 15 * time.Second},
 	}
 }
@@ -62,7 +64,7 @@ func NewClient(masterURL, token, name, version string) *Client {
 // Register posts a heartbeat to the master. Safe to call on boot and on any
 // cadence the runner likes — the master only records last-seen + version.
 func (c *Client) Register(ctx context.Context) error {
-	body := cluster.RegisterReq{Name: c.name, Version: c.version}
+	body := cluster.RegisterReq{Name: c.name, Version: c.version, Advertise: c.advertise}
 	_, _, err := c.do(ctx, http.MethodPost, "/api/v1/cluster/register", nil, body)
 	return err
 }
@@ -120,6 +122,9 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 		return 0, httpResult{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.advertise != "" {
+		req.Header.Set(cluster.HeaderAdvertise, c.advertise)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
