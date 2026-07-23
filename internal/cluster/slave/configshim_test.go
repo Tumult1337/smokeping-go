@@ -83,8 +83,15 @@ func TestBuildShimFilterIsScopedToHealthGroup(t *testing.T) {
 	resp := respWithHealthGroup()
 	shim := buildShim(resp, &config.Cluster{Name: "gw"})
 	for _, g := range shim.Targets {
-		if g.Group == "core" && len(g.Targets) != 1 {
-			t.Fatalf("ordinary target named like this slave was filtered: %+v", g)
+		if g.Group != "core" {
+			continue
 		}
+		// If the scoping guard is broken, the "gw" target gets filtered and
+		// the empty group is dropped. This assertion catches that regression.
+		if len(g.Targets) != 1 || g.Targets[0].Name != "gw" {
+			t.Fatalf("filter escaped to ordinary group: %+v", g)
+		}
+		return
 	}
+	t.Fatal("core group missing from shim")
 }
