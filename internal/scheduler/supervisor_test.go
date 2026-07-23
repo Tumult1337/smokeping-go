@@ -76,7 +76,12 @@ func TestFingerprintChangesOnTargetEdits(t *testing.T) {
 	}
 }
 
-func TestFingerprintIgnoresAlerts(t *testing.T) {
+// A target's alert *attachment* list (config.Target.Alerts) is baked into
+// the scheduler's config at Build time — same as probe/host/url — so editing
+// it must change the fingerprint, or attaching an alert and sending SIGHUP
+// would leave the scheduler running the pre-attachment shape while
+// /api/v1/targets already reports it attached.
+func TestFingerprintChangesOnAlertAttachment(t *testing.T) {
 	a := &config.Config{
 		Interval: time.Second,
 		Pings:    3,
@@ -91,8 +96,35 @@ func TestFingerprintIgnoresAlerts(t *testing.T) {
 	b.Targets = []config.Group{{Group: "g", Targets: []config.Target{
 		{Name: "a", Host: "1.1.1.1", Probe: "icmp", Alerts: []string{"x"}},
 	}}}
+	if Fingerprint(a) == Fingerprint(&b) {
+		t.Error("attaching an alert to a target must change fingerprint (baked into config.Target at Build time)")
+	}
+}
+
+// Alert *definitions* (cfg.Alerts — condition, sustained, actions, quorum)
+// are re-read from the live config store per cycle by the evaluator, not
+// baked into anything the scheduler builds, so editing one must NOT force a
+// scheduler rebuild.
+func TestFingerprintIgnoresAlertDefinitions(t *testing.T) {
+	a := &config.Config{
+		Interval: time.Second,
+		Pings:    3,
+		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+		Targets: []config.Group{{
+			Group: "g", Targets: []config.Target{
+				{Name: "a", Host: "1.1.1.1", Probe: "icmp", Alerts: []string{"x"}},
+			},
+		}},
+		Alerts: map[string]config.Alert{
+			"x": {Condition: "loss > 0", Sustained: 1, Actions: []string{"log"}},
+		},
+	}
+	b := *a
+	b.Alerts = map[string]config.Alert{
+		"x": {Condition: "loss > 50", Sustained: 5, Actions: []string{"webhook"}},
+	}
 	if Fingerprint(a) != Fingerprint(&b) {
-		t.Error("alert edits must not change fingerprint (re-read per cycle by the evaluator)")
+		t.Error("alert definition edits must not change fingerprint (re-read per cycle by the evaluator)")
 	}
 }
 

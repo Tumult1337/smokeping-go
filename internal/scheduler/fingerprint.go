@@ -13,10 +13,18 @@ import (
 // decision after a /cluster/config pull.
 //
 // Included: interval, pings, target shape (group + name + probe + host + url +
-// family + slave assignments), probe shape (name + type + timeout + insecure).
-// Deliberately excluded: alert definitions (re-read per cycle by the evaluator),
-// action URLs (re-read per dispatch), listen/cluster/storage blocks (not
-// scheduler-visible).
+// family + slave assignments + attached alert names), probe shape (name +
+// type + timeout + insecure). A target's alert *attachment* list is baked
+// into config.Target at Build time — same as its probe/host/url — so it must
+// be included or attaching an alert and sending SIGHUP would leave the
+// scheduler running the pre-attachment shape while /api/v1/targets already
+// reports it attached.
+//
+// Deliberately excluded: alert *definitions* (cfg.Alerts — condition,
+// sustained, actions, quorum), which the evaluator re-reads from the live
+// config store per cycle rather than from anything baked in at Build time,
+// so editing one doesn't need a rebuild. Also excluded: action URLs (re-read
+// per dispatch), listen/cluster/storage blocks (not scheduler-visible).
 //
 // Family is included because it changes how a host is resolved — a family
 // change must trigger a scheduler rebuild. Slaves is included because
@@ -63,6 +71,10 @@ func Fingerprint(cfg *config.Config) string {
 			out = append(out, '\x1f')
 			for _, s := range t.Slaves {
 				out = append(out, s...)
+				out = append(out, '\x1f')
+			}
+			for _, a := range t.Alerts {
+				out = append(out, a...)
 				out = append(out, '\x1f')
 			}
 			out = append(out, '\x1e')
