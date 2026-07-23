@@ -9,6 +9,8 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -169,6 +171,77 @@ type Alert struct {
 	Condition string   `json:"condition"`
 	Sustained int      `json:"sustained"`
 	Actions   []string `json:"actions"`
+	// Quorum optionally requires several probe sources to agree before this
+	// alert dispatches. Absent means each source dispatches independently.
+	//
+	// omitzero (not omitempty — Quorum is a struct, and encoding/json's
+	// omitempty never considers structs empty) keeps configs without quorum
+	// byte-identical to pre-quorum output; Quorum{} satisfies reflect's
+	// zero-value check so it's dropped before MarshalJSON ever runs.
+	Quorum Quorum `json:"quorum,omitzero"`
+}
+
+// Quorum gates alert dispatch on how many probe sources agree. Absent (the
+// zero value) preserves single-source behaviour: every source dispatches
+// independently.
+//
+// Accepts either "majority" or a positive integer on the wire.
+type Quorum struct {
+	// Majority requires strictly more than half the live sources.
+	Majority bool
+	// Min is an absolute minimum count of simultaneously-firing sources.
+	Min int
+}
+
+func (q Quorum) Enabled() bool { return q.Majority || q.Min > 0 }
+
+// Threshold returns how many sources must be firing simultaneously, given the
+// number currently reporting. A majority is strictly more than half, so 2 live
+// sources require both — 1-of-2 is a tie, not a majority.
+func (q Quorum) Threshold(live int) int {
+	if q.Majority {
+		return live/2 + 1
+	}
+	return q.Min
+}
+
+func (q Quorum) MarshalJSON() ([]byte, error) {
+	switch {
+	case q.Majority:
+		return []byte(`"majority"`), nil
+	case q.Min > 0:
+		return []byte(strconv.Itoa(q.Min)), nil
+	default:
+		return []byte(`null`), nil
+	}
+}
+
+func (q *Quorum) UnmarshalJSON(b []byte) error {
+	raw := strings.TrimSpace(string(b))
+	if raw == "null" {
+		*q = Quorum{}
+		return nil
+	}
+	if strings.HasPrefix(raw, `"`) {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return fmt.Errorf("quorum: %w", err)
+		}
+		if s != "majority" {
+			return fmt.Errorf(`quorum: %q is not valid: use "majority" or a positive integer`, s)
+		}
+		*q = Quorum{Majority: true}
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf(`quorum: %s is not valid: use "majority" or a positive integer: %w`, raw, err)
+	}
+	if n < 1 {
+		return fmt.Errorf("quorum: %d must be at least 1", n)
+	}
+	*q = Quorum{Min: n}
+	return nil
 }
 
 type Action struct {

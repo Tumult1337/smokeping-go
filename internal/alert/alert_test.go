@@ -33,10 +33,10 @@ func TestParseConditionOK(t *testing.T) {
 		op    Op
 		value float64
 	}{
-		"loss_pct > 5":       {"loss_pct", OpGT, 5},
-		"rtt_median > 50ms":  {"rtt_median", OpGT, 50},
-		"rtt_p95 >= 100":     {"rtt_p95", OpGE, 100},
-		"loss_pct != 0":      {"loss_pct", OpNE, 0},
+		"loss_pct > 5":      {"loss_pct", OpGT, 5},
+		"rtt_median > 50ms": {"rtt_median", OpGT, 50},
+		"rtt_p95 >= 100":    {"rtt_p95", OpGE, 100},
+		"loss_pct != 0":     {"loss_pct", OpNE, 0},
 	}
 	for in, want := range cases {
 		c, err := ParseCondition(in)
@@ -85,7 +85,7 @@ func TestEvaluatorLifecycle(t *testing.T) {
 	cfg := &config.Config{
 		Interval: time.Minute,
 		Pings:    10,
-		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Alerts: map[string]config.Alert{
 			"high-latency": {Condition: "rtt_median > 50ms", Sustained: 2, Actions: []string{"log"}},
@@ -145,7 +145,7 @@ func TestEvaluatorPerSourceState(t *testing.T) {
 	cfg := &config.Config{
 		Interval: time.Minute,
 		Pings:    10,
-		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Alerts: map[string]config.Alert{
 			"high-latency": {Condition: "rtt_median > 50ms", Sustained: 2, Actions: []string{"log"}},
@@ -231,7 +231,7 @@ func TestDispatcherDiscord(t *testing.T) {
 	cfg := &config.Config{
 		Interval: time.Minute,
 		Pings:    5,
-		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
 		Alerts:   map[string]config.Alert{"down": {Condition: "loss_pct > 0", Sustained: 1, Actions: []string{"discord"}}},
 		Actions:  map[string]config.Action{"discord": {Type: "discord", URL: srv.URL}},
@@ -307,3 +307,217 @@ func TestDispatcherDiscord(t *testing.T) {
 		t.Errorf("description should not contain MTR block when Hops is nil:\n%s", desc2)
 	}
 }
+
+// Without quorum, behaviour is exactly as before: each source dispatches on
+// its own transition.
+func TestNoQuorumDispatchesPerSource(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+
+	ev.OnCycle(context.Background(), lossyCycle("master", 100))
+	ev.OnCycle(context.Background(), lossyCycle("tokyo-1", 100))
+
+	if got := len(disp.events()); got != 2 {
+		t.Fatalf("got %d events, want 2 (one per source)", got)
+	}
+}
+
+// A single firing source out of three must not reach a majority.
+func TestQuorumSuppressesMinority(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+
+	ctx := context.Background()
+	ev.OnCycle(ctx, healthyCycle("master"))
+	ev.OnCycle(ctx, healthyCycle("tokyo-1"))
+	ev.OnCycle(ctx, lossyCycle("frankfurt-1", 100))
+
+	if got := len(disp.events()); got != 0 {
+		t.Fatalf("got %d events, want 0 (1 of 3 is not a majority)", got)
+	}
+}
+
+func TestQuorumDispatchesOnMajority(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+
+	ctx := context.Background()
+	ev.OnCycle(ctx, healthyCycle("master"))
+	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+	ev.OnCycle(ctx, lossyCycle("frankfurt-1", 100))
+
+	evs := disp.events()
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1 aggregate transition", len(evs))
+	}
+	if evs[0].Next != StateFiring {
+		t.Fatalf("got next state %q, want %q", evs[0].Next, StateFiring)
+	}
+	if evs[0].Firing != 2 || evs[0].Live != 3 {
+		t.Fatalf("got %d/%d firing/live, want 2/3", evs[0].Firing, evs[0].Live)
+	}
+}
+
+// The aggregate must resolve exactly once, not once per recovering source.
+func TestQuorumResolvesOnce(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+
+	ctx := context.Background()
+	ev.OnCycle(ctx, lossyCycle("master", 100))
+	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+	disp.reset()
+
+	ev.OnCycle(ctx, healthyCycle("master"))
+	ev.OnCycle(ctx, healthyCycle("tokyo-1"))
+
+	evs := disp.events()
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1 resolve", len(evs))
+	}
+	if evs[0].Next != StateOK {
+		t.Fatalf("got next state %q, want %q", evs[0].Next, StateOK)
+	}
+}
+
+// A dead slave must not hold the denominator up forever — otherwise one
+// silent source permanently suppresses a real alert.
+func TestQuorumPrunesStaleSources(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+
+	ctx := context.Background()
+	base := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+
+	// Three healthy sources, then two go silent.
+	for _, src := range []string{"master", "tokyo-1", "frankfurt-1"} {
+		c := healthyCycle(src)
+		c.Time = base
+		ev.OnCycle(ctx, c)
+	}
+	disp.reset()
+
+	// Well past the staleness window (3x interval), only master reports.
+	c := lossyCycle("master", 100)
+	c.Time = base.Add(time.Hour)
+	ev.OnCycle(ctx, c)
+
+	evs := disp.events()
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1 (stale sources pruned, master is the majority of 1)", len(evs))
+	}
+	if evs[0].Live != 1 {
+		t.Fatalf("got %d live sources, want 1", evs[0].Live)
+	}
+}
+
+// An absolute threshold higher than the live source count can never fire.
+// That is the operator's stated intent, not a bug — but it must not panic or
+// dispatch.
+func TestQuorumAbsoluteAboveLiveCount(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Min: 5},
+	})
+
+	ctx := context.Background()
+	ev.OnCycle(ctx, lossyCycle("master", 100))
+	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+
+	if got := len(disp.events()); got != 0 {
+		t.Fatalf("got %d events, want 0", got)
+	}
+}
+
+// Per-source sustained counters must stay independent under quorum: a laggy
+// slave's hit streak must not advance the master's.
+func TestQuorumKeepsPerSourceSustainedIndependent(t *testing.T) {
+	ev, disp := newTestEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+
+	ctx := context.Background()
+	// Two sources alternate bad cycles. Neither reaches 3 consecutive, so
+	// neither reaches StateFiring and the aggregate stays quiet.
+	for i := 0; i < 4; i++ {
+		ev.OnCycle(ctx, lossyCycle("master", 100))
+		ev.OnCycle(ctx, healthyCycle("master"))
+		ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+		ev.OnCycle(ctx, healthyCycle("tokyo-1"))
+	}
+
+	if got := len(disp.events()); got != 0 {
+		t.Fatalf("got %d events, want 0 (no source sustained 3 consecutive hits)", got)
+	}
+}
+
+type recordingDispatcher struct {
+	mu  sync.Mutex
+	evs []Event
+}
+
+func (d *recordingDispatcher) Dispatch(_ context.Context, e Event) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.evs = append(d.evs, e)
+}
+
+func (d *recordingDispatcher) events() []Event {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]Event, len(d.evs))
+	copy(out, d.evs)
+	return out
+}
+
+func (d *recordingDispatcher) reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.evs = nil
+}
+
+func newTestEvaluator(t *testing.T, a config.Alert) (*Evaluator, *recordingDispatcher) {
+	t.Helper()
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    20,
+		Alerts:   map[string]config.Alert{"quorum-test": a},
+		Actions:  map[string]config.Action{"log": {Type: "log"}},
+	}
+	store := config.NewStore("", cfg)
+	disp := &recordingDispatcher{}
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, disp)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	return ev, disp
+}
+
+// testCycle populates LossCount/Sent, the fields fieldGetter("loss_pct")
+// actually reads (see condition.go) — not a "loss" field, which doesn't
+// exist as a condition field.
+func testCycle(source string, lossPct float64) scheduler.Cycle {
+	return scheduler.Cycle{
+		Time:   time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC),
+		Source: source,
+		Target: config.TargetRef{
+			Group:  "core",
+			Target: config.Target{Name: "gw", Probe: "icmp", Alerts: []string{"quorum-test"}},
+		},
+		Sent:      20,
+		LossCount: int(lossPct / 100 * 20),
+	}
+}
+
+func lossyCycle(source string, lossPct float64) scheduler.Cycle { return testCycle(source, lossPct) }
+func healthyCycle(source string) scheduler.Cycle                { return testCycle(source, 0) }
