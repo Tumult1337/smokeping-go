@@ -83,6 +83,21 @@ deploy-slave:
 	@if [ ! -f .env ]; then \
 		echo ".env not found — copy .env.example and set CLUSTER_TOKEN (\$${CLUSTER_TOKEN} in config.slave.json gets substituted from here)"; exit 1; \
 	fi
+	@# Auto-fill the slave health-mesh address. Only fires when config.slave.json
+	@# references $${ADVERTISE_IP} and .env doesn't already set it, so a value you
+	@# put in .env yourself always wins and this never overwrites. The slave compose
+	@# uses host networking, so the default-route source IP is the address peers
+	@# reach this node on — exactly what cluster.advertise needs. Detection failing
+	@# (no default route) leaves it unset, cleanly opting the slave out of the mesh.
+	@if grep -qF '$${ADVERTISE_IP}' config.slave.json && ! grep -q '^ADVERTISE_IP=' .env; then \
+		ip=$$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($$i=="src") print $$(i+1)}'); \
+		if [ -n "$$ip" ]; then \
+			echo "ADVERTISE_IP=$$ip" >> .env; \
+			echo "health mesh: auto-filled ADVERTISE_IP=$$ip in .env (edit .env to override)"; \
+		else \
+			echo "health mesh: could not autodetect ADVERTISE_IP; set it in .env to join the mesh"; \
+		fi; \
+	fi
 	docker compose -f docker-compose.slave.yml build
 	docker compose -f docker-compose.slave.yml up -d
 	docker compose -f docker-compose.slave.yml ps
