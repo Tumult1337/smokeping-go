@@ -1,0 +1,123 @@
+# Self-contained local slave-health-mesh test harness.
+#
+# Stands up, on one host, a full cluster on a private bridge network with
+# static IPs: an ephemeral ClickHouse, a master, and two slaves. Because the
+# containers are bridge-networked (not host-networked like the production
+# compose), each slave has its own address and MUST set cluster.advertise
+# explicitly — which is exactly the code path the health mesh was built for.
+#
+# The master probes both slaves; each slave probes the other; so every health
+# target (_cluster/slave-a, _cluster/slave-b) has two independent observers,
+# enough to exercise the "majority" quorum on the slave-unreachable alert.
+#
+#   Run:     docker compose -f deploy/local-mesh/docker-compose.yml up --build
+#   UI:      http://localhost:8080
+#   Wipe:    docker compose -f deploy/local-mesh/docker-compose.yml down -v
+#
+# Everything here is throwaway: the ClickHouse volume and the dev token/
+# password below exist only for this harness. See README.md.
+
+# Only the master carries a build block, so the image is built exactly once;
+# the slaves reuse the same tag. Building the same context from three services
+# in parallel races the npm UI build into flaking.
+x-node: &node
+  image: gosmokeping:latest
+  restart: unless-stopped
+  # The image sets cap_net_raw+ep on the binary; cap_add puts NET_RAW in the
+  # container bounding set so the non-root user can actually use it for ICMP
+  # echo and the traceroute TTL-walk. ping_group_range additionally enables
+  # the unprivileged UDP-ping fast path the prober prefers.
+  cap_add:
+    - NET_RAW
+  sysctls:
+    - net.ipv4.ping_group_range=0 2147483647
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: mesh-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_PASSWORD: clickhouse-dev
+      # Let the default user run CREATE DATABASE / CREATE TABLE on first boot,
+      # which the gosmokeping bootstrap needs.
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    ports:
+      - "8123:8123"   # HTTP, for poking around: curl localhost:8123
+    networks:
+      mesh:
+        ipv4_address: 172.28.0.5
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--password", "clickhouse-dev", "--query", "SELECT 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  master:
+    <<: *node
+    build:
+      context: .
+    container_name: mesh-master
+    command: ["-config", "/opt/smokeping/config.json"]
+    environment:
+      CLUSTER_TOKEN: local-mesh-dev-token
+      CH_PASSWORD: clickhouse-dev
+    volumes:
+      - ./master.config.json:/opt/smokeping/config.json:ro
+    ports:
+      - "8080:8080"
+    networks:
+      mesh:
+        ipv4_address: 172.28.0.10
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  slave-a:
+    <<: *node
+    container_name: mesh-slave-a
+    command: ["--slave", "-config", "/opt/smokeping/config.json"]
+    environment:
+      CLUSTER_TOKEN: local-mesh-dev-token
+      SLAVE_NAME: slave-a
+      SLAVE_ADVERTISE: 172.28.0.11
+    volumes:
+      - ./slave.config.json:/opt/smokeping/config.json:ro
+    networks:
+      mesh:
+        ipv4_address: 172.28.0.11
+    depends_on:
+      - master
+
+  slave-b:
+    <<: *node
+    container_name: mesh-slave-b
+    command: ["--slave", "-config", "/opt/smokeping/config.json"]
+    environment:
+      CLUSTER_TOKEN: local-mesh-dev-token
+      SLAVE_NAME: slave-b
+      SLAVE_ADVERTISE: 172.28.0.12
+    volumes:
+      - ./slave.config.json:/opt/smokeping/config.json:ro
+    networks:
+      mesh:
+        ipv4_address: 172.28.0.12
+    depends_on:
+      - master
+
+networks:
+  mesh:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+          gateway: 172.28.0.1

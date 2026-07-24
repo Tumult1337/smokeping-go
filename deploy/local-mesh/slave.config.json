@@ -1,0 +1,11 @@
+{
+  "cluster": {
+    "master_url": "http://172.28.0.10:8080",
+    "insecure_master_url": true,
+    "token": "${CLUSTER_TOKEN}",
+    "name": "${SLAVE_NAME}",
+    "advertise": "${SLAVE_ADVERTISE}",
+    "push_every": "5s",
+    "pull_every": "15s"
+  }
+}

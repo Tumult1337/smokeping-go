@@ -1,0 +1,60 @@
+{
+  "listen": ":8080",
+  "interval": "10s",
+  "pings": 5,
+
+  "cluster": {
+    "token": "${CLUSTER_TOKEN}",
+    "source": "master",
+    "slave_addrs": {
+      "slave-a": "172.28.0.11",
+      "slave-b": "172.28.0.12"
+    },
+    "health_hops": true,
+    "health_alerts": ["slave-unreachable"]
+  },
+
+  "storage": {
+    "clickhouse": {
+      "addr": "clickhouse:9000",
+      "database": "gosmokeping",
+      "username": "default",
+      "password": "${CH_PASSWORD}",
+      "tls": false,
+      "cluster": "",
+      "retention": {
+        "cycle_days": 7,
+        "rtt_days": 2,
+        "hop_days": 2,
+        "http_days": 2
+      },
+      "batch": {
+        "max_rows": 500,
+        "max_interval": "1s"
+      }
+    }
+  },
+
+  "probes": {
+    "icmp": { "type": "icmp", "timeout": "3s" }
+  },
+
+  "targets": [
+    {
+      "group": "external",
+      "title": "External",
+      "targets": [
+        { "name": "cloudflare", "host": "1.1.1.1", "probe": "icmp", "alerts": ["high-loss"] }
+      ]
+    }
+  ],
+
+  "alerts": {
+    "high-loss":         { "condition": "loss_pct > 5",  "sustained": 3, "actions": ["log"] },
+    "slave-unreachable": { "condition": "loss_pct > 50", "sustained": 2, "quorum": "majority", "actions": ["log"] }
+  },
+
+  "actions": {
+    "log": { "type": "log" }
+  }
+}

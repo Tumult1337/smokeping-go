@@ -1,0 +1,2 @@
+# Host-built static binary the runtime image wraps (produced by build.sh).
+gosmokeping
