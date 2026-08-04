@@ -240,6 +240,16 @@ Key points a reader can't derive from a single file:
   and immediately resolve on partial data. Webhook/log templates get
   `{{.Firing}}` and `{{.Live}}` (both 0 for non-quorum alerts).
 
+  `Event.FiringSources` names the sources firing at dispatch time
+  (sorted; stale and unnamed sources excluded) and is populated on both
+  the quorum and per-source paths. The non-quorum path collects it
+  **read-only** via `firingSources` rather than reusing `tally`:
+  tally deletes stale entries, which on that path would drop a silent
+  source's `StateFiring` and swallow its eventual resolve. It reaches
+  operators as `sources` in the webhook payload, the Discord
+  `Sources (N)` field, and `ALERT_SOURCES` for `exec`; `source` /
+  `ALERT_SOURCE` still carry only the triggering cycle's source.
+
 ## Config
 
 `config.example.json` is the canonical reference. Env expansion happens on the

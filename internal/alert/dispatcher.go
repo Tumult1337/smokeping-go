@@ -21,9 +21,9 @@ import (
 // ActionDispatcher fans an Event out to every configured action referenced by
 // the alert. Webhook and exec failures are logged but don't block other actions.
 type ActionDispatcher struct {
-	log     *slog.Logger
-	store   *config.Store
-	client  *http.Client
+	log    *slog.Logger
+	store  *config.Store
+	client *http.Client
 }
 
 func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
@@ -71,9 +71,18 @@ func (d *ActionDispatcher) Dispatch(ctx context.Context, e Event) {
 }
 
 func (d *ActionDispatcher) webhook(ctx context.Context, a config.Action, body string, e Event) {
+	// source stays the cycle that drove the transition (unchanged for existing
+	// consumers); sources is every source firing at dispatch time, which under
+	// quorum is the set the decision was actually made on. Always an array so
+	// a consumer can index it without a null check.
+	sources := e.FiringSources
+	if sources == nil {
+		sources = []string{}
+	}
 	payload := map[string]any{
 		"target":  e.Target.ID(),
 		"source":  e.Cycle.Source,
+		"sources": sources,
 		"alert":   e.AlertName,
 		"state":   string(e.Next),
 		"prev":    string(e.Prev),
@@ -122,6 +131,7 @@ func (d *ActionDispatcher) exec(ctx context.Context, a config.Action, body strin
 		fmt.Sprintf("ALERT_NAME=%s", e.AlertName),
 		fmt.Sprintf("ALERT_STATE=%s", e.Next),
 		fmt.Sprintf("ALERT_SOURCE=%s", e.Cycle.Source),
+		fmt.Sprintf("ALERT_SOURCES=%s", strings.Join(e.FiringSources, ",")),
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		d.log.Warn("exec", "command", a.Command, "err", err, "output", string(out))
@@ -141,8 +151,8 @@ func (d *ActionDispatcher) discord(ctx context.Context, a config.Action, body st
 		{"name": "Loss", "value": lossField(e.Cycle.LossCount, e.Cycle.Sent), "inline": true},
 		{"name": "Median RTT", "value": rttField(e.Cycle.Summary.Median), "inline": true},
 	}
-	if e.Cycle.Source != "" {
-		fields = append(fields, map[string]any{"name": "Source", "value": e.Cycle.Source, "inline": true})
+	if name, value := sourcesField(e); value != "" {
+		fields = append(fields, map[string]any{"name": name, "value": value, "inline": true})
 	}
 
 	embed := map[string]any{
@@ -201,6 +211,40 @@ func discordDescription(tmpl, body string, e Event) string {
 		return s[:n]
 	}
 	return s
+}
+
+// sourcesField renders the Discord field naming who is firing: every source
+// under quorum, where the triggering cycle is only one of them. Falls back to
+// the triggering cycle's source when nothing is firing — a full resolve, where
+// the set is empty by construction. Returns an empty value when there is
+// no source to name at all (standalone node), so the caller drops the field.
+//
+// Discord caps a field value at 1024 chars; a large mesh can exceed that with
+// names alone, and an over-long field fails the whole embed with a 400, so the
+// list is truncated rather than sent whole.
+func sourcesField(e Event) (name, value string) {
+	if len(e.FiringSources) == 0 {
+		return "Source", e.Cycle.Source
+	}
+	if len(e.FiringSources) == 1 {
+		return "Source", e.FiringSources[0]
+	}
+	const maxValue = 1024
+	var buf strings.Builder
+	for i, src := range e.FiringSources {
+		sep := ""
+		if i > 0 {
+			sep = ", "
+		}
+		more := fmt.Sprintf(" +%d more", len(e.FiringSources)-i)
+		if buf.Len()+len(sep)+len(src)+len(more) > maxValue {
+			buf.WriteString(more)
+			break
+		}
+		buf.WriteString(sep)
+		buf.WriteString(src)
+	}
+	return fmt.Sprintf("Sources (%d)", len(e.FiringSources)), buf.String()
 }
 
 func discordColor(s State) int {

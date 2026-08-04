@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -37,6 +38,16 @@ type Event struct {
 	// and {{.Live}}.
 	Firing int
 	Live   int
+	// FiringSources names every non-stale source in StateFiring at dispatch
+	// time, sorted. Cycle.Source alone is just whichever source's cycle drove
+	// this transition, which under quorum understates the outage to one name;
+	// this is the full set. Populated for non-quorum alerts too, where it
+	// answers "who else is seeing this" for a per-source dispatch. On a resolve
+	// it is whoever is *still* firing — under quorum the aggregate clears as
+	// soon as it drops below threshold, so a minority can remain. Empty on a
+	// standalone node, whose cycles carry no source name. Available in
+	// templates as {{range .FiringSources}}.
+	FiringSources []string
 }
 
 // Dispatcher delivers alert events. Must be safe for concurrent use.
@@ -237,6 +248,8 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			st.state = StateOK
 		}
 
+		window := stalenessWindow(cfg.Interval)
+
 		if !alertCfg.Quorum.Enabled() {
 			if prev != st.state {
 				toDispatch = append(toDispatch, Event{
@@ -247,12 +260,16 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 					Prev:      prev,
 					Next:      st.state,
 					Cycle:     cy,
+					// Read-only: unlike the quorum path this must not prune
+					// stale sources. A per-source alert dispatches its own
+					// resolve from the state kept here, so evicting a source
+					// that went quiet while firing would drop that resolve.
+					FiringSources: firingSources(bySource, cy.Time, window),
 				})
 			}
 			continue
 		}
 
-		window := quorumWindow(cfg.Interval)
 		firing, live := e.tally(bySource, cy.Time, window)
 		next := StateOK
 		if live > 0 && firing >= alertCfg.Quorum.Threshold(live) {
@@ -289,6 +306,9 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 				Cycle:     cy,
 				Firing:    firing,
 				Live:      live,
+				// tally has already evicted the stale sources, so this sees
+				// exactly the set the quorum decision was made on.
+				FiringSources: firingSources(bySource, cy.Time, window),
 			})
 		}
 	}
@@ -356,11 +376,32 @@ func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window
 	return firing, live
 }
 
-// quorumWindow is how long a source's last cycle stays counted. Three
+// firingSources names the sources currently in StateFiring, sorted so the
+// dispatched Event is deterministic rather than map-iteration order. Stale
+// sources are skipped but — unlike tally — never deleted, so this is safe to
+// call on the non-quorum path where per-source state must survive a gap.
+//
+// A source with an empty name is a standalone node with no cluster config;
+// naming it "" in a webhook payload is noise, so it is omitted. Counting is
+// tally's job, which does include it — dropping it from the quorum
+// denominator would break single-node deployments.
+func firingSources(bySource map[string]*alertState, now time.Time, window time.Duration) []string {
+	var out []string
+	for src, st := range bySource {
+		if src == "" || st.state != StateFiring || now.Sub(st.lastSeen) > window {
+			continue
+		}
+		out = append(out, src)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// stalenessWindow is how long a source's last cycle stays counted. Three
 // intervals tolerates one missed cycle plus scheduling jitter, and is wide
 // enough that ordinary clock skew between master and slaves — the cycle
 // timestamps come from different hosts — cannot evict a live source.
-func quorumWindow(interval time.Duration) time.Duration {
+func stalenessWindow(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		interval = time.Minute
 	}

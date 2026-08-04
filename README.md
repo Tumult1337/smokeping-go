@@ -234,6 +234,16 @@ the master's counter for the same target.
 }
 ```
 
+**Which sources are firing.** Every action carries the full set of sources
+currently reporting the alert, not just the one whose cycle crossed the
+threshold: `sources` (JSON array) in the webhook payload, a `Sources (N)`
+field on the Discord embed, `ALERT_SOURCES` (comma-separated) for `exec`, and
+`{{range .FiringSources}}` in a template. `source` / `ALERT_SOURCE` still
+carry the triggering cycle's source alone, unchanged. On a resolve the set is
+whoever is *still* firing — under quorum the aggregate clears as soon as it
+drops below threshold, which can be while a minority of sources still sees
+loss.
+
 ## HTTP API
 
 | Method | Path | Purpose |
