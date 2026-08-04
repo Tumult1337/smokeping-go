@@ -517,7 +517,11 @@ export default function App() {
     setSelectedId(id);
     setSlaveView(null);
     setOverviewView(false);
-    setSelectedSource(source ?? null);
+    // Sticky source filter: an explicit source (slave-overview row click) wins,
+    // otherwise the current filter carries over to the new target. The
+    // targetSources effect below clears it if the new target isn't probed by
+    // that source, so this can't strand the chart on an empty filter.
+    setSelectedSource(source ?? selectedSource);
     setZoom(null);
     setPickedSec(null);
     setPickedSource(null);
