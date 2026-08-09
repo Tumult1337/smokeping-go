@@ -342,7 +342,11 @@ func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	step := pickStep(r.URL.Query().Get("step"), from, to)
+	step, ok := pickStep(r.URL.Query().Get("step"), from, to)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "step=raw is limited to windows the raw tier covers; narrow the range or drop step=raw")
+		return
+	}
 
 	if s.reader == nil {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
@@ -361,6 +365,11 @@ func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxRTTWindow bounds /rtts. It is deliberately tighter than the 7d the
+// sibling raw endpoints allow: those store one row per cycle or per request,
+// where probe_rtt stores one per ping.
+const maxRTTWindow = 24 * time.Hour
+
 func (s *Server) getRTTs(w http.ResponseWriter, r *http.Request) {
 	ref, ok := s.resolveTarget(w, r)
 	if !ok {
@@ -372,6 +381,14 @@ func (s *Server) getRTTs(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.reader == nil {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
+		return
+	}
+	// probe_rtt holds one row per ping, making this the densest response the
+	// API produces; without a cap an anonymous request scans the whole
+	// retention window. Nothing in the UI calls this endpoint — raw RTT only
+	// informs the smoke band at short zooms.
+	if to.Sub(from) > maxRTTWindow {
+		writeErr(w, http.StatusBadRequest, "rtts window limited to 24h")
 		return
 	}
 	points, err := s.reader.QueryRTTs(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
@@ -776,16 +793,23 @@ func parseRelativeDuration(s string) (time.Duration, error) {
 //
 //	?step=raw|1h|1d → forces a specific tier
 //	anything else   → derived from window width.
-func pickStep(override string, from, to time.Time) time.Duration {
+//
+// ok is false when the override is out of bounds for the window. Only raw can
+// be: 1h and 1d bucket harder than the ladder would, while raw returns one row
+// per cycle per source and is the one override that can outgrow its window.
+// Its bound is the ladder's own raw tier rather than a second copy of that
+// threshold, so widening the tier widens the override with it.
+func pickStep(override string, from, to time.Time) (step time.Duration, ok bool) {
+	derived := storage.PickCycleStep(to.Sub(from))
 	switch override {
 	case "raw":
-		return 0
+		return 0, derived == 0
 	case "1h":
-		return time.Hour
+		return time.Hour, true
 	case "1d":
-		return 24 * time.Hour
+		return 24 * time.Hour, true
 	}
-	return storage.PickCycleStep(to.Sub(from))
+	return derived, true
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

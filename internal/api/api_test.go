@@ -31,20 +31,32 @@ type stubReader struct {
 	// lastOverviewTargets records how many target refs were passed in, so a
 	// test can assert the handler scopes the query to configured targets.
 	lastOverviewTargets int
+	// lastStep captures the bucket width passed to the most recent cycle
+	// query, so a test can tell a raw query from a bucketed one.
+	lastStep time.Duration
+	// queries counts every reader call. A window-cap test asserts this stays
+	// zero on rejection: the guard has to fire before the expensive query,
+	// which a status check alone cannot distinguish from a query that ran and
+	// then errored.
+	queries int
 }
 
 func (s *stubReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.CyclePoint, error) {
 	s.lastSource = f.Source
+	s.lastStep = f.Step
+	s.queries++
 	return s.cycles, s.err
 }
 
 func (s *stubReader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.RTTPoint, error) {
 	s.lastSource = f.Source
+	s.queries++
 	return s.rtts, s.err
 }
 
 func (s *stubReader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HTTPPoint, error) {
 	s.lastSource = f.Source
+	s.queries++
 	return s.http, s.err
 }
 
@@ -60,6 +72,7 @@ func (s *stubReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at t
 
 func (s *stubReader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	s.lastSource = f.Source
+	s.queries++
 	return s.hops, s.err
 }
 
@@ -1077,5 +1090,85 @@ func TestRedactAllHopAddressesKeepsNoReplyEmpty(t *testing.T) {
 	got := redactAllHopAddresses(hops)
 	if got[0].IP != "" {
 		t.Fatalf("no-reply hop was sentinelized: got IP %q, want empty", got[0].IP)
+	}
+}
+
+// Window caps are the only thing bounding an unauthenticated request's
+// ClickHouse scan, so every case asserts the reader was never reached: a 400
+// produced after the query ran would leave the amplification intact.
+func TestReadEndpointWindowCaps(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want int
+	}{
+		{"rtts at the cap", "/api/v1/targets/core/gw/rtts?from=-24h", http.StatusOK},
+		{"rtts past the cap", "/api/v1/targets/core/gw/rtts?from=-25h", http.StatusBadRequest},
+		{"rtts far past the cap", "/api/v1/targets/core/gw/rtts?from=-3000d", http.StatusBadRequest},
+		{"http at the cap", "/api/v1/targets/core/gw/http?from=-7d", http.StatusOK},
+		{"http past the cap", "/api/v1/targets/core/gw/http?from=-8d", http.StatusBadRequest},
+		{"hops timeline at the cap", "/api/v1/targets/core/gw/hops/timeline?from=-7d", http.StatusOK},
+		{"hops timeline past the cap", "/api/v1/targets/core/gw/hops/timeline?from=-8d", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &stubReader{}
+			code, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, tc.path)
+			if code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", code, tc.want, body)
+			}
+			wantQueries := 1
+			if tc.want != http.StatusOK {
+				wantQueries = 0
+			}
+			if r.queries != wantQueries {
+				t.Fatalf("reader calls = %d, want %d — the guard must reject before querying", r.queries, wantQueries)
+			}
+		})
+	}
+}
+
+// The ?step=raw override bypasses the tier ladder, so it is bounded by the
+// ladder's own raw tier rather than a second copy of that threshold. Asserting
+// the step the reader received keeps a guard that silently downgrades raw to
+// bucketed from passing as a fix.
+func TestGetCyclesRawStepCap(t *testing.T) {
+	rawTier := 2 * time.Hour
+	if storage.PickCycleStep(rawTier) != 0 {
+		t.Fatalf("ladder no longer serves raw at %s; update this test's boundary", rawTier)
+	}
+	cases := []struct {
+		name     string
+		path     string
+		want     int
+		wantStep time.Duration
+	}{
+		{"raw inside the ladder's raw tier", "/api/v1/targets/core/gw/cycles?from=-2h&step=raw", http.StatusOK, 0},
+		{"raw past the raw tier", "/api/v1/targets/core/gw/cycles?from=-3h&step=raw", http.StatusBadRequest, 0},
+		{"raw far past the raw tier", "/api/v1/targets/core/gw/cycles?from=-3000d&step=raw", http.StatusBadRequest, 0},
+		{"bucketed wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-30d", http.StatusOK, time.Hour},
+		{"1h override on a wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-30d&step=1h", http.StatusOK, time.Hour},
+		{"1d override on a wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-3000d&step=1d", http.StatusOK, 24 * time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &stubReader{}
+			code, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, tc.path)
+			if code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", code, tc.want, body)
+			}
+			if tc.want != http.StatusOK {
+				if r.queries != 0 {
+					t.Fatalf("reader calls = %d, want 0 — the guard must reject before querying", r.queries)
+				}
+				return
+			}
+			if r.queries != 1 {
+				t.Fatalf("reader calls = %d, want 1", r.queries)
+			}
+			if r.lastStep != tc.wantStep {
+				t.Fatalf("step = %s, want %s", r.lastStep, tc.wantStep)
+			}
+		})
 	}
 }

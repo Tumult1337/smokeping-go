@@ -65,7 +65,20 @@ Key points a reader can't derive from a single file:
   and `storage.PickHopStep` (in `internal/storage/backend.go`) are the
   single decision points, called from the API layer. Tier ladders:
   - cycles: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h, >180d 1d
-  - hops:   ≤2h raw, ≤24h 5m, >24h 15m (API caps timeline at 7d)
+  - hops:   ≤2h raw, ≤24h 5m, >24h 15m
+
+  **Window caps.** The binary ships no auth, so on every endpoint that
+  returns unbucketed rows the window cap is the only bound on an
+  anonymous request's scan: `/rtts` 24h (`api.maxRTTWindow`), `/http`
+  and `/hops/timeline` 7d, and `?step=raw` on `/cycles` bounded by
+  `storage.PickCycleStep(span) == 0` rather than a second copy of the
+  2h threshold, so widening the raw tier widens the override with it.
+  `/rtts` is tighter than its 7d siblings because `probe_rtt` stores a
+  row per ping, not per cycle. Measured against a 122-target, 5-source
+  install at a 15s interval: `/rtts?from=-30d` returned 206 MB and
+  `/cycles?from=-30d&step=raw` 199 MB, both still streaming when cut at
+  45s, from single unauthenticated GETs. Bucketed `/cycles` needs no cap
+  — the ladder holds it to ~500–1000 points at any width.
   The cycle ladder targets ~500–1000 buckets per window so point density
   stays roughly constant as the user zooms out — no >7× cliff at any
   boundary. Smoothing happens server-side via the weighted percentile

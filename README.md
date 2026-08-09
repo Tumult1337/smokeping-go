@@ -253,16 +253,25 @@ loss.
 | GET | `/api/v1/targets` | List all targets |
 | GET | `/api/v1/targets/{group}/{name}/status` | Latest cycle for the target |
 | GET | `/api/v1/targets/{group}/{name}/cycles?from&to` | Aggregated latency, optionally bucketed |
-| GET | `/api/v1/targets/{group}/{name}/rtts?from&to` | Raw per-ping samples |
-| GET | `/api/v1/targets/{group}/{name}/http?from&to` | Raw HTTP samples |
+| GET | `/api/v1/targets/{group}/{name}/rtts?from&to` | Raw per-ping samples (window ≤24h) |
+| GET | `/api/v1/targets/{group}/{name}/http?from&to` | Raw HTTP samples (window ≤7d) |
 | GET | `/api/v1/targets/{group}/{name}/hops?at=<unix>` | Latest MTR path, or the one nearest `at` |
-| GET | `/api/v1/targets/{group}/{name}/hops/timeline?from&to` | Per-hop loss history |
+| GET | `/api/v1/targets/{group}/{name}/hops/timeline?from&to` | Per-hop loss history (window ≤7d) |
 
 `from` / `to` accept RFC3339, unix seconds, or relative durations like `-24h`.
 The bucket width on `/cycles` and `/hops/timeline` is picked server-side from
 the window. Cycles ladder: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h,
->180d 1d. Hops ladder: ≤2h raw, ≤24h 5m, >24h 15m (timeline capped at 7d).
+>180d 1d. Hops ladder: ≤2h raw, ≤24h 5m, >24h 15m.
 Cycles also accepts a back-compat `step=raw|1h|1d` override.
+
+The endpoints that return unbucketed rows reject windows wider than their
+retention is worth scanning, with `400`: `/rtts` at 24h, `/http` and
+`/hops/timeline` at 7d, and `step=raw` on `/cycles` beyond the ladder's own
+raw tier (2h). The bucketed `/cycles` path has no window cap — the ladder
+already bounds its result to roughly 500–1000 points however wide the range.
+Since the binary ships no authentication, these are what stop an anonymous
+request from turning a full-retention scan into a response; keep a rate limit
+in front of the origin regardless.
 
 All endpoints accept `source=<name>` to filter by probe origin in master/slave
 deployments. `/cycles` and `/hops/timeline` echo the resolved `from`/`to` in
