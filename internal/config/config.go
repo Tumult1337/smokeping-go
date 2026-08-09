@@ -318,21 +318,21 @@ func loadUnvalidated(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	data = expandEnv(data)
-	// Any `${VAR}` placeholders left after expansion are placeholders whose
-	// env vars weren't set in either .env or the shell — the JSON will
-	// ship the literal "${VAR}" string into fields like cluster.token,
-	// where the master will reject it as a bad bearer and the slave will
-	// 401-loop forever. Surface the names at startup so the operator can
-	// fix .env without guessing at the symptom.
-	if missing := unresolvedVars(data); len(missing) > 0 {
-		slog.Warn("config: unresolved ${...} placeholders — env vars not set",
-			"vars", missing,
-			"hint", "set them in .env (next to your config file) or in the shell before starting")
-	}
 
 	var raw rawConfig
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	// Cluster tokens and storage passwords are credentials, while action URLs
+	// commonly embed webhook tokens, so literal placeholders in those fields
+	// must fail closed. Other fields retain warning-only behavior for compatibility.
+	if fields := unresolvedCredentialFields(raw); len(fields) > 0 {
+		return nil, fmt.Errorf("config: unresolved ${...} placeholders in credential fields: %s", strings.Join(fields, ", "))
+	}
+	if missing := unresolvedVars(data); len(missing) > 0 {
+		slog.Warn("config: unresolved ${...} placeholders — env vars not set",
+			"vars", missing,
+			"hint", "set them in .env (next to your config file) or in the shell before starting")
 	}
 
 	cfg := &Config{
@@ -422,6 +422,23 @@ func unresolvedVars(data []byte) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func unresolvedCredentialFields(raw rawConfig) []string {
+	var fields []string
+	if raw.Cluster != nil && envVar.MatchString(raw.Cluster.Token) {
+		fields = append(fields, "cluster.token")
+	}
+	if envVar.MatchString(raw.Storage.ClickHouse.Password) {
+		fields = append(fields, "storage.clickhouse.password")
+	}
+	for name, action := range raw.Actions {
+		if envVar.MatchString(action.URL) {
+			fields = append(fields, "actions."+name+".url")
+		}
+	}
+	sort.Strings(fields)
+	return fields
 }
 
 // ValidateMinimal is a relaxed Validate used for a slave's local config. A

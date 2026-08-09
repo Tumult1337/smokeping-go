@@ -1,13 +1,18 @@
 package alert
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -72,6 +77,12 @@ func TestConditionEval(t *testing.T) {
 type fakeDispatcher struct {
 	mu     sync.Mutex
 	events []Event
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func (f *fakeDispatcher) Dispatch(_ context.Context, e Event) {
@@ -310,6 +321,153 @@ func TestDispatcherDiscord(t *testing.T) {
 	desc2, _ := bodies[0]["embeds"].([]any)[0].(map[string]any)["description"].(string)
 	if strings.Contains(desc2, "**Path**") {
 		t.Errorf("description should not contain MTR block when Hops is nil:\n%s", desc2)
+	}
+}
+
+func TestDispatcherHTTPFailureLogsSanitizeCredentialURLs(t *testing.T) {
+	const secret = "canary-webhook-secret"
+	requestURL := "://alerts.example/" + secret
+	malformedPortURL := "https://alerts.example:" + secret + "/hook"
+	deliveryURL := "https://alerts.example/hooks/" + secret
+
+	failDelivery := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network unreachable")
+	})
+	non2xx := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(strings.NewReader("")),
+		}, nil
+	})
+	redirectFailure := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{malformedPortURL}},
+			Body:       io.NopCloser(strings.NewReader("")),
+		}, nil
+	})
+
+	cases := []struct {
+		name       string
+		actionType string
+		url        string
+		transport  roundTripFunc
+		sanitized  string
+		want       string
+	}{
+		{
+			name:       "webhook request",
+			actionType: "webhook",
+			url:        requestURL,
+			sanitized:  "request failed",
+			want:       "level=WARN msg=\"webhook request\" err=\"request failed\"\n",
+		},
+		{
+			name:       "webhook malformed port",
+			actionType: "webhook",
+			url:        malformedPortURL,
+			sanitized:  "request failed",
+			want:       "level=WARN msg=\"webhook request\" err=\"request failed\"\n",
+		},
+		{
+			name:       "webhook delivery",
+			actionType: "webhook",
+			url:        deliveryURL,
+			transport:  failDelivery,
+			sanitized:  "request failed",
+			want:       "level=WARN msg=\"webhook deliver\" err=\"request failed\"\n",
+		},
+		{
+			name:       "webhook redirect",
+			actionType: "webhook",
+			url:        "https://alerts.example/hooks/original",
+			transport:  redirectFailure,
+			sanitized:  "request failed",
+			want:       "level=WARN msg=\"webhook deliver\" err=\"request failed\"\n",
+		},
+		{
+			name:       "webhook non-2xx",
+			actionType: "webhook",
+			url:        deliveryURL,
+			transport:  non2xx,
+			sanitized:  "status=500",
+			want:       "level=WARN msg=\"webhook non-2xx\" status=500\n",
+		},
+		{
+			name:       "discord request",
+			actionType: "discord",
+			url:        requestURL,
+			sanitized:  "request failed",
+			want:       "level=WARN msg=\"discord request\" err=\"request failed\"\n",
+		},
+		{
+			name:       "discord malformed port",
+			actionType: "discord",
+			url:        malformedPortURL,
+			sanitized:  "request failed",
+			want:       "level=WARN msg=\"discord request\" err=\"request failed\"\n",
+		},
+		{
+			name:       "discord delivery",
+			actionType: "discord",
+			url:        deliveryURL,
+			transport:  failDelivery,
+			sanitized:  "request failed",
+			want:       "level=WARN msg=\"discord deliver\" err=\"request failed\"\n",
+		},
+		{
+			name:       "discord redirect",
+			actionType: "discord",
+			url:        "https://alerts.example/hooks/original",
+			transport:  redirectFailure,
+			sanitized:  "request failed",
+			want:       "level=WARN msg=\"discord deliver\" err=\"request failed\"\n",
+		},
+		{
+			name:       "discord non-2xx",
+			actionType: "discord",
+			url:        deliveryURL,
+			transport:  non2xx,
+			sanitized:  "status=500",
+			want:       "level=WARN msg=\"discord non-2xx\" status=500\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
+				ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+					if attr.Key == slog.TimeKey {
+						return slog.Attr{}
+					}
+					return attr
+				},
+			}))
+			dispatcher := &ActionDispatcher{
+				log:    logger,
+				client: &http.Client{Transport: tc.transport},
+			}
+			action := config.Action{Type: tc.actionType, URL: tc.url}
+			event := Event{Time: time.Unix(1_700_000_000, 0)}
+			switch tc.actionType {
+			case "webhook":
+				dispatcher.webhook(context.Background(), action, "test", event)
+			case "discord":
+				dispatcher.discord(context.Background(), action, "test", event)
+			}
+
+			got := logs.String()
+			if !strings.Contains(got, tc.sanitized) {
+				t.Fatalf("log output = %q, want sanitized value %q", got, tc.sanitized)
+			}
+			if strings.Contains(got, secret) {
+				t.Fatalf("log output contains credential canary %q: %q", secret, got)
+			}
+			if got != tc.want {
+				t.Fatalf("log output = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1202,5 +1360,49 @@ func TestDispatcherExecPassesFiringSources(t *testing.T) {
 	}
 	if want := "tokyo-1|frankfurt-1,tokyo-1\n"; string(got) != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// timeoutError is a net.Error whose Timeout reports true, the shape a stalled
+// dial produces.
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "i/o timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return false }
+
+// httpFailureCategory may only ever return one of its own constants: a Discord
+// webhook URL is the credential, and url.Error quotes that URL at every nesting
+// level, so any error-derived text in the result is a leak.
+func TestHTTPFailureCategory(t *testing.T) {
+	const canary = "canary-webhook-secret"
+	secretURL := "https://alerts.example/hooks/" + canary
+	wrap := func(err error) error { return &url.Error{Op: "Post", URL: secretURL, Err: err} }
+
+	allowed := map[string]bool{
+		"timeout": true, "canceled": true, "dns": true, "tls": true, safeHTTPError: true,
+	}
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"deadline exceeded", wrap(context.DeadlineExceeded), "timeout"},
+		{"canceled", wrap(context.Canceled), "canceled"},
+		{"dns failure names the host", wrap(&net.DNSError{Err: "no such host", Name: canary + ".example"}), "dns"},
+		{"tls verification", wrap(&tls.CertificateVerificationError{}), "tls"},
+		{"net timeout", wrap(timeoutError{}), "timeout"},
+		{"unclassified quotes the url", wrap(errors.New("connection refused to " + secretURL)), safeHTTPError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := httpFailureCategory(tc.err)
+			if got != tc.want {
+				t.Fatalf("category = %q, want %q", got, tc.want)
+			}
+			if !allowed[got] {
+				t.Fatalf("category %q is not one of the fixed constants", got)
+			}
+		})
 	}
 }

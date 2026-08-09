@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -40,6 +42,21 @@ func writeTmp(t *testing.T, body string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func unsetEnv(t *testing.T, name string) {
+	t.Helper()
+	t.Setenv(name, "")
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatalf("unset %s: %v", name, err)
+	}
+}
+
+func setExampleEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("CLUSTER_TOKEN", "test-cluster-token")
+	t.Setenv("CH_PASSWORD", "test-clickhouse-password")
+	t.Setenv("DISCORD_WEBHOOK_URL", "https://discord.example/api/webhooks/test")
 }
 
 // loadBytes is a test helper that loads a config from raw JSON bytes.
@@ -104,6 +121,78 @@ func TestLoadEnvExpansion(t *testing.T) {
 	}
 	if cfg.Storage.ClickHouse.Password != "secret123" {
 		t.Errorf("password = %q, want secret123", cfg.Storage.ClickHouse.Password)
+	}
+}
+
+func TestLoadRejectsUnresolvedCredentialPlaceholders(t *testing.T) {
+	const placeholder = "${GOSMOKEPING_TEST_UNRESOLVED_SECRET}"
+	unsetEnv(t, "GOSMOKEPING_TEST_UNRESOLVED_SECRET")
+
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "cluster token",
+			body: strings.Replace(minimalConfig, `"storage": {`,
+				`"cluster": {"token": "`+placeholder+`"}, "storage": {`, 1),
+			want: "config: unresolved ${...} placeholders in credential fields: cluster.token",
+		},
+		{
+			name: "storage password",
+			body: strings.Replace(minimalConfig, `"addr": "ch:9000"`,
+				`"addr": "ch:9000", "password": "`+placeholder+`"`, 1),
+			want: "config: unresolved ${...} placeholders in credential fields: storage.clickhouse.password",
+		},
+		{
+			name: "action URL",
+			body: strings.Replace(minimalConfig, `"storage": {`,
+				`"actions": {"notify": {"type": "discord", "url": "https://discord.example/api/webhooks/`+placeholder+`"}}, "storage": {`, 1),
+			want: "config: unresolved ${...} placeholders in credential fields: actions.notify.url",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeTmp(t, tc.body))
+			if err == nil {
+				t.Fatal("Load() error = nil, want unresolved credential placeholder error")
+			}
+			if got := err.Error(); got != tc.want {
+				t.Fatalf("Load() error = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadWarnsForUnresolvedNonCredentialPlaceholder(t *testing.T) {
+	const placeholder = "${GOSMOKEPING_TEST_UNRESOLVED_TITLE}"
+	unsetEnv(t, "GOSMOKEPING_TEST_UNRESOLVED_TITLE")
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return attr
+		},
+	})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	body := strings.Replace(minimalConfig, `"title": "Core"`, `"title": "`+placeholder+`"`, 1)
+	cfg, err := Load(writeTmp(t, body))
+	if err != nil {
+		t.Fatalf("Load() error = %v, want warning-only behavior", err)
+	}
+	if got := cfg.Targets[0].Title; got != placeholder {
+		t.Fatalf("target title = %q, want %q", got, placeholder)
+	}
+	want := "level=WARN msg=\"config: unresolved ${...} placeholders — env vars not set\" vars=[GOSMOKEPING_TEST_UNRESOLVED_TITLE] hint=\"set them in .env (next to your config file) or in the shell before starting\"\n"
+	if got := logs.String(); got != want {
+		t.Fatalf("log output = %q, want %q", got, want)
 	}
 }
 
@@ -223,6 +312,7 @@ func TestStorageClickHouseBadInterval(t *testing.T) {
 }
 
 func TestExampleConfigLoads(t *testing.T) {
+	setExampleEnv(t)
 	if _, err := Load("../../config.example.json"); err != nil {
 		t.Fatalf("example config: %v", err)
 	}
@@ -370,6 +460,7 @@ func TestValidateHealthAlertsMustExist(t *testing.T) {
 // _cluster target, so cluster.health_alerts is the only thing that makes it
 // anything other than dead config.
 func TestExampleConfigWiresHealthAlerts(t *testing.T) {
+	setExampleEnv(t)
 	cfg, err := Load("../../config.example.json")
 	if err != nil {
 		t.Fatalf("example config: %v", err)

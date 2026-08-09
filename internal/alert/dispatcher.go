@@ -3,10 +3,13 @@ package alert
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -96,19 +99,19 @@ func (d *ActionDispatcher) webhook(ctx context.Context, a config.Action, body st
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.URL, bytes.NewReader(buf))
 	if err != nil {
-		d.log.Warn("webhook request", "err", err)
+		d.log.Warn("webhook request", "err", safeHTTPError)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.client.Do(req)
 	if err != nil {
-		d.log.Warn("webhook deliver", "url", a.URL, "err", err)
+		d.log.Warn("webhook deliver", "err", httpFailureCategory(err))
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode >= 400 {
-		d.log.Warn("webhook non-2xx", "url", a.URL, "status", resp.StatusCode)
+		d.log.Warn("webhook non-2xx", "status", resp.StatusCode)
 	}
 }
 
@@ -171,20 +174,49 @@ func (d *ActionDispatcher) discord(ctx context.Context, a config.Action, body st
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.URL, bytes.NewReader(buf))
 	if err != nil {
-		d.log.Warn("discord request", "err", err)
+		d.log.Warn("discord request", "err", safeHTTPError)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := d.client.Do(req)
 	if err != nil {
-		d.log.Warn("discord deliver", "url", a.URL, "err", err)
+		d.log.Warn("discord deliver", "err", httpFailureCategory(err))
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode >= 400 {
-		d.log.Warn("discord non-2xx", "url", a.URL, "status", resp.StatusCode)
+		d.log.Warn("discord non-2xx", "status", resp.StatusCode)
 	}
+}
+
+// URL errors can quote credential-bearing paths, malformed authorities, or
+// redirect targets. A fixed category avoids trusting nested cause text.
+const safeHTTPError = "request failed"
+
+// httpFailureCategory names why a delivery failed using only the constants
+// below, never text derived from the error: a Discord webhook URL is itself
+// the credential, and url.Error quotes the URL at every nesting level.
+func httpFailureCategory(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dns"
+	}
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return "tls"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	return safeHTTPError
 }
 
 func discordDescription(tmpl, body string, e Event) string {
