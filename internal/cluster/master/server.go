@@ -33,25 +33,35 @@ type Server struct {
 	store    *config.Store
 	registry *Registry
 	sink     scheduler.Sink
-	token    string
 	health   func() *slavehealth.Set
 }
 
-// NewServer builds a master-side cluster handler. token is the shared bearer
-// secret checked on every request. The caller must not mount this with an
-// empty token; BearerAuth panics on an empty token to prevent an open ingest
-// endpoint (see cluster.BearerAuth).
+// currentToken returns the bearer secret the master accepts right now. It is
+// read from the store per request rather than captured at construction, so a
+// SIGHUP that rotates cluster.token takes effect immediately. An absent
+// cluster block returns "", which BearerAuth treats as deny-all.
+func (s *Server) currentToken() string {
+	cfg := s.store.Current()
+	if cfg.Cluster == nil {
+		return ""
+	}
+	return cfg.Cluster.Token
+}
+
+// NewServer builds a master-side cluster handler. The bearer secret is read
+// from store per request (see currentToken), not passed in, so rotating
+// cluster.token over SIGHUP takes effect without a restart; a store whose
+// config carries no token denies every cluster request.
 //
 // health is a live accessor rather than a snapshot: the mesh changes as
 // slaves register, but the Server is constructed once at startup. Pass nil
 // for standalone tests and deployments with no health mesh wired.
-func NewServer(log *slog.Logger, store *config.Store, registry *Registry, sink scheduler.Sink, token string, health func() *slavehealth.Set) *Server {
+func NewServer(log *slog.Logger, store *config.Store, registry *Registry, sink scheduler.Sink, health func() *slavehealth.Set) *Server {
 	return &Server{
 		log:      log,
 		store:    store,
 		registry: registry,
 		sink:     sink,
-		token:    token,
 		health:   health,
 	}
 }
@@ -69,7 +79,7 @@ func (s *Server) healthSet() *slavehealth.Set {
 // at /api/v1/cluster from the main API router.
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
-	r.Use(cluster.BearerAuth(s.token))
+	r.Use(cluster.BearerAuth(s.currentToken))
 	r.Post("/register", s.handleRegister)
 	r.Get("/config", s.handleConfig)
 	r.Post("/cycles", s.handleCycles)

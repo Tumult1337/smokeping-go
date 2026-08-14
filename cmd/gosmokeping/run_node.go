@@ -127,7 +127,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		})
 		go debounce(ctx, rawSignals, schedulerSignals, healthSignalDelay)
 
-		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, cfg.Cluster.Token, healthSet).Handler()
+		clusterHandler = master.NewServer(log, store, clusterRegistry, fanout, healthSet).Handler()
 		slaveLister = clusterRegistry
 		// The API is handed the Public() view of the same snapshot the
 		// scheduler builds from, never the registry itself — Peers() carries

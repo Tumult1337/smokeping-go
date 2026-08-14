@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -42,8 +45,8 @@ func (nopSink) OnCycle(context.Context, scheduler.Cycle) {}
 
 func newTestServer() *Server {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store := config.NewStore("", &config.Config{})
-	return NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), nopSink{}, "tok", nil)
+	store := config.NewStore("", &config.Config{Cluster: &config.Cluster{Token: "tok"}})
+	return NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), nopSink{}, nil)
 }
 
 func postCycles(t *testing.T, srv *Server, slaveName, bodySource string) int {
@@ -98,13 +101,13 @@ func (c *captureSink) OnCycle(_ context.Context, cy scheduler.Cycle) { c.got = a
 // source.
 func TestIngestResolvesHealthTargets(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	store := config.NewStore("", &config.Config{})
+	store := config.NewStore("", &config.Config{Cluster: &config.Cluster{Token: "tok"}})
 	sink := &captureSink{}
 	hs := slavehealth.NewSet([]slavehealth.Peer{
 		{Name: "frankfurt-1", Addr: netip.MustParseAddr("10.44.0.2")},
 		{Name: "tokyo-1", Addr: netip.MustParseAddr("10.44.0.7")},
 	}, nil)
-	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, "tok",
+	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink,
 		func() *slavehealth.Set { return hs })
 
 	body := `{"source":"frankfurt-1","cycles":[{"group":"` + slavehealth.Group +
@@ -139,12 +142,13 @@ func TestIngestResolvesHealthTargets(t *testing.T) {
 func TestIngestBatchOverridesForgedPerCycleSource(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := config.NewStore("", &config.Config{
+		Cluster: &config.Cluster{Token: "tok"},
 		Targets: []config.Group{
 			{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}},
 		},
 	})
 	sink := &captureSink{}
-	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, "tok", nil)
+	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, nil)
 
 	body := `{"source":"frankfurt-1","cycles":[` +
 		`{"group":"g","name":"t","probe":"icmp","source":"master","sent":5,"loss_count":0},` +
@@ -178,5 +182,110 @@ func TestHandleConfigRejectsInvalidName(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("control-char name on /config: got %d, want 400", rec.Code)
+	}
+}
+
+// configWithToken writes a valid config carrying tok and returns its path.
+func configWithToken(t *testing.T, dir, tok string) string {
+	t.Helper()
+	path := filepath.Join(dir, "config.json")
+	body := `{
+      "listen": ":0",
+      "interval": "60s",
+      "pings": 5,
+      "storage": {"clickhouse": {"addr": "ch:9000"}},
+      "probes": {"icmp": {"type": "icmp", "timeout": "1s"}},
+      "targets": [{"group": "g", "targets": [{"name": "t", "probe": "icmp", "host": "1.1.1.1"}]}],
+      "cluster": {"token": ` + strconv.Quote(tok) + `}
+    }`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
+
+// Rotating cluster.token over SIGHUP has to take effect without a restart:
+// a token that cannot be revoked without downtime is one an operator will not
+// revoke during an incident. Driven through a real file + Reload rather than a
+// synthetic setter so it exercises the path SIGHUP actually takes.
+func TestClusterTokenRotatesOnReload(t *testing.T) {
+	dir := t.TempDir()
+	path := configWithToken(t, dir, "old-secret")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store,
+		NewRegistry(slog.New(slog.DiscardHandler)), nopSink{}, nil)
+
+	// Built once and reused, because that is how run_node.go mounts it: a
+	// handler rebuilt per request would re-read the token on its own and hide
+	// a credential frozen at construction, which is the bug under test.
+	handler := srv.Handler()
+	get := func(tok string) int {
+		req := httptest.NewRequest(http.MethodGet, "/config", nil)
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if code := get("old-secret"); code != http.StatusOK {
+		t.Fatalf("before rotation, old token: got %d, want 200", code)
+	}
+	if code := get("new-secret"); code != http.StatusUnauthorized {
+		t.Fatalf("before rotation, new token: got %d, want 401", code)
+	}
+
+	configWithToken(t, dir, "new-secret")
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	if code := get("new-secret"); code != http.StatusOK {
+		t.Fatalf("after rotation, new token: got %d, want 200", code)
+	}
+	if code := get("old-secret"); code != http.StatusUnauthorized {
+		t.Fatalf("after rotation, old token still accepted: got %d, want 401 — rotation did not revoke", code)
+	}
+}
+
+// A removed token must revoke access rather than fall back to the last good
+// one. sha256("") == sha256(""), so an empty accepted token that skipped the
+// emptiness guard would accept the header "Authorization: Bearer " from anyone.
+func TestClusterEmptyTokenDeniesEveryone(t *testing.T) {
+	store := config.NewStore("", &config.Config{Cluster: &config.Cluster{Token: ""}})
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store,
+		NewRegistry(slog.New(slog.DiscardHandler)), nopSink{}, nil)
+
+	for _, header := range []string{"", "Bearer ", "Bearer anything", "Bearer tok"} {
+		req := httptest.NewRequest(http.MethodGet, "/config", nil)
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("Authorization %q: got %d, want 401", header, rec.Code)
+		}
+	}
+}
+
+// A config with no cluster block at all is the same deny-all case, reached by
+// a different route: currentToken must not panic dereferencing cfg.Cluster.
+func TestClusterNilBlockDeniesEveryone(t *testing.T) {
+	store := config.NewStore("", &config.Config{})
+	srv := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), store,
+		NewRegistry(slog.New(slog.DiscardHandler)), nopSink{}, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/config", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("nil cluster block: got %d, want 401", rec.Code)
 	}
 }

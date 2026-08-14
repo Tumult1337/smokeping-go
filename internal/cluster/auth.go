@@ -11,25 +11,41 @@ import (
 // on every request. Both sides are SHA-256 hashed before comparison so the
 // compare is constant-time regardless of token length (subtle.ConstantTimeCompare
 // returns 0 immediately on a length mismatch, leaking token length via timing).
-func BearerAuth(token string) func(http.Handler) http.Handler {
-	// An empty token would hash to sha256("") and then a request carrying the
-	// literal header "Authorization: Bearer " (empty credential) would compare
-	// equal and pass — an open ingest endpoint. Fail fast: this is a startup
-	// misconfiguration, not runtime input.
-	if token == "" {
-		panic("cluster: BearerAuth requires a non-empty token")
+//
+// current supplies the accepted token per request rather than closing over one,
+// so SIGHUP rotates the credential without a restart. It is read once per
+// request, and config.Store publishes whole configs through a single atomic
+// pointer, so a request sees one coherent token and never a half-applied
+// reload. Hashing per request costs microseconds against a handful of slaves
+// polling on a multi-second cadence, which buys away any cache-invalidation
+// question.
+func BearerAuth(current func() string) func(http.Handler) http.Handler {
+	// A nil source would deny every request forever, which reads at runtime as
+	// "the cluster is broken" rather than "this was wired wrong". Fail at
+	// construction instead.
+	if current == nil {
+		panic("cluster: BearerAuth requires a token source")
 	}
-	expectedHash := sha256.Sum256([]byte(token))
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			h := r.Header.Get("Authorization")
 			const prefix = "Bearer "
-			if !strings.HasPrefix(h, prefix) {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
+			var presented string
+			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, prefix) {
+				presented = h[len(prefix):]
 			}
-			gotHash := sha256.Sum256([]byte(h[len(prefix):]))
-			if subtle.ConstantTimeCompare(gotHash[:], expectedHash[:]) != 1 {
+			// Hash unconditionally and branch once at the end. Short-circuiting
+			// on a missing or malformed header would be harmless (that framing
+			// is public), but keeping one exit keeps the credential compare off
+			// every early-return path.
+			token := current()
+			gotHash := sha256.Sum256([]byte(presented))
+			wantHash := sha256.Sum256([]byte(token))
+			// An empty configured token must deny everything: sha256("") equals
+			// sha256(""), so without this an unset or removed credential would
+			// accept the header "Authorization: Bearer " and open ingest to
+			// anyone. Revocation has to revoke.
+			ok := token != "" && subtle.ConstantTimeCompare(gotHash[:], wantHash[:]) == 1
+			if !ok {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
