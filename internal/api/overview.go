@@ -95,8 +95,7 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.reader.QueryOverview(r.Context(), from, to, targets)
 	if err != nil {
-		s.log.Warn("query overview", "err", err)
-		writeErr(w, http.StatusBadGateway, "query failed")
+		s.writeQueryErr(w, "query overview", err)
 		return
 	}
 

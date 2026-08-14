@@ -354,8 +354,7 @@ func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {
 	}
 	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source"), Step: step})
 	if err != nil {
-		s.log.Warn("query cycles", "err", err)
-		writeErr(w, http.StatusBadGateway, "query failed")
+		s.writeQueryErr(w, "query cycles", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -393,8 +392,7 @@ func (s *Server) getRTTs(w http.ResponseWriter, r *http.Request) {
 	}
 	points, err := s.reader.QueryRTTs(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
-		s.log.Warn("query rtts", "err", err)
-		writeErr(w, http.StatusBadGateway, "query failed")
+		s.writeQueryErr(w, "query rtts", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -425,8 +423,7 @@ func (s *Server) getHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	points, err := s.reader.QueryHTTPSamples(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
-		s.log.Warn("query http", "err", err)
-		writeErr(w, http.StatusBadGateway, "query failed")
+		s.writeQueryErr(w, "query http", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -471,8 +468,7 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 		hops, err = s.reader.QueryLatestHops(r.Context(), ref, filter)
 	}
 	if err != nil {
-		s.log.Warn("query hops", "err", err)
-		writeErr(w, http.StatusBadGateway, "query failed")
+		s.writeQueryErr(w, "query hops", err)
 		return
 	}
 	if slavehealth.IsHealthGroup(ref.Group) {
@@ -505,8 +501,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		Step:   storage.PickHopStep(to.Sub(from)),
 	})
 	if err != nil {
-		s.log.Warn("query hops timeline", "err", err)
-		writeErr(w, http.StatusBadGateway, "query failed")
+		s.writeQueryErr(w, "query hops timeline", err)
 		return
 	}
 	if slavehealth.IsHealthGroup(ref.Group) {
@@ -665,8 +660,7 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	from := to.Add(-24 * time.Hour)
 	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
-		s.log.Warn("query status", "err", err)
-		writeErr(w, http.StatusBadGateway, "query failed")
+		s.writeQueryErr(w, "query status", err)
 		return
 	}
 	if len(points) > 50 {
@@ -810,6 +804,20 @@ func pickStep(override string, from, to time.Time) (step time.Duration, ok bool)
 		return 24 * time.Hour, true
 	}
 	return derived, true
+}
+
+// writeQueryErr maps a reader failure to a status. Overload is backpressure
+// rather than a fault, so it gets 503 and a Retry-After: 502 would tell a
+// client the upstream is broken when it is merely busy.
+func (s *Server) writeQueryErr(w http.ResponseWriter, what string, err error) {
+	if errors.Is(err, storage.ErrOverloaded) {
+		s.log.Warn("query rejected", "query", what, "err", err)
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, http.StatusServiceUnavailable, "server busy, retry shortly")
+		return
+	}
+	s.log.Warn(what, "err", err)
+	writeErr(w, http.StatusBadGateway, "query failed")
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

@@ -899,3 +899,83 @@ func TestCachingReader_Cycles_ErrorPropagatesWhenStaleEvicted(t *testing.T) {
 		t.Fatal("got nil error; want propagated error (no stale entry after eviction)")
 	}
 }
+
+// A leader outlives the request that started it, and every cache-key field is
+// request-controlled, so admission is what stops an anonymous caller minting
+// goroutines faster than they retire. Waiters must stay exempt: they join a
+// leader already paid for, so refusing them would convert a stampede on one
+// hot key into errors.
+func TestCachingReader_Cycles_BoundsInflightLeaders(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	gate := make(chan struct{})
+	inner := &slowFakeReader{gate: gate, cyclePts: []CyclePoint{{Time: now, Median: 1}}}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	// Distinct windows so every request is a distinct key and thus its own leader.
+	windowFor := func(i int) time.Time { return now.Add(-time.Duration(i+1) * 24 * time.Hour) }
+
+	saturate := make(chan error, maxInflightLeaders)
+	for i := range maxInflightLeaders {
+		go func() {
+			_, err := c.QueryCycles(context.Background(), ref, windowFor(i), now, QueryFilter{Step: time.Hour})
+			saturate <- err
+		}()
+	}
+	// Every leader increments calls before blocking on the gate, so this both
+	// waits for saturation and proves all of them registered.
+	deadline := time.Now().Add(5 * time.Second)
+	for inner.calls.Load() < int64(maxInflightLeaders) {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d leaders started", inner.calls.Load(), maxInflightLeaders)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// A new distinct key is refused rather than detaching another goroutine.
+	if _, err := c.QueryCycles(context.Background(), ref, windowFor(maxInflightLeaders), now, QueryFilter{Step: time.Hour}); !errors.Is(err, ErrOverloaded) {
+		t.Fatalf("distinct key past the cap: err = %v, want ErrOverloaded", err)
+	}
+	if got := inner.calls.Load(); got != int64(maxInflightLeaders) {
+		t.Fatalf("refused request still reached the inner reader: calls = %d, want %d", got, maxInflightLeaders)
+	}
+
+	// A waiter on an already-admitted key is not refused. It has to attach
+	// while the map is still saturated, so the gate stays shut until it has,
+	// and the precondition is asserted rather than assumed: if the leaders had
+	// already retired, the waiter would be admitted as a fresh leader and pass
+	// for the wrong reason.
+	waiter := make(chan error, 1)
+	go func() {
+		_, err := c.QueryCycles(context.Background(), ref, windowFor(0), now, QueryFilter{Step: time.Hour})
+		waiter <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	c.mu.Lock()
+	inflight := len(c.inflight)
+	c.mu.Unlock()
+	if inflight != maxInflightLeaders {
+		t.Fatalf("precondition: inflight = %d, want %d still saturated when the waiter attached", inflight, maxInflightLeaders)
+	}
+
+	close(gate)
+	for range maxInflightLeaders {
+		if err := <-saturate; err != nil {
+			t.Fatalf("saturating request failed: %v", err)
+		}
+	}
+	select {
+	case err := <-waiter:
+		if err != nil {
+			t.Fatalf("waiter on an admitted key was rejected: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never completed")
+	}
+
+	// Slots are released, so a fresh distinct key is admitted again.
+	if _, err := c.QueryCycles(context.Background(), ref, windowFor(maxInflightLeaders+1), now, QueryFilter{Step: time.Hour}); err != nil {
+		t.Fatalf("after leaders retired: err = %v, want success", err)
+	}
+}

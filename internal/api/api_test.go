@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1170,5 +1171,40 @@ func TestGetCyclesRawStepCap(t *testing.T) {
 				t.Fatalf("step = %s, want %s", r.lastStep, tc.wantStep)
 			}
 		})
+	}
+}
+
+// Overload is backpressure, not an upstream fault: a client that retries a 502
+// is doing the wrong thing, and a cache admission refusal is exactly the case
+// where retrying shortly is correct.
+func TestQueryOverloadIsRetryable503(t *testing.T) {
+	paths := []string{
+		"/api/v1/targets/core/gw/cycles?from=-1h",
+		"/api/v1/targets/core/gw/hops",
+		"/api/v1/overview",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			h := newTestServer(t, withReader(&stubReader{err: storage.ErrOverloaded}))
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503 (body %s)", rr.Code, rr.Body)
+			}
+			if got := rr.Header().Get("Retry-After"); got != "5" {
+				t.Fatalf("Retry-After = %q, want %q", got, "5")
+			}
+		})
+	}
+}
+
+// A non-overload reader failure must stay 502: mapping every error to a
+// retryable 503 would tell clients to hammer a genuinely broken backend.
+func TestQueryFailureStays502(t *testing.T) {
+	h := newTestServer(t, withReader(&stubReader{err: errors.New("clickhouse: connection refused")}))
+	code, body := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/cycles?from=-1h")
+	if code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (body %s)", code, body)
 	}
 }

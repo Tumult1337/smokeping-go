@@ -79,6 +79,18 @@ Key points a reader can't derive from a single file:
   `/cycles?from=-30d&step=raw` 199 MB, both still streaming when cut at
   45s, from single unauthenticated GETs. Bucketed `/cycles` needs no cap
   — the ladder holds it to ~500–1000 points at any width.
+
+  **Query admission.** Window caps bound one request's scan; they don't
+  bound how many run at once. A `CachingReader` miss detaches its inner
+  query via `context.WithoutCancel` and keeps running up to
+  `queryMaxDuration` (5m) after the caller disconnects, and every cache-key
+  field is request-controlled, so `storage.maxInflightLeaders` caps
+  concurrently-detached queries at 32 per cache (32 cycles + 32 hops).
+  Only *leaders* are admitted against it — waiters join a leader already
+  paid for, and refusing them would turn a stampede on one hot key into
+  errors. Past the cap the reader returns `storage.ErrOverloaded`, which
+  the API maps to 503 + `Retry-After` rather than the 502 every other
+  reader error gets: it is backpressure, not a broken upstream.
   The cycle ladder targets ~500–1000 buckets per window so point density
   stays roughly constant as the user zooms out — no >7× cliff at any
   boundary. Smoothing happens server-side via the weighted percentile

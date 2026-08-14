@@ -3,6 +3,7 @@ package storage
 import (
 	"container/list"
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,7 +41,21 @@ const (
 	// delete the inflight slot, and block every later identical request as a
 	// permanent waiter. Sized well above the worst legitimate 7d hops query.
 	queryMaxDuration = 5 * time.Minute
+
+	// maxInflightLeaders bounds concurrently-detached inner queries, per cache
+	// (so 32 cycles + 32 hops, each held at most queryMaxDuration). A leader
+	// survives its caller disconnecting, and every key field is
+	// request-controlled, so admission is the only thing stopping an
+	// unauthenticated caller from minting goroutines and ClickHouse queries
+	// faster than they retire. Waiters on an existing key are always admitted:
+	// they join a leader that is already paid for.
+	maxInflightLeaders = 32
 )
+
+// ErrOverloaded is returned when too many distinct queries are already
+// detached and running. It is a backpressure signal, not a failure: the same
+// request may succeed once in-flight work retires.
+var ErrOverloaded = errors.New("storage: too many queries in flight")
 
 // CachingReader wraps a Reader with two LRU+singleflight decorators: one for
 // QueryCycles, one for the three hops query paths. QueryRTTs and
@@ -242,6 +257,10 @@ func (c *CachingReader) fetchCycles(ctx context.Context, key cycleCacheKey, ttl 
 
 	call, leader := c.inflight[key], false
 	if call == nil {
+		if len(c.inflight) >= maxInflightLeaders {
+			c.mu.Unlock()
+			return nil, ErrOverloaded
+		}
 		call = &cycleInflight{done: make(chan struct{})}
 		c.inflight[key] = call
 		leader = true
@@ -420,6 +439,10 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 
 	call, leader := c.hopsInflight[key], false
 	if call == nil {
+		if len(c.hopsInflight) >= maxInflightLeaders {
+			c.hopsMu.Unlock()
+			return nil, ErrOverloaded
+		}
 		// No leader yet — register one and become it. Spawn the actual run
 		// below after we've dropped the lock.
 		call = &hopsInflight{done: make(chan struct{})}
