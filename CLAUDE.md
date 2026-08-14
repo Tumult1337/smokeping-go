@@ -111,6 +111,14 @@ Key points a reader can't derive from a single file:
   letting the API run headless (useful for dev / container builds that
   don't need the UI).
 
+- **Icon:** `npm run icon` in `ui/` regenerates `ui/public/favicon.svg`
+  (16 bars, for a tab) and `ui/public/icon.svg` (64 bars, for anywhere it
+  is shown large); Vite copies `public/` into the embedded dist. The bar
+  pattern is deterministic and synthetic on purpose — the icon ships to
+  every user of this tool, so it must not encode one operator's probe
+  list. Colours are three entries of `ui/src/palette.ts` read as a latency
+  ramp, keeping the icon inside the same CVD-gated set as the charts.
+
 - **Alert state is in-memory only:** `alert.Evaluator` stores per-target
   state in a map. After a restart all alerts return to `StateOK` — no
   persistence in v1. This avoids replaying cycles from storage, at the cost
