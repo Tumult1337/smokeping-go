@@ -496,9 +496,10 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "hops/timeline window limited to 7d")
 		return
 	}
+	step := storage.PickHopStep(to.Sub(from))
 	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{
 		Source: r.URL.Query().Get("source"),
-		Step:   storage.PickHopStep(to.Sub(from)),
+		Step:   step,
 	})
 	if err != nil {
 		s.writeQueryErr(w, "query hops timeline", err)
@@ -526,11 +527,16 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 			WorstTime:  h.WorstTime,
 		}
 	}
+	// step_sec echoes the bucket width the ladder picked, 0 on the raw tier.
+	// The heatmap draws one column per bucket and cannot infer that width from
+	// the rows: a window holding a single bucket carries no gap to measure, and
+	// guessing from row count paints that bucket across the whole window.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"target": ref.ID(),
-		"from":   from,
-		"to":     to,
-		"hops":   dtos,
+		"target":   ref.ID(),
+		"from":     from,
+		"to":       to,
+		"step_sec": int64(step / time.Second),
+		"hops":     dtos,
 	})
 }
 

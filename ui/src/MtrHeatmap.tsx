@@ -81,6 +81,8 @@ export function MtrHeatmap({
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const [stepSec, setStepSec] = useState(0);
+
   useEffect(() => {
     setErr(null);
     // The backend enforces a 7d cap for timeline queries — if the user
@@ -98,7 +100,10 @@ export function MtrHeatmap({
     const fromISO = new Date(fromSec * 1000).toISOString();
     const toISO = new Date(toSec * 1000).toISOString();
     getHopsTimeline(targetId, fromISO, toISO, source, controller.signal)
-      .then((r) => setHops(r.hops ?? []))
+      .then((r) => {
+        setHops(r.hops ?? []);
+        setStepSec(r.step_sec ?? 0);
+      })
       .catch((e) => {
         // AbortError is the controller cleaning up — not a user-visible error.
         if (e?.name !== "AbortError") setErr(String(e));
@@ -128,6 +133,7 @@ export function MtrHeatmap({
           hops={groups[0].hops}
           fromSec={fromSec}
           toSec={toSec}
+          stepSec={stepSec}
           selectedSec={selectedSec}
           onPick={onCyclePick}
           stale={err != null}
@@ -178,6 +184,7 @@ export function MtrHeatmap({
                 hops={g.hops}
                 fromSec={fromSec}
                 toSec={toSec}
+                stepSec={stepSec}
                 selectedSec={selectedSec}
                 onPick={onCyclePick}
                 stale={err != null}
@@ -195,11 +202,16 @@ export function MtrHeatmap({
 // PathHeatmap renders one source's hop-loss matrix. Owns its own canvas,
 // ref, and ResizeObserver. Height adapts to hop count so each row stays
 // at least ~14px regardless of how short or long the path is.
+// Width of a single cycle's column when neither the server step nor a row
+// gap can size it. Wide enough to see, narrow enough not to imply a span.
+const MIN_COL_PX = 3;
+
 function PathHeatmap({
   source,
   hops,
   fromSec,
   toSec,
+  stepSec,
   selectedSec,
   onPick,
   stale,
@@ -208,6 +220,7 @@ function PathHeatmap({
   hops: HopPoint[];
   fromSec: number;
   toSec: number;
+  stepSec: number;
   selectedSec?: number;
   onPick?: (timeSec: number, source?: string) => void;
   stale: boolean;
@@ -297,10 +310,18 @@ function PathHeatmap({
     const colWForSec = (s: number) => (s / spanSec) * plotW;
     const xForSec = (s: number) => plotX + ((s - fromSec) / spanSec) * plotW;
 
-    // Use the median inter-cycle gap so columns visually fill the row at
-    // any density. Falls back to 1px floor for very wide spans.
-    let colW = plotW / Math.max(1, cycles.length);
-    if (cycles.length > 1) {
+    // A column is one bucket wide. Prefer the server's resolved step: row
+    // spacing can only be measured when there are at least two rows, and a
+    // wide window holding a single bucket has none — sizing that by row count
+    // painted one bucket across the whole span, reading as hours of history
+    // that had not been collected yet. Raw-tier responses report step 0, where
+    // the median inter-cycle gap is the right estimate because cycles are not
+    // aligned to a grid. With neither available, draw a thin mark: under-
+    // drawing one cycle is honest, overdrawing invents history.
+    let colW = Math.max(1, MIN_COL_PX);
+    if (stepSec > 0) {
+      colW = Math.max(1, colWForSec(stepSec));
+    } else if (cycles.length > 1) {
       const gaps: number[] = [];
       for (let i = 1; i < cycles.length; i++) gaps.push(cycles[i] - cycles[i - 1]);
       gaps.sort((a, b) => a - b);

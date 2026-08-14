@@ -276,6 +276,9 @@ in front of the origin regardless.
 All endpoints accept `source=<name>` to filter by probe origin in master/slave
 deployments. `/cycles` and `/hops/timeline` echo the resolved `from`/`to` in
 the response so the UI can pin its x-axis exactly to what the server returned.
+`/hops/timeline` also echoes `step_sec`, the bucket width it picked (0 on the
+raw tier), so a client can size one bucket without inferring it from row
+spacing — which is unmeasurable when a window contains a single bucket.
 
 ## Deployment
 

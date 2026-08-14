@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -1206,5 +1207,35 @@ func TestQueryFailureStays502(t *testing.T) {
 	code, body := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/cycles?from=-1h")
 	if code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (body %s)", code, body)
+	}
+}
+
+// The heatmap draws one column per bucket and cannot recover the bucket width
+// from the rows: a window holding a single bucket has no row gap to measure.
+// Sizing a column by row count instead painted that one bucket across the
+// whole window, showing hours of history that had not been collected. The
+// server resolves the step, so it has to say what it picked.
+func TestHopsTimelineEchoesResolvedStep(t *testing.T) {
+	for _, span := range []time.Duration{time.Hour, 6 * time.Hour, 48 * time.Hour, 7 * 24 * time.Hour} {
+		t.Run(span.String(), func(t *testing.T) {
+			h := newTestServer(t, withReader(&stubReader{}))
+			var body struct {
+				StepSec int64 `json:"step_sec"`
+			}
+			doJSON(t, h, http.MethodGet,
+				"/api/v1/targets/core/gw/hops/timeline?from=-"+span.String(), &body)
+
+			want := int64(storage.PickHopStep(span) / time.Second)
+			if body.StepSec != want {
+				t.Fatalf("step_sec = %d, want %d for a %s window", body.StepSec, want, span)
+			}
+		})
+	}
+	// The raw tier must report 0 rather than omitting the field, so the client
+	// can tell "no bucketing" from "server did not say".
+	h := newTestServer(t, withReader(&stubReader{}))
+	_, raw := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops/timeline?from=-1h")
+	if !strings.Contains(string(raw), `"step_sec":0`) {
+		t.Fatalf("raw tier must serialise step_sec:0 explicitly, got %s", raw)
 	}
 }

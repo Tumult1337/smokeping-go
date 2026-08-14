@@ -201,6 +201,14 @@ Key points a reader can't derive from a single file:
   requested span. Don't recompute the window client-side from the range
   string — use the server's echo.
 
+  `/hops/timeline` echoes `step_sec` for the same reason: the heatmap draws
+  one column per bucket, and bucket width is not recoverable from the rows,
+  because a window holding a single bucket has no row gap to measure. Sizing
+  a column from row count instead painted that one bucket across the entire
+  window, reading as hours of history that had not been collected. `step_sec`
+  is 0 on the raw tier, where the median inter-cycle gap is the right estimate
+  since raw cycles are not grid-aligned.
+
 - **Cluster mode (master/slave):** `--slave` flips the binary into a
   runner that registers with a master, pulls the target list over HTTP,
   probes locally, and pushes cycle batches back. Slaves never touch

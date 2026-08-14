@@ -153,6 +153,10 @@ export interface HopsTimelineResponse {
   target: string;
   from: string;
   to: string;
+  // Bucket width the server's ladder picked, 0 on the raw tier. The heatmap
+  // needs it to size a column: row spacing cannot be measured when a window
+  // holds a single bucket.
+  step_sec: number;
   hops: HopPoint[];
 }
 
