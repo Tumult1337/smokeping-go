@@ -82,9 +82,10 @@ SELECT timestamp, source,
        loss_pct, lost, sent
 FROM probe_cycle
 WHERE target_id = ?
+  AND target_group = ?
   AND timestamp >= ? AND timestamp < ?` + srcClause + `
 ORDER BY timestamp`
-	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query cycles raw: %w", err)
@@ -184,10 +185,11 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
        sum(lost), sum(sent)
 FROM probe_cycle
 WHERE target_id = ?
+  AND target_group = ?
   AND timestamp >= ? AND timestamp < ?%s
 GROUP BY bucket_ts, source
 ORDER BY bucket_ts, source`, int(step.Seconds()), srcClause)
-	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query cycles bucketed: %w", err)
@@ -250,9 +252,10 @@ func (r *Reader) QueryRTTs(ctx context.Context, ref config.TargetRef, from, to t
 SELECT timestamp, rtt_ms, seq
 FROM probe_rtt
 WHERE target_id = ?
+  AND target_group = ?
   AND timestamp >= ? AND timestamp < ?` + srcClause + `
 ORDER BY timestamp, seq`
-	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query rtts: %w", err)
@@ -277,9 +280,10 @@ func (r *Reader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef, fro
 SELECT timestamp, source, rtt_ms, status, seq, error
 FROM probe_http
 WHERE target_id = ?
+  AND target_group = ?
   AND timestamp >= ? AND timestamp < ?` + srcClause + `
 ORDER BY timestamp, seq`
-	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query http: %w", err)
@@ -322,23 +326,25 @@ func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f st
 WITH latest AS (
   SELECT source, max(timestamp) AS ts
   FROM probe_hop
-  WHERE target_id = ?` + srcClause + freshClause + `
+  WHERE target_id = ?
+    AND target_group = ?` + srcClause + freshClause + `
   GROUP BY source
 )
 SELECT timestamp, source, ttl, hop_addr,
        rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_hop
-WHERE target_id = ?` + srcClause + `
+WHERE target_id = ?
+  AND target_group = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM latest)
 ORDER BY source, ttl`
-	// args layout: CTE filter (target + opt source + opt freshness), outer filter (target + opt source).
-	args := []any{ref.Target.Name}
+	// args layout: CTE filter (target id+group, opt source, opt freshness), outer filter (target id+group, opt source).
+	args := []any{ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
 	if !f.LatestSince.IsZero() {
 		args = append(args, f.LatestSince)
 	}
-	args = append(args, ref.Target.Name)
+	args = append(args, ref.Target.Name, ref.Group)
 	args = append(args, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
@@ -363,7 +369,8 @@ WITH nearest AS (
   SELECT source,
          argMin(timestamp, abs(dateDiff('millisecond', timestamp, toDateTime64(?, 3, 'UTC')))) AS ts
   FROM probe_hop
-  WHERE target_id = ?` + srcClause + `
+  WHERE target_id = ?
+    AND target_group = ?` + srcClause + `
     AND timestamp >= ? AND timestamp < ?
   GROUP BY source
 )
@@ -371,15 +378,16 @@ SELECT timestamp, source, ttl, hop_addr,
        rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_hop
-WHERE target_id = ?` + srcClause + `
+WHERE target_id = ?
+  AND target_group = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM nearest)
 ORDER BY source, ttl`
-	// args layout: CTE — `at` (the centre), target, optional source, from, to;
-	//              outer — target, optional source.
-	args := []any{at, ref.Target.Name}
+	// args layout: CTE — `at` (the centre), target id+group, optional source, from, to;
+	//              outer — target id+group, optional source.
+	args := []any{at, ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
 	args = append(args, at.Add(-half), at.Add(half))
-	args = append(args, ref.Target.Name)
+	args = append(args, ref.Target.Name, ref.Group)
 	args = append(args, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
@@ -440,9 +448,10 @@ SELECT timestamp, source, ttl, hop_addr,
        loss_pct, lost, sent
 FROM probe_hop
 WHERE target_id = ?
+  AND target_group = ?
   AND timestamp >= ? AND timestamp < ?` + srcClause + `
 ORDER BY timestamp, ttl`
-	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query hops raw: %w", err)
@@ -476,10 +485,11 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        argMax(timestamp, loss_pct)                       AS worst_ts
 FROM probe_hop
 WHERE target_id = ?
+  AND target_group = ?
   AND timestamp >= ? AND timestamp < ?%s
 GROUP BY bucket_ts, source, ttl, hop_addr
 ORDER BY bucket_ts, source, ttl`, int(step.Seconds()), srcClause)
-	args := append([]any{ref.Target.Name, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query hops bucketed: %w", err)

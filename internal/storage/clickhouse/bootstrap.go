@@ -57,6 +57,25 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 		}
 	}
 
+	// CREATE TABLE IF NOT EXISTS never reconciles an existing table, so the
+	// three detail tables that predate target_group need it added explicitly.
+	// Metadata-only: no historical part is rewritten, and old rows read as ""
+	// — which is why the reader requires a non-empty group rather than
+	// treating "" as a wildcard. Must run before the writer opens, since its
+	// batches are positional and would not match a table missing the column.
+	for _, table := range []string{"probe_rtt", "probe_hop", "probe_http"} {
+		stmt := fmt.Sprintf(
+			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS target_group LowCardinality(String) AFTER target_id", table)
+		if cfg.Cluster != "" {
+			stmt = fmt.Sprintf(
+				"ALTER TABLE %s ON CLUSTER %s ADD COLUMN IF NOT EXISTS target_group LowCardinality(String) AFTER target_id",
+				table, cfg.Cluster)
+		}
+		if err := conn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("add target_group to %s: %w", table, err)
+		}
+	}
+
 	// Apply TTLs even on re-bootstrap so config changes take effect.
 	type ttl struct {
 		table string

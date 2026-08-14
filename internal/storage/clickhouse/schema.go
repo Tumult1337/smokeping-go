@@ -98,6 +98,7 @@ SETTINGS index_granularity = 8192`
 const ddlProbeRTT = `CREATE TABLE IF NOT EXISTS probe_rtt (
   timestamp   DateTime64(3, 'UTC')   CODEC(DoubleDelta, ZSTD(1)),
   target_id   LowCardinality(String),
+  target_group  LowCardinality(String),
   source      LowCardinality(String),
   seq         UInt16,
   rtt_ms      Float64                CODEC(Gorilla, ZSTD(1))
@@ -110,6 +111,7 @@ TTL toDateTime(timestamp) + INTERVAL %d DAY`
 const ddlProbeHop = `CREATE TABLE IF NOT EXISTS probe_hop (
   timestamp     DateTime64(3, 'UTC')   CODEC(DoubleDelta, ZSTD(1)),
   target_id     LowCardinality(String),
+  target_group  LowCardinality(String),
   source        LowCardinality(String),
   ttl           UInt8,
   hop_addr      LowCardinality(String),
@@ -129,6 +131,7 @@ TTL toDateTime(timestamp) + INTERVAL %d DAY`
 const ddlProbeHTTP = `CREATE TABLE IF NOT EXISTS probe_http (
   timestamp   DateTime64(3, 'UTC')   CODEC(DoubleDelta, ZSTD(1)),
   target_id   LowCardinality(String),
+  target_group  LowCardinality(String),
   source      LowCardinality(String),
   seq         UInt16,
   rtt_ms      Float64                CODEC(Gorilla, ZSTD(1)),

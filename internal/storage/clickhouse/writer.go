@@ -103,7 +103,7 @@ func (w *Writer) OnCycle(ctx context.Context, c scheduler.Cycle) {
 	w.offer(tableProbeCycle, c)
 	for i, rtt := range c.RTTs {
 		w.offer(tableProbeRTT, rttRow{
-			ts: c.Time, target: c.Target.Target.Name, source: c.Source,
+			ts: c.Time, target: c.Target.Target.Name, group: c.Target.Group, source: c.Source,
 			seq: uint16(i), rttMS: rttMS(rtt),
 		})
 	}
@@ -112,7 +112,7 @@ func (w *Writer) OnCycle(ctx context.Context, c scheduler.Cycle) {
 	}
 	for i, s := range c.HTTPSamples {
 		w.offer(tableProbeHTTP, httpRow{
-			ts: s.Time, target: c.Target.Target.Name, source: c.Source,
+			ts: s.Time, target: c.Target.Target.Name, group: c.Target.Group, source: c.Source,
 			seq: uint16(i), rttMS: float64(s.RTT) / float64(time.Millisecond),
 			status: uint16(s.Status), err: s.Err,
 		})
@@ -120,10 +120,10 @@ func (w *Writer) OnCycle(ctx context.Context, c scheduler.Cycle) {
 }
 
 type rttRow struct {
-	ts             time.Time
-	target, source string
-	seq            uint16
-	rttMS          float64
+	ts                    time.Time
+	target, group, source string
+	seq                   uint16
+	rttMS                 float64
 }
 
 type hopRow struct {
@@ -132,12 +132,12 @@ type hopRow struct {
 }
 
 type httpRow struct {
-	ts             time.Time
-	target, source string
-	seq            uint16
-	rttMS          float64
-	status         uint16
-	err            string
+	ts                    time.Time
+	target, group, source string
+	seq                   uint16
+	rttMS                 float64
+	status                uint16
+	err                   string
 }
 
 // rttMS converts a time.Duration to milliseconds. Returns NaN for
@@ -337,7 +337,7 @@ func (w *Writer) flushRTTs(ctx context.Context, rows []any) error {
 	}
 	for _, raw := range rows {
 		r := raw.(rttRow)
-		if err := batch.Append(r.ts, r.target, r.source, r.seq, r.rttMS); err != nil {
+		if err := batch.Append(r.ts, r.target, r.group, r.source, r.seq, r.rttMS); err != nil {
 			return err
 		}
 	}
@@ -363,6 +363,7 @@ func (w *Writer) flushHops(ctx context.Context, rows []any) error {
 		err := batch.Append(
 			r.cycle.Time,
 			r.cycle.Target.Target.Name,
+			r.cycle.Target.Group,
 			r.cycle.Source,
 			uint8(r.hop.Index),
 			r.hop.IP,
@@ -385,7 +386,7 @@ func (w *Writer) flushHTTP(ctx context.Context, rows []any) error {
 	}
 	for _, raw := range rows {
 		r := raw.(httpRow)
-		if err := batch.Append(r.ts, r.target, r.source, r.seq, r.rttMS, r.status, r.err); err != nil {
+		if err := batch.Append(r.ts, r.target, r.group, r.source, r.seq, r.rttMS, r.status, r.err); err != nil {
 			return err
 		}
 	}

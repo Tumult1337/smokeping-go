@@ -56,6 +56,30 @@ Key points a reader can't derive from a single file:
   immediately without pointer-update races. When adding a consumer, do
   **not** cache the `*Config`.
 
+- **Target identity is (group, name), never name alone.** All four tables
+  carry `target_id` (the name) *and* `target_group`, and every read scopes
+  by both. Name alone is not unique: config dedupes on `group/name`, so
+  `core-backbone/frankfurt` and `retn/frankfurt` are legal and were served
+  identical merged rows from two unrelated networks until the group
+  predicate was added. It is also a security boundary — slave-health
+  targets live in `_cluster` and are named after the slave, and the API's
+  hop-address redaction keys on group, so a user target sharing a slave's
+  name could read unredacted health hops. `target_id` is in every
+  `ORDER BY`, which is why the group is a separate column rather than a
+  composite id: ClickHouse refuses `ALTER … UPDATE` on a key column, so
+  re-keying would mean rebuilding every table. Detail rows written before
+  `target_group` existed read as `""` and are deliberately unreachable
+  rather than matched by a `target_group = ''` fallback — their real group
+  was never recorded, so that fallback would re-merge them *and* reinstate
+  the health-hop disclosure. `probe_cycle` is unaffected: it has always
+  written the group, so its full retention stays visible.
+
+  `internal/storage/clickhouse/reader_args_test.go` guards the class this
+  change nearly shipped: query text and its arg slice are built in
+  separate places, so it injects a fake `driver.Conn` and asserts
+  placeholder count equals arg count across filter permutations. Without
+  it an added `?` with no argument only fails against a live server.
+
 - **Storage backend:** single ClickHouse backend in `internal/storage/clickhouse/`.
   Four `MergeTree` tables (`probe_cycle`, `probe_rtt`, `probe_hop`, `probe_http`)
   with codec-stacked columns (Gorilla for floats, T64 for small ints,
