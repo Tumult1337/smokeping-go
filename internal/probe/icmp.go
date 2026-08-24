@@ -74,13 +74,40 @@ type traceResult struct {
 	err  error
 }
 
+// errTracePanic wraps a panic recovered inside the TTL walk's goroutine, which
+// Go's per-goroutine recovery puts out of reach of the scheduler's per-cycle
+// recover — left alone it kills the process.
+var errTracePanic = errors.New("trace goroutine panicked")
+
 func (i *ICMP) startTrace(ctx context.Context, t Target) <-chan traceResult {
 	ch := make(chan traceResult, 1)
 	go func() {
+		defer func() {
+			if v := recover(); v != nil {
+				ch <- traceResult{err: fmt.Errorf("%w: %v", errTracePanic, v)}
+			}
+		}()
 		hops, _, err := i.trace(ctx, t.Host, t.Family, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing)
 		ch <- traceResult{hops: hops, err: err}
 	}()
 	return ch
+}
+
+// traceSeqCeil is one past the largest sequence number the TTL walk can emit,
+// derived from the walk's own round and TTL bounds in trace.go.
+func (i *ICMP) traceSeqCeil() int { return i.traceRounds * (i.traceMaxTTL + 1) }
+
+// echoBaseSeq keeps the batch's window [base, base+count) above the walk's
+// sequence range and clear of the 16-bit wrap that would fold it back in — the
+// two now run at once, and a colliding seq makes sendTTL report the target
+// reached at that TTL and truncates the hop list.
+func (i *ICMP) echoBaseSeq(count int) int {
+	lo := i.traceSeqCeil()
+	span := (1 << 16) - lo - count + 1
+	if span <= 0 {
+		return lo
+	}
+	return lo + int(rand.Uint32()%uint32(span))
 }
 
 func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
@@ -101,7 +128,7 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 
 	// Each cycle uses a fresh id/base-seq to avoid cross-cycle reply confusion.
 	id := int(rand.Uint32() & 0xffff)
-	baseSeq := int(rand.Uint32() & 0xffff)
+	baseSeq := i.echoBaseSeq(count)
 	// Sent counts actual attempts, not the requested count, so that a
 	// context-cancelled mid-cycle (shutdown, reload) reports LossPct truthfully
 	// instead of e.g. 11/20 = 55% when in reality 11 of 11 attempts failed.
@@ -125,6 +152,8 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		switch {
 		case tr.err == nil:
 			result.Hops = tr.hops
+		case errors.Is(tr.err, errTracePanic):
+			slog.Error("icmp trace panic recovered", "probe", i.name, "host", t.Host, "panic", tr.err)
 		case errors.Is(tr.err, errRawUnavailable):
 			logRawUnavailableOnce(tr.err)
 		default:

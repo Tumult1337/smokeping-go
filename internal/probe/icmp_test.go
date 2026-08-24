@@ -2,9 +2,30 @@ package probe
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/icmp"
 )
+
+// requireICMPSocket probes the capability directly rather than inferring it
+// from Probe's return: a nil *Result also means Probe bailed before its echo
+// loop, which would silently turn every regression test below into a green
+// SKIP.
+func requireICMPSocket(t *testing.T) {
+	t.Helper()
+	c, err := icmp.ListenPacket("udp4", "0.0.0.0")
+	if err != nil {
+		if c, err = icmp.ListenPacket("ip4:icmp", "0.0.0.0"); err != nil {
+			t.Skipf("no unprivileged ping socket and no CAP_NET_RAW: %v", err)
+		}
+	}
+	_ = c.Close()
+}
 
 // NoTrace must suppress the opportunistic path walk without touching echo
 // statistics. This exercises the real echo path, which needs either an
@@ -102,6 +123,7 @@ func TestICMPProbeNoTraceGatesTraceCall(t *testing.T) {
 // Probe's early ctx.Err() check and the walk never ran at all, so hop rows
 // vanished on exactly the lossy cycles a traceroute exists for.
 func TestICMPProbeTracesDespiteExhaustedEchoBudget(t *testing.T) {
+	requireICMPSocket(t)
 	p := NewICMP("icmp", time.Second, false)
 	// Spacing alone outruns the cycle context below, so the echo loop is
 	// guaranteed to exit on cancellation rather than completing.
@@ -120,7 +142,7 @@ func TestICMPProbeTracesDespiteExhaustedEchoBudget(t *testing.T) {
 
 	res, err := p.Probe(ctx, Target{Host: "127.0.0.1"}, 20)
 	if res == nil {
-		t.Skipf("ICMP echo unavailable here (no unprivileged ping / CAP_NET_RAW): %v", err)
+		t.Fatalf("Probe returned no result: %v", err)
 	}
 	if !entered {
 		t.Fatal("trace never ran: the echo batch consumed the whole cycle")
@@ -138,6 +160,7 @@ func TestICMPProbeTracesDespiteExhaustedEchoBudget(t *testing.T) {
 // assertion while restoring the additive echo+trace cycle cost this change
 // exists to remove. Assert the cycle costs max(echo, trace), not their sum.
 func TestICMPProbeRunsTraceConcurrentlyWithEchoBatch(t *testing.T) {
+	requireICMPSocket(t)
 	p := NewICMP("icmp", time.Second, false)
 	// 20 loopback pings at 20ms spacing is ~380ms of echo batch.
 	p.spacing = 20 * time.Millisecond
@@ -152,7 +175,7 @@ func TestICMPProbeRunsTraceConcurrentlyWithEchoBatch(t *testing.T) {
 	start := time.Now()
 	res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 20)
 	if res == nil {
-		t.Skipf("ICMP echo unavailable here: %v", err)
+		t.Fatalf("Probe returned no result: %v", err)
 	}
 	// Concurrent: ~380ms (the echo batch dominates). Sequential in either
 	// order: ~580ms. 500ms separates them with ~120ms of margin each way.
@@ -169,6 +192,7 @@ func TestICMPProbeRunsTraceConcurrentlyWithEchoBatch(t *testing.T) {
 // that polls a ready result there but blocks only on the normal return passes
 // a happy-path join test while leaking a slow trace and its raw socket.
 func TestICMPProbeJoinsSlowTraceOnEarlyReturn(t *testing.T) {
+	requireICMPSocket(t)
 	p := NewICMP("icmp", time.Second, false)
 	p.spacing = 50 * time.Millisecond
 
@@ -186,12 +210,136 @@ func TestICMPProbeJoinsSlowTraceOnEarlyReturn(t *testing.T) {
 	start := time.Now()
 	res, err := p.Probe(ctx, Target{Host: "127.0.0.1"}, 20)
 	if res == nil {
-		t.Skipf("ICMP echo unavailable here: %v", err)
+		t.Fatalf("Probe returned no result: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed < traceDur {
 		t.Fatalf("Probe returned in %v on the early-return path without joining the trace", elapsed)
 	}
 	if len(res.Hops) != len(want) {
 		t.Fatalf("got %d hops, want %d — trace result dropped on the early-return path", len(res.Hops), len(want))
+	}
+}
+
+type capturedRecord struct {
+	level slog.Level
+	text  string
+}
+
+type captureHandler struct {
+	mu      sync.Mutex
+	records []capturedRecord
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	var b strings.Builder
+	b.WriteString(r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		fmt.Fprintf(&b, " %s=%v", a.Key, a.Value)
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, capturedRecord{level: r.Level, text: b.String()})
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *captureHandler) WithGroup(string) slog.Handler { return h }
+
+func (h *captureHandler) at(level slog.Level) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []string
+	for _, r := range h.records {
+		if r.level == level {
+			out = append(out, r.text)
+		}
+	}
+	return out
+}
+
+func captureLogs(t *testing.T) *captureHandler {
+	t.Helper()
+	h := &captureHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return h
+}
+
+// The walk used to run on the target's goroutine, under the scheduler's
+// per-cycle recover; on its own goroutine Go's per-goroutine recovery leaves a
+// panic there uncaught and it takes the process down, and the deferred join
+// blocks forever because nothing is ever sent. Asserting on the Error record
+// rather than on recover() is what discriminates: a test that only checks
+// recover() passes either way, since without the fix the binary dies before it
+// runs, and it cannot tell an Error-level report from a swallowed Debug one.
+func TestICMPProbeContainsTracePanic(t *testing.T) {
+	requireICMPSocket(t)
+	logs := captureLogs(t)
+
+	p := NewICMP("icmp", time.Second, false)
+	p.spacing = time.Millisecond
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+		panic("boom in the TTL walk")
+	}
+
+	res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1)
+	if res == nil {
+		t.Fatalf("Probe returned no result: %v", err)
+	}
+	if len(res.Hops) != 0 {
+		t.Fatalf("got %d hops from a panicking walk, want 0", len(res.Hops))
+	}
+
+	errRecords := logs.at(slog.LevelError)
+	if len(errRecords) != 1 {
+		t.Fatalf("got %d error-level records, want exactly 1: %q", len(errRecords), errRecords)
+	}
+	for _, want := range []string{"boom in the TTL walk", "probe=icmp", "host=127.0.0.1"} {
+		if !strings.Contains(errRecords[0], want) {
+			t.Fatalf("error record %q does not name %q", errRecords[0], want)
+		}
+	}
+}
+
+// Both sockets are open at once and a raw ICMP socket receives every echo
+// reply on the host, so a sequence number shared with the walk makes sendTTL
+// report the target reached at that TTL and truncates the hop list. The
+// deeper-walk case is the mutation guard: a bound hardcoded at the default
+// ceiling instead of derived from traceRounds/traceMaxTTL fails only there.
+func TestICMPEchoBaseSeqDisjointFromTraceWindow(t *testing.T) {
+	const draws = 20000
+
+	for _, tc := range []struct {
+		name           string
+		rounds, maxTTL int
+		count          int
+	}{
+		{"defaults", 3, 30, 20},
+		{"deeper walk", 3, 60, 20},
+		{"more rounds", 8, 30, 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewICMP("icmp", time.Second, false)
+			p.traceRounds, p.traceMaxTTL = tc.rounds, tc.maxTTL
+			walkMax := (tc.rounds-1)*(tc.maxTTL+1) + tc.maxTTL
+
+			for range draws {
+				base := p.echoBaseSeq(tc.count)
+				for n := range tc.count {
+					seq := (base + n) & 0xffff
+					if seq != base+n {
+						t.Fatalf("echo seq wrapped: base %d + %d masked to %d", base, n, seq)
+					}
+					if seq <= walkMax {
+						t.Fatalf("echo seq %d (base %d + %d) lands in the walk's range [1,%d]", seq, base, n, walkMax)
+					}
+				}
+			}
+		})
 	}
 }
