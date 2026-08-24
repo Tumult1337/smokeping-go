@@ -2,8 +2,10 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -341,5 +343,139 @@ func TestICMPEchoBaseSeqDisjointFromTraceWindow(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// pingBudget must honor the configured timeout whenever the schedule can
+// afford it and shrink only when it provably cannot — a flat clamp would
+// shorten every ping even on cycles with budget to spare.
+func TestPingBudget(t *testing.T) {
+	const spacing = 200 * time.Millisecond
+	tests := []struct {
+		name           string
+		remainingCycle time.Duration
+		remainingPings int
+		spacingLeft    time.Duration
+		configured     time.Duration
+		want           time.Duration
+	}{
+		{"budget to spare keeps the configured timeout", 18140 * time.Millisecond, 5, 4 * spacing, 2 * time.Second, 2 * time.Second},
+		{"tight cycle derives a shorter deadline", 20 * time.Second, 10, 9 * spacing, 2 * time.Second, 1820 * time.Millisecond},
+		{"many pings shrink the deadline further", 20 * time.Second, 30, 29 * spacing, 2 * time.Second, 473333333 * time.Nanosecond},
+		{"spacing alone exhausts the cycle", 1500 * time.Millisecond, 5, 4 * time.Second, 2 * time.Second, 0},
+		{"cycle already overrun", -5 * time.Millisecond, 3, 0, 2 * time.Second, 0},
+		{"no pings left", 10 * time.Second, 0, 0, 2 * time.Second, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pingBudget(tc.remainingCycle, tc.remainingPings, tc.spacingLeft, tc.configured)
+			if got != tc.want {
+				t.Fatalf("pingBudget(%v, %d, %v, %v) = %v, want %v",
+					tc.remainingCycle, tc.remainingPings, tc.spacingLeft, tc.configured, got, tc.want)
+			}
+		})
+	}
+}
+
+// The budget must be recomputed per ping, not once before the loop. Computing
+// it once yields a correct-looking flat 1.82s that still fits the interval and
+// still attempts every ping — but a ping that answers fast never returns its
+// unused share, so ping 6 below would keep 1.82s instead of recovering the
+// full configured 2s. Walks the loop's own arithmetic with no socket.
+func TestICMPEchoTimeoutSelfLevels(t *testing.T) {
+	p := NewICMP("icmp", 2*time.Second, true)
+	p.spacing = 200 * time.Millisecond
+
+	const count = 10
+	const interval = 20 * time.Second
+	const fastRTT = 12 * time.Millisecond
+
+	var elapsed time.Duration
+	got := make([]time.Duration, 0, count)
+	for n := range count {
+		to := p.echoTimeout(interval-elapsed, count, n)
+		got = append(got, to)
+		if n < 5 { // first five answer fast, the rest burn their whole budget
+			elapsed += fastRTT
+		} else {
+			elapsed += to
+		}
+		if n < count-1 {
+			elapsed += p.spacing
+		}
+	}
+
+	if got[0] != 1820*time.Millisecond {
+		t.Fatalf("ping 1 budget = %v, want 1.82s ((20s - 9*200ms)/10)", got[0])
+	}
+	if got[5] != 2*time.Second {
+		t.Fatalf("ping 6 budget = %v, want the full configured 2s — fast pings did not return their unused share", got[5])
+	}
+	if elapsed > interval {
+		t.Fatalf("nominal batch total %v overran the %v interval", elapsed, interval)
+	}
+}
+
+// All-loss is the case that must exactly fill the interval rather than overrun
+// it: every ping burns its whole derived budget and the spacing still has to
+// fit.
+func TestICMPEchoTimeoutFillsIntervalUnderTotalLoss(t *testing.T) {
+	p := NewICMP("icmp", 2*time.Second, true)
+	p.spacing = 200 * time.Millisecond
+
+	const count = 10
+	const interval = 20 * time.Second
+
+	var elapsed time.Duration
+	attempts := 0
+	for n := range count {
+		to := p.echoTimeout(interval-elapsed, count, n)
+		if to <= 0 {
+			break
+		}
+		attempts++
+		elapsed += to
+		if n < count-1 {
+			elapsed += p.spacing
+		}
+	}
+	if attempts != count {
+		t.Fatalf("attempted %d of %d pings: the batch was truncated instead of fitting the cycle", attempts, count)
+	}
+	if elapsed != interval {
+		t.Fatalf("nominal batch total = %v, want exactly %v", elapsed, interval)
+	}
+}
+
+// The loop must pass the derived deadline to the send, not the configured
+// timeout. The send seam captures what it was handed.
+func TestICMPProbePassesDerivedTimeoutToSend(t *testing.T) {
+	requireICMPSocket(t)
+	p := NewICMP("icmp", 2*time.Second, true) // NoTrace: this is about the echo batch
+	p.spacing = 10 * time.Millisecond
+
+	var timeouts []time.Duration
+	p.send = func(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq int, timeout time.Duration) (time.Duration, error) {
+		timeouts = append(timeouts, timeout)
+		return 0, errors.New("simulated loss")
+	}
+
+	const count = 10
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	res, err := p.Probe(ctx, Target{Host: "127.0.0.1"}, count)
+	if res == nil {
+		t.Fatalf("Probe returned no result: %v", err)
+	}
+	if len(timeouts) != count {
+		t.Fatalf("send called %d times, want %d", len(timeouts), count)
+	}
+	if res.Sent != count || res.LossCount != count {
+		t.Fatalf("Sent=%d LossCount=%d, want %d/%d", res.Sent, res.LossCount, count, count)
+	}
+	// Derived budget is (1s - 9*10ms)/10 = 91ms, well under the configured 2s.
+	if timeouts[0] > 100*time.Millisecond {
+		t.Fatalf("first send got %v, want the derived ~91ms rather than the configured 2s", timeouts[0])
 	}
 }

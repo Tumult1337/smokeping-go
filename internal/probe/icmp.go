@@ -30,6 +30,12 @@ import (
 // call) tracing — without needing CAP_NET_RAW.
 type traceFunc func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error)
 
+const defaultICMPSpacing = 200 * time.Millisecond
+
+// sendFunc is the injectable seam over sendOne, mirroring trace, so tests can
+// drive the echo loop's budget arithmetic without a live socket.
+type sendFunc func(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq int, timeout time.Duration) (time.Duration, error)
+
 type ICMP struct {
 	name    string
 	timeout time.Duration
@@ -46,6 +52,7 @@ type ICMP struct {
 	// trace is the injectable seam over traceHops; defaults to the real
 	// implementation and is only overridden in tests.
 	trace traceFunc
+	send  sendFunc
 }
 
 func NewICMP(name string, timeout time.Duration, noTrace bool) *ICMP {
@@ -55,17 +62,41 @@ func NewICMP(name string, timeout time.Duration, noTrace bool) *ICMP {
 	return &ICMP{
 		name:         name,
 		timeout:      timeout,
-		spacing:      200 * time.Millisecond,
+		spacing:      defaultICMPSpacing,
 		noTrace:      noTrace,
 		traceRounds:  3,
 		traceMaxTTL:  30,
 		traceTimeout: time.Second,
 		traceSpacing: 50 * time.Millisecond,
 		trace:        traceHops,
+		send:         sendOne,
 	}
 }
 
 func (i *ICMP) Name() string { return i.name }
+
+// pingBudget divides what is left of the cycle among the pings left so a ping
+// that answers fast returns its unused share to the ones after it, capped by
+// the configured timeout and 0 when no further ping fits.
+func pingBudget(remainingCycle time.Duration, remainingPings int, spacingLeft, configured time.Duration) time.Duration {
+	if remainingPings <= 0 {
+		return 0
+	}
+	budget := remainingCycle - spacingLeft
+	if budget <= 0 {
+		return 0
+	}
+	if per := budget / time.Duration(remainingPings); per < configured {
+		return per
+	}
+	return configured
+}
+
+// echoTimeout is pingBudget for echo n of count, accounting for the spacing
+// still owed to the pings after it.
+func (i *ICMP) echoTimeout(remainingCycle time.Duration, count, n int) time.Duration {
+	return pingBudget(remainingCycle, count-n, time.Duration(count-1-n)*i.spacing, i.timeout)
+}
 
 // traceResult carries the TTL walk's outcome back from its goroutine. The
 // channel is buffered so the goroutine never blocks even if a join is missed.
@@ -161,13 +192,24 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		}
 	}()
 
+	cycleDeadline, bounded := ctx.Deadline()
+
 	for n := range count {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
+		timeout := i.timeout
+		if bounded {
+			// Sent counts attempts, so stopping short here under-reports
+			// truthfully rather than recording a loss the cycle never had the
+			// budget to send.
+			if timeout = i.echoTimeout(time.Until(cycleDeadline), count, n); timeout <= 0 {
+				break
+			}
+		}
 		seq := (baseSeq + n) & 0xffff
 		result.Sent++
-		rtt, err := sendOne(ctx, conn, ip, isV6, id, seq, i.timeout)
+		rtt, err := i.send(ctx, conn, ip, isV6, id, seq, timeout)
 		if err != nil {
 			result.LossCount++
 		} else {
