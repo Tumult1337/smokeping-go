@@ -218,7 +218,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 // nothing.
 func localView(c *config.Config, health *slavehealth.Set) (*config.Config, *probe.Registry, error) {
 	local := master.LocalTargets(c, health)
-	registry, err := probe.Build(local.Probes)
+	registry, err := probe.Build(local.Probes, local.Interval, local.Pings)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -239,7 +239,7 @@ func (r *Runner) pullConfigInitial(ctx context.Context) (cluster.ClusterConfigRe
 }
 
 func (r *Runner) buildScheduler(shim *config.Config) (*scheduler.Scheduler, error) {
-	registry, err := probe.Build(shim.Probes)
+	registry, err := probe.Build(shim.Probes, shim.Interval, shim.Pings)
 	if err != nil {
 		return nil, err
 	}

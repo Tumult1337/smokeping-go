@@ -177,6 +177,24 @@ Key points a reader can't derive from a single file:
   share the cycle deadline — run sequentially, a loss-saturated echo batch left
   the walk zero budget and it returned no hops at all.
 
+- **ICMP cycle budget:** the echo batch and the TTL walk run concurrently
+  and share one context whose deadline is `cfg.Interval`. Each echo's
+  deadline is `min(probe timeout, (remaining cycle − spacing still owed) /
+  pings still to send)`, recomputed per ping so the batch self-levels into
+  the interval: a ping that answers fast returns its unused share to the
+  ones after it, and the configured timeout survives on every cycle the
+  schedule can afford it. `Sent` counts pings **attempted**, so it usually
+  equals `cfg.Pings` now that the batch cannot overrun — but still
+  under-reports when the context is cancelled, when the cycle expires during
+  spacing, or when DNS and socket setup already spent the deadline. Do not
+  "fix" that by pre-setting `Sent`.
+  `probe.Build` refuses an icmp probe whose full-loss derived budget
+  `(interval − (pings−1)×200ms) / pings` falls below `minPingBudget` (50ms),
+  and bounds `pings` at `interval/200ms + 1` first because the spacing
+  product otherwise overflows int64 and wraps to a passing budget. Reload is
+  fail-closed on both: `scheduler.RunLifecycle` keeps the previous targets
+  when `Build` errors.
+
 - **Address-family pinning:** `Target.Family` is `""` / `"v4"` / `"v6"` and
   every probe routes it through the shared `familyNetwork(base, family)`
   helper in `internal/probe/probe.go`. Interpretation is per-probe and

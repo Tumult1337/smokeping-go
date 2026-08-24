@@ -30,6 +30,8 @@ import (
 // call) tracing — without needing CAP_NET_RAW.
 type traceFunc func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error)
 
+// defaultICMPSpacing is named so Build derives its boot-time ping budget from
+// the same inter-ping gap NewICMP schedules with.
 const defaultICMPSpacing = 200 * time.Millisecond
 
 // sendFunc is the injectable seam over sendOne, mirroring trace, so tests can

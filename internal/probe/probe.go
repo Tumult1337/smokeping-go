@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -78,11 +79,29 @@ func (r *Registry) Get(name string) (Probe, bool) {
 	return p, ok
 }
 
+// minPingBudget is the smallest per-ping deadline a config may derive at full
+// loss. It is a plausibility threshold, not a proof of uselessness: a 49ms
+// budget still succeeds against a 10ms LAN target, but against the 10-150ms
+// band of a normal WAN path a config this tight is not intentional.
+const minPingBudget = 50 * time.Millisecond
+
 // Build constructs a Registry from config, returning the set of probes
-// referenced by the config's targets.
-func Build(probes map[string]config.Probe) (*Registry, error) {
+// referenced by the config's targets. interval and pings are needed to reject
+// icmp probes whose schedule cannot admit a usable per-ping deadline.
+func Build(probes map[string]config.Probe, interval time.Duration, pings int) (*Registry, error) {
 	r := NewRegistry()
 	for name, pc := range probes {
+		if pc.Type == "icmp" {
+			budget, err := checkPingBudget(interval, pings)
+			if err != nil {
+				return nil, fmt.Errorf("probe %q: %w", name, err)
+			}
+			if budget < pc.Timeout {
+				slog.Info("icmp per-ping timeout shortened to fit the cycle",
+					"probe", name, "configured", pc.Timeout, "full_loss_budget", budget,
+					"interval", interval, "pings", pings)
+			}
+		}
 		p, err := build(name, pc)
 		if err != nil {
 			return nil, fmt.Errorf("probe %q: %w", name, err)
@@ -90,6 +109,29 @@ func Build(probes map[string]config.Probe) (*Registry, error) {
 		r.Register(p)
 	}
 	return r, nil
+}
+
+// checkPingBudget returns the per-ping deadline a full-loss cycle derives and
+// refuses the schedule when it falls below minPingBudget. pingBudget shortens
+// each echo to fit the cycle, but no shortening rescues a schedule whose
+// spacing alone overruns it.
+func checkPingBudget(interval time.Duration, pings int) (time.Duration, error) {
+	if pings <= 0 {
+		return 0, fmt.Errorf("pings must be positive, got %d", pings)
+	}
+	// Bound pings before multiplying: time.Duration(pings-1) * spacing
+	// overflows int64 for absurd values and wraps negative, which would derive
+	// a passing budget from an impossible schedule.
+	if maxPings := int(interval/defaultICMPSpacing) + 1; pings > maxPings {
+		return 0, fmt.Errorf("pings=%d exceeds the %d that fit interval %s at %s spacing, so no per-ping budget exists",
+			pings, maxPings, interval, defaultICMPSpacing)
+	}
+	budget := (interval - time.Duration(pings-1)*defaultICMPSpacing) / time.Duration(pings)
+	if budget < minPingBudget {
+		return budget, fmt.Errorf("pings=%d at interval %s derives a %s per-ping budget, below the %s minimum: reduce pings or raise interval",
+			pings, interval, budget.Round(time.Millisecond), minPingBudget)
+	}
+	return budget, nil
 }
 
 // familyNetwork maps a target Family ("", "v4", "v6") onto a Go net package
