@@ -20,7 +20,7 @@ import (
 // Uses unprivileged UDP ping sockets on Linux (net="udp4"/"udp6") when available,
 // falling back to raw ICMP (net="ip4:icmp") which requires CAP_NET_RAW.
 //
-// After the echo batch completes, ICMP opportunistically runs a short MTR-style
+// Concurrently with the echo batch, ICMP opportunistically runs a short MTR-style
 // path trace (traceRounds rounds over at most traceMaxTTL hops) so every icmp
 // target gets a hops view for free. The trace needs a raw socket — when that
 // fails (e.g., no CAP_NET_RAW), the probe still returns normal ping stats and
@@ -67,6 +67,22 @@ func NewICMP(name string, timeout time.Duration, noTrace bool) *ICMP {
 
 func (i *ICMP) Name() string { return i.name }
 
+// traceResult carries the TTL walk's outcome back from its goroutine. The
+// channel is buffered so the goroutine never blocks even if a join is missed.
+type traceResult struct {
+	hops []Hop
+	err  error
+}
+
+func (i *ICMP) startTrace(ctx context.Context, t Target) <-chan traceResult {
+	ch := make(chan traceResult, 1)
+	go func() {
+		hops, _, err := i.trace(ctx, t.Host, t.Family, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing)
+		ch <- traceResult{hops: hops, err: err}
+	}()
+	return ch
+}
+
 func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	if t.Host == "" {
 		return nil, errors.New("icmp: host required")
@@ -91,6 +107,31 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	// instead of e.g. 11/20 = 55% when in reality 11 of 11 attempts failed.
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
 
+	// The walk shares the cycle deadline with the echo batch. Run after it, a
+	// loss-saturated batch left nothing behind and the walk returned zero hops
+	// on exactly the cycles it exists for; concurrent, the cycle costs
+	// max(echo, trace) and the walk keeps the whole interval.
+	var traced <-chan traceResult
+	if !i.noTrace {
+		traced = i.startTrace(ctx, t)
+	}
+	// Deferred so the early return below still joins: an orphaned trace
+	// goroutine outlives its cycle holding a raw ICMP socket.
+	defer func() {
+		if traced == nil {
+			return
+		}
+		tr := <-traced
+		switch {
+		case tr.err == nil:
+			result.Hops = tr.hops
+		case errors.Is(tr.err, errRawUnavailable):
+			logRawUnavailableOnce(tr.err)
+		default:
+			slog.Debug("icmp trace error", "probe", i.name, "host", t.Host, "err", tr.err)
+		}
+	}()
+
 	for n := range count {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -112,26 +153,6 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		}
 	}
 
-	// Opportunistic path trace. If we can't get a raw socket (no CAP_NET_RAW)
-	// we skip — the caller only loses the hops view, not pings. We log the
-	// raw-unavailable error once globally so a deploy without setcap is
-	// visible at startup rather than silently missing MTR for every target.
-	// The "reached" signal is irrelevant here: echo latency is already measured
-	// from the target; we only want the hops list.
-	//
-	// noTrace opts a target out of the walk entirely (e.g. cluster.health_hops
-	// = false): the echo results above are unaffected, only the hops view goes
-	// away. This is a config choice, not a permission failure, so it bypasses
-	// errRawUnavailable handling rather than routing through it.
-	if !i.noTrace {
-		if hops, _, terr := i.trace(ctx, t.Host, t.Family, i.traceRounds, i.traceMaxTTL, i.traceTimeout, i.traceSpacing); terr == nil {
-			result.Hops = hops
-		} else if errors.Is(terr, errRawUnavailable) {
-			logRawUnavailableOnce(terr)
-		} else {
-			slog.Debug("icmp trace error", "probe", i.name, "host", t.Host, "err", terr)
-		}
-	}
 	return result, nil
 }
 

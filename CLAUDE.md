@@ -169,11 +169,13 @@ Key points a reader can't derive from a single file:
 - **Path discovery (MTR + opportunistic trace):** `probe.traceHops` is the
   shared TTL-walk helper in `internal/probe/trace.go`. The `MTR` probe uses
   its return (`hops`, `reached`, err) directly; the `ICMP` probe calls it
-  after its echo batch so every icmp target also gets a hops view for free.
-  Trace needs `CAP_NET_RAW` — callers distinguish the permission error with
-  `errors.Is(err, errRawUnavailable)` and skip gracefully. When the target
-  never replies within `maxTTL`, `reached=false` and MTR reports full loss
-  instead of mirroring the final intermediate hop.
+  concurrently with its echo batch so every icmp target also gets a hops view
+  for free. Trace needs `CAP_NET_RAW` — callers distinguish the permission
+  error with `errors.Is(err, errRawUnavailable)` and skip gracefully. When the
+  target never replies within `maxTTL`, `reached=false` and MTR reports full
+  loss instead of mirroring the final intermediate hop. Concurrent because both
+  share the cycle deadline — run sequentially, a loss-saturated echo batch left
+  the walk zero budget and it returned no hops at all.
 
 - **Address-family pinning:** `Target.Family` is `""` / `"v4"` / `"v6"` and
   every probe routes it through the shared `familyNetwork(base, family)`

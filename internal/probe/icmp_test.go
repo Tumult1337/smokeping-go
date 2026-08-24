@@ -96,3 +96,102 @@ func TestICMPProbeNoTraceGatesTraceCall(t *testing.T) {
 		}
 	})
 }
+
+// The TTL walk must not be starved by the echo batch it shares a cycle
+// deadline with. Run after the batch, a loss-saturated batch returned at
+// Probe's early ctx.Err() check and the walk never ran at all, so hop rows
+// vanished on exactly the lossy cycles a traceroute exists for.
+func TestICMPProbeTracesDespiteExhaustedEchoBudget(t *testing.T) {
+	p := NewICMP("icmp", time.Second, false)
+	// Spacing alone outruns the cycle context below, so the echo loop is
+	// guaranteed to exit on cancellation rather than completing.
+	p.spacing = 50 * time.Millisecond
+
+	var entered bool
+	var entryErr error
+	want := []Hop{{Index: 1, IP: "10.0.0.1"}, {Index: 2, IP: "10.0.0.2"}}
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+		entered, entryErr = true, ctx.Err()
+		return want, true, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	res, err := p.Probe(ctx, Target{Host: "127.0.0.1"}, 20)
+	if res == nil {
+		t.Skipf("ICMP echo unavailable here (no unprivileged ping / CAP_NET_RAW): %v", err)
+	}
+	if !entered {
+		t.Fatal("trace never ran: the echo batch consumed the whole cycle")
+	}
+	if entryErr != nil {
+		t.Fatalf("trace entered with an already-expired context: %v", entryErr)
+	}
+	if len(res.Hops) != len(want) {
+		t.Fatalf("got %d hops, want %d", len(res.Hops), len(want))
+	}
+}
+
+// Concurrency is the point, not merely ordering: a trace moved *before* the
+// echo loop but still called synchronously would satisfy every "the trace ran"
+// assertion while restoring the additive echo+trace cycle cost this change
+// exists to remove. Assert the cycle costs max(echo, trace), not their sum.
+func TestICMPProbeRunsTraceConcurrentlyWithEchoBatch(t *testing.T) {
+	p := NewICMP("icmp", time.Second, false)
+	// 20 loopback pings at 20ms spacing is ~380ms of echo batch.
+	p.spacing = 20 * time.Millisecond
+
+	const traceDur = 200 * time.Millisecond
+	want := []Hop{{Index: 1, IP: "10.0.0.1"}}
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+		time.Sleep(traceDur)
+		return want, true, nil
+	}
+
+	start := time.Now()
+	res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 20)
+	if res == nil {
+		t.Skipf("ICMP echo unavailable here: %v", err)
+	}
+	// Concurrent: ~380ms (the echo batch dominates). Sequential in either
+	// order: ~580ms. 500ms separates them with ~120ms of margin each way.
+	if elapsed := time.Since(start); elapsed >= 500*time.Millisecond {
+		t.Fatalf("Probe took %v: the trace and the echo batch ran sequentially, not concurrently", elapsed)
+	}
+	if len(res.Hops) != len(want) {
+		t.Fatalf("got %d hops, want %d", len(res.Hops), len(want))
+	}
+}
+
+// Probe owns the trace goroutine and must join it on EVERY exit path. The
+// early return in the echo loop is the one that matters: an implementation
+// that polls a ready result there but blocks only on the normal return passes
+// a happy-path join test while leaking a slow trace and its raw socket.
+func TestICMPProbeJoinsSlowTraceOnEarlyReturn(t *testing.T) {
+	p := NewICMP("icmp", time.Second, false)
+	p.spacing = 50 * time.Millisecond
+
+	const traceDur = 250 * time.Millisecond
+	want := []Hop{{Index: 1, IP: "10.0.0.1"}}
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+		time.Sleep(traceDur)
+		return want, true, nil
+	}
+
+	// The echo loop is cancelled at ~60ms, long before the trace finishes.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	res, err := p.Probe(ctx, Target{Host: "127.0.0.1"}, 20)
+	if res == nil {
+		t.Skipf("ICMP echo unavailable here: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < traceDur {
+		t.Fatalf("Probe returned in %v on the early-return path without joining the trace", elapsed)
+	}
+	if len(res.Hops) != len(want) {
+		t.Fatalf("got %d hops, want %d — trace result dropped on the early-return path", len(res.Hops), len(want))
+	}
+}
