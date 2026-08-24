@@ -478,4 +478,13 @@ func TestICMPProbePassesDerivedTimeoutToSend(t *testing.T) {
 	if timeouts[0] > 100*time.Millisecond {
 		t.Fatalf("first send got %v, want the derived ~91ms rather than the configured 2s", timeouts[0])
 	}
+	// Sends that return instantly spend only spacing, so the nth budget is
+	// 910ms/(count-n) — the unused share flows to the pings after it. Hoisting
+	// the computation out of the loop would hand every ping the n=0 value, so
+	// a growing budget is what distinguishes per-ping recomputation from a
+	// single flat one; 4x is a wide margin against the true 10x.
+	if timeouts[count-1] <= 4*timeouts[0] {
+		t.Fatalf("last send got %v against a first of %v: the budget is not recomputed per ping",
+			timeouts[count-1], timeouts[0])
+	}
 }
