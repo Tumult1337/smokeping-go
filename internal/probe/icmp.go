@@ -11,12 +11,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tumult/gosmokeping/internal/config"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
 
-// ICMP sends count echo requests spaced by interProbeDelay and collects replies.
+// traceFunc matches traceHops' signature. Injected on ICMP so tests can
+// substitute a spy and assert the noTrace gate actually calls (or doesn't
+// call) tracing — without needing CAP_NET_RAW.
+type traceFunc func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error)
+
+// The TTL walk's default bounds, named so the sequence space it reserves is
+// derived in one place rather than restated.
+const (
+	defaultTraceRounds = 3
+	defaultTraceMaxTTL = 30
+)
+
+// sendFunc is the injectable seam over sendOne, mirroring trace, so tests can
+// drive the echo loop's budget arithmetic without a live socket.
+type sendFunc func(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq int, timeout time.Duration) (time.Duration, error)
+
+// ICMP sends count echo requests spaced by spacing and collects replies.
 // Uses unprivileged UDP ping sockets on Linux (net="udp4"/"udp6") when available,
 // falling back to raw ICMP (net="ip4:icmp") which requires CAP_NET_RAW.
 //
@@ -25,19 +42,6 @@ import (
 // target gets a hops view for free. The trace needs a raw socket — when that
 // fails (e.g., no CAP_NET_RAW), the probe still returns normal ping stats and
 // just leaves Hops unset.
-// traceFunc matches traceHops' signature. Injected on ICMP so tests can
-// substitute a spy and assert the noTrace gate actually calls (or doesn't
-// call) tracing — without needing CAP_NET_RAW.
-type traceFunc func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error)
-
-// defaultICMPSpacing is named so Build derives its boot-time ping budget from
-// the same inter-ping gap NewICMP schedules with.
-const defaultICMPSpacing = 200 * time.Millisecond
-
-// sendFunc is the injectable seam over sendOne, mirroring trace, so tests can
-// drive the echo loop's budget arithmetic without a live socket.
-type sendFunc func(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq int, timeout time.Duration) (time.Duration, error)
-
 type ICMP struct {
 	name    string
 	timeout time.Duration
@@ -64,10 +68,10 @@ func NewICMP(name string, timeout time.Duration, noTrace bool) *ICMP {
 	return &ICMP{
 		name:         name,
 		timeout:      timeout,
-		spacing:      defaultICMPSpacing,
+		spacing:      config.ICMPPingSpacing,
 		noTrace:      noTrace,
-		traceRounds:  3,
-		traceMaxTTL:  30,
+		traceRounds:  defaultTraceRounds,
+		traceMaxTTL:  defaultTraceMaxTTL,
 		traceTimeout: time.Second,
 		traceSpacing: 50 * time.Millisecond,
 		trace:        traceHops,
@@ -125,6 +129,12 @@ func (i *ICMP) startTrace(ctx context.Context, t Target) <-chan traceResult {
 	}()
 	return ch
 }
+
+// The echo batch is placed above the walk's sequence window, so config's ping
+// ceiling must fit what the walk leaves; a deeper default walk makes this
+// constant negative and fails the build rather than silently folding echo
+// sequence numbers back into the walk's range.
+const _ uint = 1<<16 - defaultTraceRounds*(defaultTraceMaxTTL+1) - config.MaxPingsPerCycle
 
 // traceSeqCeil is one past the largest sequence number the TTL walk can emit,
 // derived from the walk's own round and TTL bounds in trace.go.

@@ -467,12 +467,75 @@ func (c *Config) ValidateMinimal() error {
 	return nil
 }
 
+// ICMP schedule policy. These live here rather than in probe because a
+// schedule the icmp probe cannot serve must never be stored or served:
+// probe.Build reads the same values, so the two layers cannot drift.
+const (
+	// ICMPPingSpacing is the gap probe.NewICMP schedules between echoes.
+	ICMPPingSpacing = 200 * time.Millisecond
+	// MinPingBudget is the smallest per-ping deadline a schedule may derive at
+	// full loss. It is a plausibility threshold, not a proof of uselessness: a
+	// 49ms budget still succeeds against a 10ms LAN target, but against the
+	// 10-150ms band of a normal WAN path a config this tight is not intentional.
+	MinPingBudget = 50 * time.Millisecond
+	// icmpTraceSeqReserve mirrors the TTL walk's traceRounds*(traceMaxTTL+1)
+	// sequence window in probe, which pins the two together at compile time.
+	icmpTraceSeqReserve = 3 * (30 + 1)
+	// MaxPingsPerCycle is the echo sequence space left above that window: past
+	// it no batch can be placed clear of the walk without wrapping into it.
+	MaxPingsPerCycle = 1<<16 - icmpTraceSeqReserve
+)
+
+// HasICMPProbe reports whether any probe is subject to the ping schedule
+// below, which is an icmp property — MTR's worst case is unrelated, and every
+// other probe type ignores spacing entirely.
+func HasICMPProbe(probes map[string]Probe) bool {
+	for _, p := range probes {
+		if p.Type == "icmp" {
+			return true
+		}
+	}
+	return false
+}
+
+// ICMPPingBudget returns the per-ping deadline a full-loss cycle derives and
+// refuses the schedule when it falls below MinPingBudget. The icmp probe
+// shortens each echo to fit the cycle, but no shortening rescues a schedule
+// whose spacing alone overruns it.
+func ICMPPingBudget(interval time.Duration, pings int) (time.Duration, error) {
+	if pings <= 0 {
+		return 0, fmt.Errorf("pings must be positive, got %d", pings)
+	}
+	// Both bounds precede the multiplication below, which overflows int64 for
+	// absurd values and wraps negative, deriving a passing budget from an
+	// impossible schedule.
+	if maxPings := int(interval/ICMPPingSpacing) + 1; pings > maxPings {
+		return 0, fmt.Errorf("pings=%d exceeds the %d that fit interval %s at %s spacing, so no per-ping budget exists",
+			pings, maxPings, interval, ICMPPingSpacing)
+	}
+	if pings > MaxPingsPerCycle {
+		return 0, fmt.Errorf("pings=%d exceeds the %d echo sequence numbers that stay clear of the TTL walk, so no batch fits interval %s",
+			pings, MaxPingsPerCycle, interval)
+	}
+	budget := (interval - time.Duration(pings-1)*ICMPPingSpacing) / time.Duration(pings)
+	if budget < MinPingBudget {
+		return budget, fmt.Errorf("pings=%d at interval %s derives a %s per-ping budget, below the %s minimum: reduce pings or raise interval",
+			pings, interval, budget.Round(time.Millisecond), MinPingBudget)
+	}
+	return budget, nil
+}
+
 func (c *Config) Validate() error {
 	if c.Interval <= 0 {
 		return fmt.Errorf("interval must be positive")
 	}
 	if c.Pings <= 0 {
 		return fmt.Errorf("pings must be positive")
+	}
+	if HasICMPProbe(c.Probes) {
+		if _, err := ICMPPingBudget(c.Interval, c.Pings); err != nil {
+			return fmt.Errorf("icmp schedule: %w", err)
+		}
 	}
 	ch := &c.Storage.ClickHouse
 	if ch.Addr == "" {

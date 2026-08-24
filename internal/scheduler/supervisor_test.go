@@ -158,7 +158,9 @@ func writeConfig(t *testing.T, path string, targets []config.Target) {
 		"pings":    1,
 		"storage":  map[string]any{"clickhouse": map[string]any{"addr": "ch:9000"}},
 		"probes": map[string]any{
-			"fake": map[string]any{"type": "icmp", "timeout": "1s"},
+			// Not icmp: a 30ms interval cannot schedule an icmp ping batch, and
+			// the registry below serves this name with a fake probe anyway.
+			"fake": map[string]any{"type": "tcp", "timeout": "1s"},
 		},
 		"targets": []any{map[string]any{
 			"group":   "g",

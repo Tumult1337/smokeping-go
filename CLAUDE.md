@@ -188,12 +188,22 @@ Key points a reader can't derive from a single file:
   under-reports when the context is cancelled, when the cycle expires during
   spacing, or when DNS and socket setup already spent the deadline. Do not
   "fix" that by pre-setting `Sent`.
-  `probe.Build` refuses an icmp probe whose full-loss derived budget
-  `(interval − (pings−1)×200ms) / pings` falls below `minPingBudget` (50ms),
-  and bounds `pings` at `interval/200ms + 1` first because the spacing
-  product otherwise overflows int64 and wraps to a passing budget. Reload is
-  fail-closed on both: `scheduler.RunLifecycle` keeps the previous targets
-  when `Build` errors.
+  `config.ICMPPingBudget` refuses a schedule whose full-loss derived budget
+  `(interval − (pings−1)×config.ICMPPingSpacing) / pings` falls below
+  `config.MinPingBudget` (50ms). It lives in `config` because `config.Validate`
+  calls it: a schedule the icmp probe cannot serve must never be stored, or
+  the master serves it to every slave and the whole fleet fails at its next
+  restart while the operator sees green. `probe.Build` calls the same function
+  as defence in depth — a slave builds from a master-supplied config it never
+  validated. Both gate on the config defining an icmp probe; neither binds a
+  config with none. `pings` is bounded twice before that multiplication: at
+  `interval/200ms + 1`, which the product would otherwise overflow into a
+  passing budget, and at `config.MaxPingsPerCycle`, the echo sequence space
+  left above the TTL walk's window, which a long enough interval would
+  otherwise admit into `echoBaseSeq`'s degenerate branch (`probe` pins that
+  ceiling to the walk's own bounds with a compile-time assertion). Reload is
+  fail-closed at both layers: `Store.Reload` keeps the last-good config, and
+  `scheduler.RunLifecycle` keeps the previous targets when `Build` errors.
 
 - **Address-family pinning:** `Target.Family` is `""` / `"v4"` / `"v6"` and
   every probe routes it through the shared `familyNetwork(base, family)`

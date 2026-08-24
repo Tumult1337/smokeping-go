@@ -80,10 +80,10 @@ func NewSet(peers []Peer, alerts []string) *Set {
 func IsHealthGroup(group string) bool { return group == Group }
 
 // ProbeDef returns the synthesized probe definition. ICMP is deliberate: the
-// icmp probe already performs an opportunistic TTL walk after its echo batch,
-// so one probe yields both echo statistics and traceroute hops with no second
-// target. hops=false disables that walk. A non-positive timeout falls back to
-// the package default.
+// icmp probe already performs an opportunistic TTL walk concurrently with its
+// echo batch, so one probe yields both echo statistics and traceroute hops
+// with no second target. hops=false disables that walk. A non-positive
+// timeout falls back to the package default.
 func ProbeDef(timeout time.Duration, hops bool) config.Probe {
 	if timeout <= 0 {
 		timeout = defaultTimeout

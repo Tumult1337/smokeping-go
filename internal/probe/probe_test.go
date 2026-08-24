@@ -179,10 +179,24 @@ func TestBuildRejectsUnschedulablePingBudget(t *testing.T) {
 		}
 	})
 
+	t.Run("a count past the echo sequence space is refused however long the interval", func(t *testing.T) {
+		// The spacing bound scales with interval, so a long enough interval
+		// admits a count that leaves echoBaseSeq no room above the TTL walk.
+		if _, err := Build(icmp, 24*time.Hour, 100_000); err == nil {
+			t.Fatal("100k pings cannot be placed clear of the walk and must be refused")
+		}
+	})
+
 	t.Run("the floor keys on probe type, not on the map key", func(t *testing.T) {
 		named := map[string]config.Probe{"wan": {Type: "icmp", Timeout: 2 * time.Second}}
-		if _, err := Build(named, 20*time.Second, 200); err == nil {
+		_, err := Build(named, 20*time.Second, 200)
+		if err == nil {
 			t.Fatal(`an icmp probe named "wan" bypassed the budget floor`)
+		}
+		// Attributing a schedule failure to a probe names whichever one Go's
+		// randomized map iteration reached first, so it must name neither.
+		if strings.Contains(err.Error(), "wan") {
+			t.Fatalf("schedule error is attributed to a probe name: %v", err)
 		}
 	})
 
@@ -194,4 +208,43 @@ func TestBuildRejectsUnschedulablePingBudget(t *testing.T) {
 			}
 		}
 	})
+}
+
+// The invariant that actually broke: a schedule config.Validate stores is one
+// probe.Build must accept, or the store serves every slave a config that fails
+// at its next restart, hours after the edit looked green.
+func TestValidateAndBuildAgreeOnPingSchedule(t *testing.T) {
+	probes := map[string]config.Probe{"icmp": {Type: "icmp", Timeout: 2 * time.Second}}
+
+	for _, tc := range []struct {
+		interval time.Duration
+		pings    int
+	}{
+		{20 * time.Second, 10},
+		{20 * time.Second, 30},
+		{20 * time.Second, 100},
+		{20 * time.Second, 101},
+		{20 * time.Second, 102},
+		{20 * time.Second, 120},
+		{20 * time.Second, 200},
+		{9760 * time.Millisecond, 40},
+		{9800 * time.Millisecond, 40},
+		{time.Second, 1},
+		{100 * time.Millisecond, 3},
+		{24 * time.Hour, 100_000},
+		{20 * time.Second, 0},
+		{0, 10},
+	} {
+		cfg := &config.Config{
+			Interval: tc.interval,
+			Pings:    tc.pings,
+			Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+			Probes:   probes,
+		}
+		validateErr := cfg.Validate()
+		_, buildErr := Build(probes, tc.interval, tc.pings)
+		if (validateErr == nil) != (buildErr == nil) {
+			t.Errorf("interval=%s pings=%d: Validate err = %v, Build err = %v", tc.interval, tc.pings, validateErr, buildErr)
+		}
+	}
 }

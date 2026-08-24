@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tumult/gosmokeping/internal/config"
 	"golang.org/x/net/icmp"
 )
 
@@ -133,14 +134,18 @@ func TestICMPProbeTracesDespiteExhaustedEchoBudget(t *testing.T) {
 
 	var entered bool
 	var entryErr error
+	var traceDeadline time.Time
+	var traceBounded bool
 	want := []Hop{{Index: 1, IP: "10.0.0.1"}, {Index: 2, IP: "10.0.0.2"}}
 	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
 		entered, entryErr = true, ctx.Err()
+		traceDeadline, traceBounded = ctx.Deadline()
 		return want, true, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
+	cycleDeadline, _ := ctx.Deadline()
 
 	res, err := p.Probe(ctx, Target{Host: "127.0.0.1"}, 20)
 	if res == nil {
@@ -151,6 +156,14 @@ func TestICMPProbeTracesDespiteExhaustedEchoBudget(t *testing.T) {
 	}
 	if entryErr != nil {
 		t.Fatalf("trace entered with an already-expired context: %v", entryErr)
+	}
+	// A walk detached from the cycle runs ~90s on a dark path while the
+	// deferred join holds Probe, stalling this target's scheduler goroutine.
+	if !traceBounded {
+		t.Fatal("trace ran on an unbounded context: it no longer shares the cycle budget")
+	}
+	if !traceDeadline.Equal(cycleDeadline) {
+		t.Fatalf("trace deadline %v is not the cycle's %v", traceDeadline, cycleDeadline)
 	}
 	if len(res.Hops) != len(want) {
 		t.Fatalf("got %d hops, want %d", len(res.Hops), len(want))
@@ -314,23 +327,24 @@ func TestICMPProbeContainsTracePanic(t *testing.T) {
 // deeper-walk case is the mutation guard: a bound hardcoded at the default
 // ceiling instead of derived from traceRounds/traceMaxTTL fails only there.
 func TestICMPEchoBaseSeqDisjointFromTraceWindow(t *testing.T) {
-	const draws = 20000
-
 	for _, tc := range []struct {
 		name           string
 		rounds, maxTTL int
 		count          int
+		draws          int
 	}{
-		{"defaults", 3, 30, 20},
-		{"deeper walk", 3, 60, 20},
-		{"more rounds", 8, 30, 20},
+		{"defaults", 3, 30, 20, 20000},
+		{"deeper walk", 3, 60, 20, 20000},
+		{"more rounds", 8, 30, 20, 20000},
+		// At the ceiling exactly one base is legal, so one draw is exhaustive.
+		{"ping ceiling", defaultTraceRounds, defaultTraceMaxTTL, config.MaxPingsPerCycle, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := NewICMP("icmp", time.Second, false)
 			p.traceRounds, p.traceMaxTTL = tc.rounds, tc.maxTTL
 			walkMax := (tc.rounds-1)*(tc.maxTTL+1) + tc.maxTTL
 
-			for range draws {
+			for range tc.draws {
 				base := p.echoBaseSeq(tc.count)
 				for n := range tc.count {
 					seq := (base + n) & 0xffff

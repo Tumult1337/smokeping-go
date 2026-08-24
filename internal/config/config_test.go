@@ -474,3 +474,56 @@ func TestExampleConfigWiresHealthAlerts(t *testing.T) {
 		}
 	}
 }
+
+func scheduleConfig(interval time.Duration, pings int) *Config {
+	return &Config{
+		Interval: interval,
+		Pings:    pings,
+		Storage:  Storage{ClickHouse: ClickHouse{Addr: "ch:9000"}},
+		Probes:   map[string]Probe{"icmp": {Type: "icmp", Timeout: 2 * time.Second}},
+	}
+}
+
+// A schedule probe.Build refuses must never reach the store: Reload keeps the
+// previous targets, so the operator sees green while every node is one restart
+// away from a fleet-wide boot failure.
+func TestValidateRefusesUnschedulablePingCount(t *testing.T) {
+	t.Run("120 pings at 20s is refused", func(t *testing.T) {
+		err := scheduleConfig(20*time.Second, 120).Validate()
+		if err == nil {
+			t.Fatal("120 pings owes 23.8s of spacing against a 20s interval and must be refused")
+		}
+		for _, want := range []string{"120", "20s"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("the deployed schedule is accepted", func(t *testing.T) {
+		if err := scheduleConfig(20*time.Second, 10).Validate(); err != nil {
+			t.Fatalf("10 pings at 20s derives 1.82s and must validate: %v", err)
+		}
+	})
+
+	t.Run("30 pings at 20s is accepted", func(t *testing.T) {
+		if err := scheduleConfig(20*time.Second, 30).Validate(); err != nil {
+			t.Fatalf("30 pings at 20s derives 473ms, above the floor: %v", err)
+		}
+	})
+
+	t.Run("the schedule binds only where an icmp probe exists", func(t *testing.T) {
+		cfg := scheduleConfig(20*time.Second, 120)
+		cfg.Probes = map[string]Probe{"web": {Type: "http", Timeout: 2 * time.Second}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("an http-only config is not bound by the icmp ping budget: %v", err)
+		}
+	})
+
+	t.Run("Load refuses it too", func(t *testing.T) {
+		body := strings.NewReplacer(`"interval": "30s"`, `"interval": "20s"`, `"pings": 10`, `"pings": 120`).Replace(minimalConfig)
+		if _, err := Load(writeTmp(t, body)); err == nil {
+			t.Fatal("Load must not return a config that cannot build")
+		}
+	})
+}
