@@ -425,7 +425,7 @@ Key points a reader can't derive from a single file:
   `config.Store`. Addresses come only from the slave's own explicit
   `cluster.advertise` — never auto-detected, because a bridge-networked
   container reports `172.17.0.2` and no range check distinguishes that
-  from a real WireGuard mesh address; empty opts a slave out entirely.
+  from a legitimate private peer address; empty opts a slave out entirely.
   `cluster.slave_addrs` optionally pins a slave to one address — a
   mismatch is refused a health entry, but unpinned slaves are accepted
   so the feature works zero-config. `cluster.health_hops` (default true)

@@ -138,7 +138,7 @@ type Cluster struct {
 	// Advertise is the single IP address peers use to health-probe this
 	// slave. Explicit only — never auto-detected. A container on a bridge
 	// network sees only its internal address (172.17.0.2), and no range
-	// check can distinguish that from a legitimate WireGuard mesh address,
+	// check can distinguish that from a legitimate private peer address,
 	// so a detected value would be confidently wrong. Empty means this
 	// slave is excluded from the health mesh.
 	Advertise string `json:"advertise,omitempty"`
@@ -674,9 +674,9 @@ func (c *Config) Validate() error {
 // value) and Cluster.ParsedSlaveAddrs (an operator-written pin); callers
 // should wrap the returned error with call-site context.
 //
-// Private and unique-local ranges are deliberately accepted: mesh
-// deployments (WireGuard and similar) address peers entirely within
-// RFC1918 / fc00::/7, so rejecting them would break the common case.
+// Private and unique-local ranges are deliberately accepted: a deployment
+// may address its peers entirely within RFC1918 / fc00::/7, so rejecting
+// them would break that case.
 // Addresses that cannot name a reachable peer — unspecified, loopback,
 // multicast, link-local — are rejected.
 func ParseReachableAddr(raw string) (netip.Addr, error) {

@@ -9,7 +9,7 @@ func TestParseAdvertise(t *testing.T) {
 		ok   bool
 	}{
 		{"public v4", "203.0.113.9", true},
-		{"private v4 (wireguard mesh)", "10.44.0.2", true},
+		{"private v4", "10.44.0.2", true},
 		{"public v6", "2001:db8::1", true},
 		{"ULA v6", "fd00::1", true},
 		{"empty", "", false},
