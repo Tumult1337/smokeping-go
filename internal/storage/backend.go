@@ -164,10 +164,18 @@ type HopPoint struct {
 	Source string
 	Index  int64
 	IP     string
-	Min    float64
-	Max    float64
-	Mean   float64
-	Median float64
+	// TargetReply marks the row(s) whose responder was the target itself.
+	// Redaction and the UI's end-to-end loss key on it because a per-round
+	// walk does not guarantee the target row is the deepest.
+	TargetReply bool
+	// Unreach is the closed-set label of the ICMP unreachable that ended the
+	// trace at this hop; empty for ordinary hops and rows predating the
+	// column.
+	Unreach string
+	Min     float64
+	Max     float64
+	Mean    float64
+	Median  float64
 	// LossPct is the bucket-average loss when the row was bucketed, the
 	// per-cycle loss when raw. MaxLossPct is the worst single cycle within
 	// the bucket — equal to LossPct for raw rows. The heatmap colors by

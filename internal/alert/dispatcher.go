@@ -307,7 +307,8 @@ func rttField(d time.Duration) string {
 
 // formatHops renders hops as a fixed-width table suited for a Discord code
 // block. Unresponsive hops (empty IP) render as "*", matching the trace output
-// convention.
+// convention. An unreachable label goes in a trailing column rather than the
+// host cell, which truncates at ipCol and would cut it mid-word.
 func formatHops(hops []probe.Hop) string {
 	const ipCol = 17
 	var buf bytes.Buffer
@@ -332,7 +333,11 @@ func formatHops(hops []probe.Hop) string {
 			}
 			avg = (sum / time.Duration(n)).Round(100 * time.Microsecond).String()
 		}
-		fmt.Fprintf(&buf, "%-3d %-*s %6s %8s\n", h.Index, ipCol, ip, loss, avg)
+		fmt.Fprintf(&buf, "%-3d %-*s %6s %8s", h.Index, ipCol, ip, loss, avg)
+		if h.Unreach != "" {
+			fmt.Fprintf(&buf, "  !%s", h.Unreach)
+		}
+		buf.WriteByte('\n')
 	}
 	return buf.String()
 }

@@ -150,6 +150,17 @@ func doJSON(t *testing.T, h http.Handler, method, path string, v any) {
 	}
 }
 
+// doRaw issues a request and returns the 200 body verbatim, for tests that
+// assert on the JSON encoding itself rather than the decoded value.
+func doRaw(t *testing.T, h http.Handler, method, path string) string {
+	t.Helper()
+	code, body := do(t, h, method, path)
+	if code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", code, body)
+	}
+	return string(body)
+}
+
 func TestHealth(t *testing.T) {
 	h := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
@@ -1237,5 +1248,170 @@ func TestHopsTimelineEchoesResolvedStep(t *testing.T) {
 	_, raw := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops/timeline?from=-1h")
 	if !strings.Contains(string(raw), `"step_sec":0`) {
 		t.Fatalf("raw tier must serialise step_sec:0 explicitly, got %s", raw)
+	}
+}
+
+// The walk-output shape that breaks positional redaction: the target echoed
+// at index 2 in one round, later rounds stayed silent through maxTTL, so the
+// positional terminal is a silent row and the slave's address sits mid-path.
+// Only the TargetReply marker identifies it.
+func TestRedactTerminalHopKeysOnTargetReply(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "a", Index: 1, IP: "198.51.100.1"},
+		{Source: "a", Index: 2, IP: "10.44.0.2", TargetReply: true, Unreach: ""},
+		{Source: "a", Index: 3, IP: ""},
+		{Source: "a", Index: 4, IP: ""},
+	}
+	got := redactTerminalHops(hops)
+	for _, h := range got {
+		if h.IP == "10.44.0.2" {
+			t.Fatalf("marked target row survived at index %d", h.Index)
+		}
+		if h.Index == 2 && h.TargetReply {
+			t.Fatalf("TargetReply survived on a blanked row: %+v", h)
+		}
+	}
+	if got[0].IP != "198.51.100.1" {
+		t.Fatalf("intermediate hop altered: %+v", got[0])
+	}
+}
+
+// Address-mates of a marked row are blanked too: a TimeExceeded quoting the
+// target's own address must not survive because it lacked the marker.
+func TestRedactTerminalHopCoversTargetAddressMates(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "a", Index: 4, IP: "198.51.100.1"},
+		{Source: "a", Index: 5, IP: "10.44.0.2"},
+		{Source: "a", Index: 6, IP: "10.44.0.2", TargetReply: true},
+	}
+	got := redactTerminalHops(hops)
+	for _, h := range got {
+		if h.IP == "10.44.0.2" {
+			t.Fatalf("target address mate survived at index %d", h.Index)
+		}
+	}
+	if got[0].IP != "198.51.100.1" {
+		t.Fatalf("intermediate hop altered: %+v", got[0])
+	}
+}
+
+// Blanked implies annotation cleared on every arm: a mate row blanked via the
+// address match must lose its Unreach too, or the annotation becomes a side
+// channel for the blanked row.
+func TestRedactTerminalHopClearsAnnotationOnMates(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "a", Index: 3, IP: "10.44.0.2", Unreach: "no-route"},
+		{Source: "a", Index: 6, IP: "10.44.0.2", TargetReply: true},
+	}
+	got := redactTerminalHops(hops)
+	for _, h := range got {
+		if h.Index == 3 && (h.IP != "" || h.Unreach != "") {
+			t.Fatalf("mate row kept address or annotation: %+v", h)
+		}
+	}
+}
+
+// The marker and address match are scoped per (source, timestamp): source b's
+// index-1 row deliberately carries source a's target address so a key-less
+// (global) IP set goes RED here.
+func TestRedactTerminalHopAddressMatchIsPerSource(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "a", Index: 1, IP: "198.51.100.1"},
+		{Source: "a", Index: 2, IP: "10.44.0.2", TargetReply: true},
+		{Source: "b", Index: 1, IP: "10.44.0.2"},
+		{Source: "b", Index: 2, IP: "10.44.0.9", TargetReply: true},
+	}
+	got := redactTerminalHops(hops)
+	for _, h := range got {
+		if h.Source == "b" && h.Index == 1 && h.IP != "10.44.0.2" {
+			t.Fatalf("source b's intermediate judged against source a's target: %+v", h)
+		}
+		if h.Index == 2 && h.IP != "" {
+			t.Fatalf("target row not blanked for source %q", h.Source)
+		}
+	}
+}
+
+// A silent terminal (IP "") with no marker anywhere: intermediates with real
+// addresses must survive.
+func TestRedactTerminalHopSilentTerminalKeepsIntermediates(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "a", Index: 1, IP: "198.51.100.1"},
+		{Source: "a", Index: 2, IP: ""},
+	}
+	got := redactTerminalHops(hops)
+	if got[0].IP != "198.51.100.1" {
+		t.Fatalf("silent terminal blanked the whole path: %+v", got)
+	}
+}
+
+// The annotation follows its address on both endpoints: cleared wherever the
+// address is blanked, kept everywhere for ordinary targets.
+func TestGetHopsRedactsAnnotationsWithAddress(t *testing.T) {
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "tokyo-1", Index: 1, IP: "203.0.113.1", Unreach: "no-route"},
+		{Source: "tokyo-1", Index: 2, IP: "10.44.0.2", TargetReply: true, Unreach: "admin-prohibited"},
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []storage.HopPoint `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops", &body)
+	for _, h := range body.Hops {
+		if h.Index == 2 && (h.IP != "" || h.Unreach != "" || h.TargetReply) {
+			t.Fatalf("target row leaked: %+v", h)
+		}
+		if h.Index == 1 && h.Unreach != "no-route" {
+			t.Fatalf("intermediate annotation must survive on /hops: %+v", h)
+		}
+	}
+}
+
+func TestGetHopsTimelineClearsAnnotationsForHealthTarget(t *testing.T) {
+	now := time.Now()
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "tokyo-1", Time: now, Index: 1, IP: "203.0.113.1", Unreach: "no-route"},
+		{Source: "tokyo-1", Time: now, Index: 2, IP: "10.44.0.2", TargetReply: true},
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []hopTimelineDTO `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops/timeline", &body)
+	for _, h := range body.Hops {
+		if h.IP != hopAddrSentinel {
+			t.Fatalf("address not sentinelized: %+v", h)
+		}
+		if h.Unreach != "" {
+			t.Fatalf("annotation leaked on timeline: %+v", h)
+		}
+	}
+}
+
+// Positive counterparts: an ordinary target's fields must reach the client at
+// all — without these, the clearing tests pass against DTOs that simply never
+// carry the fields.
+func TestGetHopsCarriesAnnotationsForOrdinaryTarget(t *testing.T) {
+	now := time.Now()
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "master", Time: now, Index: 2, IP: "10.0.0.2", Unreach: "admin-prohibited", TargetReply: true},
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	raw := doRaw(t, srv, "GET", "/api/v1/targets/core/gw/hops")
+	if !strings.Contains(raw, `"Unreach":"admin-prohibited"`) || !strings.Contains(raw, `"TargetReply":true`) {
+		t.Fatalf("/hops lost an annotation field:\n%s", raw)
+	}
+
+	rawTL := doRaw(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline")
+	if !strings.Contains(rawTL, `"Unreach":"admin-prohibited"`) {
+		t.Fatalf("/hops/timeline lost Unreach:\n%s", rawTL)
+	}
+	// The timeline DTO must not carry TargetReply: it has no consumer there,
+	// and this pair is what makes the absence assertion falsifiable.
+	if strings.Contains(rawTL, "TargetReply") {
+		t.Fatalf("/hops/timeline serves TargetReply, which its DTO must omit:\n%s", rawTL)
 	}
 }

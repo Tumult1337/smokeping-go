@@ -330,7 +330,7 @@ WITH latest AS (
     AND target_group = ?` + srcClause + freshClause + `
   GROUP BY source
 )
-SELECT timestamp, source, ttl, hop_addr,
+SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
        rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_hop
@@ -374,7 +374,7 @@ WITH nearest AS (
     AND timestamp >= ? AND timestamp < ?
   GROUP BY source
 )
-SELECT timestamp, source, ttl, hop_addr,
+SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
        rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_hop
@@ -407,16 +407,18 @@ func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 	for rows.Next() {
 		var p storage.HopPoint
 		var ttl uint8
+		var targetReply uint8
 		var lossPct float32
 		var lost, sent uint16
 		var min, max, mean, median float64
 		if err := rows.Scan(
-			&p.Time, &p.Source, &ttl, &p.IP,
+			&p.Time, &p.Source, &ttl, &p.IP, &p.Unreach, &targetReply,
 			&min, &max, &mean, &median,
 			&lossPct, &lost, &sent,
 		); err != nil {
 			return nil, err
 		}
+		p.TargetReply = targetReply != 0
 		p.Index = int64(ttl)
 		p.Min = min
 		p.Max = max
@@ -443,7 +445,7 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 func (r *Reader) queryHopsRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {
 	srcClause, srcArgs := sourceFilter(source)
 	q := `
-SELECT timestamp, source, ttl, hop_addr,
+SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
        rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
        loss_pct, lost, sent
 FROM probe_hop
@@ -473,11 +475,17 @@ func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, fr
 	// `loss_pct` would make `max(loss_pct)` aggregate the alias (an aggregate
 	// itself) and ClickHouse rejects "aggregate function inside aggregate
 	// function" with a 500.
+	//
+	// max(unreach) surfaces any annotation in the bucket because the empty
+	// string loses to every label; between two distinct labels the
+	// lexicographically larger wins, which is acceptable since they are
+	// vanishingly rare and equally alarming.
 	q := fmt.Sprintf(`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
        source                                            AS src,
        ttl,
        hop_addr,
+       max(unreach)                                      AS unreach,
        sum(sent)                                         AS total_sent,
        sum(lost)                                         AS total_lost,
        if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS avg_loss_pct,
@@ -503,7 +511,7 @@ ORDER BY bucket_ts, source, ttl`, int(step.Seconds()), srcClause)
 		var lossPct float64
 		var maxLossPct float32
 		var worstTs time.Time
-		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &sent, &lost, &lossPct, &maxLossPct, &worstTs); err != nil {
+		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &p.Unreach, &sent, &lost, &lossPct, &maxLossPct, &worstTs); err != nil {
 			return nil, err
 		}
 		p.Index = int64(ttl)

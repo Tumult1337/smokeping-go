@@ -520,6 +520,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 			Source:     h.Source,
 			Index:      h.Index,
 			IP:         h.IP,
+			Unreach:    h.Unreach,
 			LossPct:    h.LossPct,
 			MaxLossPct: h.MaxLossPct,
 			LossCount:  h.LossCount,
@@ -554,18 +555,32 @@ type hopTimelineDTO struct {
 	MaxLossPct float64   `json:"MaxLossPct"`
 	LossCount  int64     `json:"LossCount"`
 	Sent       int64     `json:"Sent"`
+	// Unreach is the closed-set unreachable label aggregated over the bucket.
+	// TargetReply deliberately has no counterpart here: the heatmap has no
+	// consumer for it, and a field with no consumer on an unauthenticated
+	// endpoint is pure disclosure surface.
+	Unreach string `json:"Unreach"`
 	// WorstTime: exact timestamp of the bucket's worst-loss cycle so a
 	// heatmap click can open that cycle instead of the bucket's first one.
 	WorstTime time.Time `json:"WorstTime"`
 }
 
-// redactTerminalHops blanks the address of each source's furthest hop.
+// redactTerminalHops blanks the union of three row sets per (source,
+// timestamp): every TargetReply row, the furthest-index row, and every row
+// sharing an address with either.
 //
-// For a health target that hop is the slave itself, and it is the one address
-// this whole feature exists to keep out of the API. Redaction is positional
-// rather than a comparison against the real address, because comparing would
-// mean handing this package the addresses — reintroducing exactly the leak the
-// Probe/Public split prevents.
+// For a health target those rows are the slave itself, and it is the one
+// address this whole feature exists to keep out of the API. The marker arm
+// carries the weight because a per-round walk can put the target's echo below
+// a deeper all-silent round, where no positional rule finds it; the positional
+// arm keeps rows written before the marker existed covered exactly as before;
+// the address-mates arm catches a TimeExceeded quoting the target's own
+// address on an unmarked row. Every comparison is against the served rows
+// themselves, never against a configured address, so the Probe/Public split
+// still holds.
+//
+// Every blanked row loses Unreach and TargetReply with its address — an
+// annotation that outlives its address is a side channel.
 //
 // On a trace that never reached the slave the furthest hop is an intermediate,
 // so this over-redacts by one row. That is the fail-closed direction.
@@ -600,12 +615,25 @@ func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 			maxIndex[key] = h.Index
 		}
 	}
+	targetIPs := make(map[sourceTime]map[string]bool, len(maxIndex))
+	for _, h := range hops {
+		key := sourceTime{h.Source, h.Time.UnixNano()}
+		if (h.TargetReply || h.Index == maxIndex[key]) && h.IP != "" {
+			if targetIPs[key] == nil {
+				targetIPs[key] = make(map[string]bool, 1)
+			}
+			targetIPs[key][h.IP] = true
+		}
+	}
 	out := make([]storage.HopPoint, len(hops))
 	copy(out, hops)
 	for i := range out {
 		key := sourceTime{out[i].Source, out[i].Time.UnixNano()}
-		if out[i].Index == maxIndex[key] {
+		if out[i].TargetReply || out[i].Index == maxIndex[key] ||
+			(out[i].IP != "" && targetIPs[key][out[i].IP]) {
 			out[i].IP = ""
+			out[i].Unreach = ""
+			out[i].TargetReply = false
 		}
 	}
 	return out
@@ -640,7 +668,8 @@ const hopAddrSentinel = "redacted"
 // (source, time), so the terminal row is unambiguous there.
 //
 // Genuinely empty addresses (a hop that never replied) are left empty —
-// see hopAddrSentinel for why that bit must survive unmolested.
+// see hopAddrSentinel for why that bit must survive unmolested. Annotations
+// follow their address: every row loses Unreach and TargetReply here.
 func redactAllHopAddresses(hops []storage.HopPoint) []storage.HopPoint {
 	out := make([]storage.HopPoint, len(hops))
 	copy(out, hops)
@@ -648,6 +677,8 @@ func redactAllHopAddresses(hops []storage.HopPoint) []storage.HopPoint {
 		if out[i].IP != "" {
 			out[i].IP = hopAddrSentinel
 		}
+		out[i].Unreach = ""
+		out[i].TargetReply = false
 	}
 	return out
 }

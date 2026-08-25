@@ -276,7 +276,7 @@ func TestDispatcherDiscord(t *testing.T) {
 			Hops: []probe.Hop{
 				{Index: 1, IP: "192.168.1.1", Sent: 5, Lost: 0, RTTs: []time.Duration{2 * time.Millisecond, 2 * time.Millisecond}},
 				{Index: 2, IP: "", Sent: 5, Lost: 5},
-				{Index: 3, IP: "1.1.1.1", Sent: 5, Lost: 5},
+				{Index: 3, IP: "1.1.1.1", Sent: 5, Lost: 5, Unreach: "host-unreachable"},
 			},
 		},
 	}
@@ -306,6 +306,9 @@ func TestDispatcherDiscord(t *testing.T) {
 	}
 	if !strings.Contains(desc, "192.168.1.1") || !strings.Contains(desc, "*") {
 		t.Errorf("description missing expected hop rows:\n%s", desc)
+	}
+	if !strings.Contains(desc, "!host-unreachable") {
+		t.Errorf("description missing the hop unreachable annotation:\n%s", desc)
 	}
 
 	// Cycle without Hops → no MTR block.
@@ -905,7 +908,7 @@ func TestDispatchedHealthEventCarriesNoAddress(t *testing.T) {
 		LossCount: 10,
 		Hops: []probe.Hop{
 			{Index: 1, IP: "203.0.113.1"},
-			{Index: 2, IP: slaveAddr},
+			{Index: 2, IP: slaveAddr, Unreach: "no-route", TargetReply: true},
 		},
 		// Never populated for an ICMP health probe in practice; set here so
 		// the scrub is asserted to be exhaustive over scheduler.Cycle rather

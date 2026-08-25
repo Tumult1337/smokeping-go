@@ -317,14 +317,24 @@ Key points a reader can't derive from a single file:
   The address never reaches the API: `slavehealth.Set` exposes `Probe()`
   (real hosts — scheduler and `BuildClusterConfig` only) and `Public()`
   (stripped — the API's `HealthLister` only). Hop redaction differs by
-  endpoint because it's positional, never an address comparison:
-  `/hops` pins one timestamp per source, so the terminal hop is
-  unambiguous and only its `IP` is blanked to `""`; `/hops/timeline`
-  buckets across `(bucket_ts, source, ttl, hop_addr)`, so no positional
-  rule identifies a terminal row and every non-empty `IP` there is
-  replaced with the sentinel `"redacted"` instead — not `""`, because
-  the heatmap reads `IP` as a did-this-hop-reply flag. Because health
-  targets live outside the stored config,
+  endpoint. `/hops` blanks the union, per `(source, timestamp)`, of
+  every `target_reply` marker row, the positional max-index row, and
+  every row sharing an address with those two sets: a per-round walk can
+  put the target's echo below a deeper all-silent round, so position
+  alone no longer finds it, the positional arm keeps rows written before
+  the marker existed covered, and the address arm catches a
+  `TimeExceeded` quoting the target's own address. Every comparison is
+  against the served rows themselves, never a configured address, so
+  the Probe/Public split still holds. `/hops/timeline` buckets across
+  `(bucket_ts, source, ttl, hop_addr)`, so no rule identifies a terminal
+  row and every non-empty `IP` there is replaced with the sentinel
+  `"redacted"` instead — not `""`, because the heatmap reads `IP` as a
+  did-this-hop-reply flag; its DTO does not carry `target_reply` at all,
+  since a field with no consumer on an unauthenticated endpoint is pure
+  disclosure surface. On both endpoints a redacted row loses `Unreach`
+  and `TargetReply` with its address — an annotation that outlives its
+  address is a side channel. Because health targets live outside the
+  stored config,
   `scheduler.LifecycleOptions.ExtraFingerprint` carries mesh membership
   into the rebuild decision (`Fingerprint(cfg)` alone can't see it), and
   registry changes share the debounced SIGHUP signal path so a fleet
