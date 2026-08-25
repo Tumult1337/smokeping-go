@@ -27,7 +27,8 @@ type Cycle struct {
 	Sent        int
 	LossCount   int
 	Summary     stats.Summary
-	// Hops is populated for MTR cycles only; nil for every other probe type.
+	// Hops carries per-(ttl, responder) trace rows for icmp and mtr cycles;
+	// nil for every other probe type.
 	Hops []probe.Hop
 	// HTTPSamples is populated for HTTP cycles only.
 	HTTPSamples []probe.HTTPSample

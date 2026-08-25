@@ -53,3 +53,25 @@ func TestMTRUnreachedReportsFullLoss(t *testing.T) {
 		t.Fatalf("unreached mirror leaked intermediate stats: %+v", res)
 	}
 }
+
+// Two marked rows (anycast at the terminal) aggregate into the mirror; the
+// deepest row is a silent intermediate and must contribute nothing.
+func TestMTRMirrorsAggregateAcrossMarkedRows(t *testing.T) {
+	m := NewMTR("mtr", time.Second)
+	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+		return []Hop{
+			{Index: 1, IP: "10.0.0.1", RTTs: []time.Duration{time.Millisecond}, Sent: 3},
+			{Index: 2, IP: "192.0.2.9", RTTs: []time.Duration{2 * time.Millisecond, 4 * time.Millisecond}, Sent: 3, Lost: 1, TargetReply: true},
+			{Index: 2, IP: "192.0.2.10", RTTs: []time.Duration{3 * time.Millisecond}, Sent: 1, TargetReply: true},
+			{Index: 5, IP: "", Sent: 1, Lost: 1},
+		}, true, nil
+	}
+	res, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Sent != 4 || res.LossCount != 1 || len(res.RTTs) != 3 {
+		t.Fatalf("mirror did not aggregate marked rows: Sent=%d Lost=%d RTTs=%d",
+			res.Sent, res.LossCount, len(res.RTTs))
+	}
+}

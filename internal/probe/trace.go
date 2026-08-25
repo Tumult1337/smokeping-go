@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"time"
 
 	"golang.org/x/net/icmp"
@@ -109,19 +110,23 @@ type stepFunc func(ctx context.Context, round, ttl int) ttlReply
 // walkRounds runs the TTL walk over an injected per-probe step so tests drive
 // this exact loop. Each round walks 1..maxTTL and stops at its own terminal,
 // so a route that changes mid-cycle is followed rather than clamped to the
-// shortest path seen; reached reports whether any round got an echo, and the
-// echoing row is marked TargetReply because it is no longer guaranteed to be
-// the deepest.
+// shortest path seen; reached reports whether any round got an echo. Every
+// responder at a TTL gets its own row, and each row that echoed is marked
+// TargetReply because the target's row is no longer guaranteed to be the
+// deepest.
 func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, step stepFunc) ([]Hop, bool) {
-	type hopAgg struct {
-		ip          string
+	type respondent struct {
+		addr        string
 		targetReply bool
 		unreach     string
 		rtts        []time.Duration
 		sent        int
-		lost        int
 	}
-	agg := make([]hopAgg, maxTTL+1)
+	type ttlAgg struct {
+		rows   []respondent
+		losses int
+	}
+	agg := make([]ttlAgg, maxTTL+1)
 	reached := false
 
 	for round := range rounds {
@@ -133,17 +138,22 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 				break
 			}
 			r := step(ctx, round, ttl)
-			agg[ttl].sent++
 			if r.err != nil || r.addr == "" {
-				agg[ttl].lost++
+				agg[ttl].losses++
 			} else {
-				agg[ttl].rtts = append(agg[ttl].rtts, r.rtt)
-				if agg[ttl].ip == "" {
-					agg[ttl].ip = r.addr
+				i := slices.IndexFunc(agg[ttl].rows, func(row respondent) bool { return row.addr == r.addr })
+				if i < 0 {
+					agg[ttl].rows = append(agg[ttl].rows, respondent{addr: r.addr})
+					i = len(agg[ttl].rows) - 1
+				}
+				row := &agg[ttl].rows[i]
+				row.rtts = append(row.rtts, r.rtt)
+				row.sent++
+				if r.kind == replyEcho {
+					row.targetReply = true
 				}
 			}
 			if r.kind == replyEcho {
-				agg[ttl].targetReply = true
 				reached = true
 				break
 			}
@@ -158,19 +168,30 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 
 	var hops []Hop
 	for ttl := 1; ttl <= maxTTL; ttl++ {
-		h := agg[ttl]
-		if h.sent == 0 {
+		a := agg[ttl]
+		if len(a.rows) == 0 {
+			if a.losses > 0 {
+				hops = append(hops, Hop{Index: ttl, Sent: a.losses, Lost: a.losses})
+			}
 			continue
 		}
-		hops = append(hops, Hop{
-			Index:       ttl,
-			IP:          h.ip,
-			TargetReply: h.targetReply,
-			Unreach:     h.unreach,
-			RTTs:        h.rtts,
-			Sent:        h.sent,
-			Lost:        h.lost,
-		})
+		for i, row := range a.rows {
+			h := Hop{
+				Index:       ttl,
+				IP:          row.addr,
+				TargetReply: row.targetReply,
+				Unreach:     row.unreach,
+				RTTs:        row.rtts,
+				Sent:        row.sent,
+			}
+			// Loss at a TTL has no responder to blame, so it stays on the
+			// first-seen row and single-responder numbers keep their old shape.
+			if i == 0 {
+				h.Sent += a.losses
+				h.Lost = a.losses
+			}
+			hops = append(hops, h)
+		}
 	}
 	return hops, reached
 }

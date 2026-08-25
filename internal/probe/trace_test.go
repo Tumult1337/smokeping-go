@@ -247,3 +247,112 @@ func TestWalkRoundsEmitsPartialOnCancel(t *testing.T) {
 		t.Fatalf("got %d hops, want the 2 collected before cancel: %+v", len(hops), hops)
 	}
 }
+
+func teRTT(addr string, rtt time.Duration) ttlReply {
+	return ttlReply{addr: addr, rtt: rtt, kind: replyTimeExceeded}
+}
+
+// ECMP responders at one TTL must each get their own row with their own
+// samples, in first-seen order. RTT values are distinct on purpose: a
+// length-only assertion stays green when rows swap their samples.
+func TestWalkRoundsSplitsECMPRespondersPerAddress(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: teRTT("10.0.0.1", 5*time.Millisecond), {0, 2}: ech("192.0.2.9"),
+		{1, 1}: teRTT("10.0.9.9", 7*time.Millisecond), {1, 2}: ech("192.0.2.9"),
+		{2, 1}: teRTT("10.0.9.9", 9*time.Millisecond), {2, 2}: ech("192.0.2.9"),
+	}}
+	hops, _ := walkRounds(context.Background(), 3, 10, 0, s.step)
+
+	var ttl1 []Hop
+	for _, h := range hops {
+		if h.Index == 1 {
+			ttl1 = append(ttl1, h)
+		}
+	}
+	if len(ttl1) != 2 {
+		t.Fatalf("want one row per responder at ttl 1, got %+v", hops)
+	}
+	if ttl1[0].IP != "10.0.0.1" || ttl1[1].IP != "10.0.9.9" {
+		t.Fatalf("responder rows not in first-seen order: %+v", ttl1)
+	}
+	a, b := ttl1[0], ttl1[1]
+	if a.Sent != 1 || len(a.RTTs) != 1 || a.RTTs[0] != 5*time.Millisecond {
+		t.Fatalf("A's samples wrong or foreign: %+v", a)
+	}
+	if b.Sent != 2 || len(b.RTTs) != 2 || b.RTTs[0] != 7*time.Millisecond || b.RTTs[1] != 9*time.Millisecond {
+		t.Fatalf("B's samples wrong or foreign: %+v", b)
+	}
+	if a.TargetReply || b.TargetReply {
+		t.Fatalf("intermediate responders must not be marked: %+v", ttl1)
+	}
+}
+
+// Loss at a TTL cannot be attributed to a responder that answered; it stays
+// on the first-seen responder's row so single-responder numbers stay
+// bit-identical to the pre-split behavior.
+func TestWalkRoundsAttachesLossToFirstResponder(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{1, 1}: teRTT("10.0.0.1", 5*time.Millisecond),
+		{2, 1}: teRTT("10.0.9.9", 7*time.Millisecond),
+	}}
+	hops, reached := walkRounds(context.Background(), 3, 1, 0, s.step)
+	if reached {
+		t.Fatal("no echo in script")
+	}
+	var a, b Hop
+	for _, h := range hops {
+		switch h.IP {
+		case "10.0.0.1":
+			a = h
+		case "10.0.9.9":
+			b = h
+		}
+	}
+	if a.Sent != 2 || a.Lost != 1 || len(a.RTTs) != 1 {
+		t.Fatalf("first responder must absorb the ttl's loss (sent=2 lost=1), got %+v", a)
+	}
+	if b.Sent != 1 || b.Lost != 0 {
+		t.Fatalf("later responder must stay clean, got %+v", b)
+	}
+	for _, h := range hops {
+		if h.Index == 1 && h.IP == "" {
+			t.Fatalf("silent row emitted although responders exist: %+v", hops)
+		}
+	}
+}
+
+// A TTL nothing ever answered still emits its silent row — the heatmap reads
+// IP=="" as no-reply and the row carries the loss evidence.
+func TestWalkRoundsEmitsSilentRowWhenNoResponder(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{}}
+	hops, _ := walkRounds(context.Background(), 3, 1, 0, s.step)
+	if len(hops) != 1 {
+		t.Fatalf("got %d hops, want 1 silent row: %+v", len(hops), hops)
+	}
+	if h := hops[0]; h.IP != "" || h.Sent != 3 || h.Lost != 3 {
+		t.Fatalf("silent row wrong: %+v", h)
+	}
+}
+
+// Anycast/flap at the terminal: two different addresses echo at one TTL, and
+// BOTH rows must be marked — the mirror and the redaction aggregate marked
+// rows, so an unmarked second target address would leak and under-count.
+func TestWalkRoundsMarksEveryEchoResponder(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: {addr: "192.0.2.9", rtt: 2 * time.Millisecond, kind: replyEcho},
+		{1, 1}: te("10.0.0.1"), {1, 2}: {addr: "192.0.2.10", rtt: 3 * time.Millisecond, kind: replyEcho},
+	}}
+	hops, _ := walkRounds(context.Background(), 2, 10, 0, s.step)
+	marked := 0
+	for _, h := range hops {
+		if h.Index == 2 {
+			if !h.TargetReply {
+				t.Fatalf("echo responder unmarked: %+v", h)
+			}
+			marked++
+		}
+	}
+	if marked != 2 {
+		t.Fatalf("want 2 marked target rows, got %d: %+v", marked, hops)
+	}
+}
