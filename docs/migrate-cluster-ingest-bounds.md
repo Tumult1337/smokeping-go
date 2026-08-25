@@ -55,8 +55,11 @@ Two operator-visible consequences:
 
 - A cycle older than `max(3 × interval, 5m)` on arrival is stored but not
   evaluated for alerting. A backlog delivered after an outage longer than that
-  window will not replay alert transitions; the next fresh cycle drives the
-  correct state.
+  window will not replay alert transitions. What drives the state from there
+  is the next cycle that is both inside the window *and* newer than the last
+  one already evaluated for that source — not merely the next fresh one,
+  because a cycle that arrives fresh but does not advance that source's
+  timestamp is a redelivery and is skipped.
 - A slave whose clock **lags** the master by more than that window stops
   contributing to alerts while its data keeps being stored. Keep NTP working
   on slaves. (A slave more than five minutes *ahead* was already refused at
