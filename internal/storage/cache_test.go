@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -977,5 +978,95 @@ func TestCachingReader_Cycles_BoundsInflightLeaders(t *testing.T) {
 	// Slots are released, so a fresh distinct key is admitted again.
 	if _, err := c.QueryCycles(context.Background(), ref, windowFor(maxInflightLeaders+1), now, QueryFilter{Step: time.Hour}); err != nil {
 		t.Fatalf("after leaders retired: err = %v, want success", err)
+	}
+}
+
+// captureLatestReader records the filter each inner QueryLatestHops receives,
+// so tests can pin both cache-key behavior and the exact bytes the query ran
+// with.
+type captureLatestReader struct {
+	fakeReader
+	mu      sync.Mutex
+	filters []QueryFilter
+}
+
+func (c *captureLatestReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) ([]HopPoint, error) {
+	c.mu.Lock()
+	c.filters = append(c.filters, f)
+	c.mu.Unlock()
+	return c.fakeReader.QueryLatestHops(ctx, ref, f)
+}
+
+// The floor the entry was computed under must be part of its key: without it,
+// a cached "latest path" keeps serving rows the current floor would exclude,
+// and two requests whose floors differ silently share one entry.
+func TestCachingReader_LatestHops_FreshnessFloorIsPartOfTheKey(t *testing.T) {
+	inner := &captureLatestReader{fakeReader: fakeReader{hops: []HopPoint{{Index: 1, IP: "10.0.0.1"}}}}
+	c := NewCachingReader(inner, 8, 8)
+	ref := newRef("core", "gw")
+
+	// 1_000_000_030 and 1_000_000_050 floor to the same 60s cell
+	// (1_000_000_020); 1_000_000_085 floors to the next (1_000_000_080).
+	t1 := time.Unix(1_000_000_030, 0)
+	t2 := time.Unix(1_000_000_050, 0)
+	t3 := time.Unix(1_000_000_085, 0)
+
+	for _, since := range []time.Time{t1, t2} {
+		if _, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{LatestSince: since}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := inner.latestHops.Load(); got != 1 {
+		t.Fatalf("same-quantum floors must share an entry: %d inner calls, want 1", got)
+	}
+
+	if _, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{LatestSince: t3}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.latestHops.Load(); got != 2 {
+		t.Fatalf("a new quantum must miss: %d inner calls, want 2", got)
+	}
+}
+
+// The key is computed from the exact bytes the query runs with: the inner
+// reader must receive the quantized floor, not the raw per-request value —
+// otherwise two requests sharing a key ran different queries.
+func TestCachingReader_LatestHops_InnerReceivesQuantizedFloor(t *testing.T) {
+	inner := &captureLatestReader{fakeReader: fakeReader{hops: []HopPoint{{Index: 1}}}}
+	c := NewCachingReader(inner, 8, 8)
+
+	raw := time.Unix(1_000_000_030, 0)
+	if _, err := c.QueryLatestHops(context.Background(), newRef("core", "gw"), QueryFilter{LatestSince: raw}); err != nil {
+		t.Fatal(err)
+	}
+	inner.mu.Lock()
+	defer inner.mu.Unlock()
+	if len(inner.filters) != 1 {
+		t.Fatalf("inner called %d times, want 1", len(inner.filters))
+	}
+	if want := time.Unix(1_000_000_020, 0); !inner.filters[0].LatestSince.Equal(want) {
+		t.Fatalf("inner floor = %v, want quantized %v", inner.filters[0].LatestSince, want)
+	}
+}
+
+// Zero LatestSince means "no floor" and must stay zero — the documented
+// QueryFilter contract; flooring it would key a constant negative unix value.
+func TestCachingReader_LatestHops_ZeroFloorStaysZero(t *testing.T) {
+	inner := &captureLatestReader{fakeReader: fakeReader{hops: []HopPoint{{Index: 1}}}}
+	c := NewCachingReader(inner, 8, 8)
+	ref := newRef("core", "gw")
+
+	for range 2 {
+		if _, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := inner.latestHops.Load(); got != 1 {
+		t.Fatalf("zero-floor requests must share one entry: %d inner calls", got)
+	}
+	inner.mu.Lock()
+	defer inner.mu.Unlock()
+	if !inner.filters[0].LatestSince.IsZero() {
+		t.Fatalf("zero floor mutated to %v", inner.filters[0].LatestSince)
 	}
 }

@@ -122,6 +122,11 @@ type hopsCacheKey struct {
 	group, name, source string
 	// fromUnix/toUnix used for timeline + hopsAt windows; both zero for latest.
 	fromUnix, toUnix int64
+	// latestSinceUnix is the freshness floor for the latest kind, floored to
+	// cacheKeyToQuantum — the same quantized instant the inner query runs
+	// with, so a cached entry is valid for exactly its key. Zero when the
+	// filter carries no floor, and for the other kinds.
+	latestSinceUnix int64
 	// stepSec is the resolved bucket width. Two windows that quantize to the
 	// same from/to but straddle a step-ladder boundary resolve to different
 	// bucket widths; without this they would collide and serve wrong-shaped
@@ -330,12 +335,20 @@ func (c *CachingReader) QueryHTTPSamples(ctx context.Context, ref config.TargetR
 func (c *CachingReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) ([]HopPoint, error) {
 	// Latest is always live: TTL = cacheTTLLive so a fresh cycle replaces the
 	// stale entry within ~1 ping interval. fromUnix/toUnix stay zero since
-	// the call has no window.
+	// the call has no window. Quantizing the freshness floor into both the key
+	// and the filter reapplies it once per quantum instead of never within
+	// TTL, and widens it by at most 60s — the slack class the TTL accepts.
+	var since int64
+	if !f.LatestSince.IsZero() {
+		since = floorUnix(f.LatestSince, cacheKeyToQuantum)
+		f.LatestSince = time.Unix(since, 0)
+	}
 	key := hopsCacheKey{
-		kind:   hopsKindLatest,
-		group:  ref.Group,
-		name:   ref.Target.Name,
-		source: f.Source,
+		kind:            hopsKindLatest,
+		group:           ref.Group,
+		name:            ref.Target.Name,
+		source:          f.Source,
+		latestSinceUnix: since,
 	}
 	return c.fetchHops(ctx, key, cacheTTLLive, func(ctx context.Context) ([]HopPoint, error) {
 		return c.inner.QueryLatestHops(ctx, ref, f)
