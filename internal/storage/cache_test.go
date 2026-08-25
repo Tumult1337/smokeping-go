@@ -1071,3 +1071,65 @@ func TestCachingReader_LatestHops_ZeroFloorStaysZero(t *testing.T) {
 		t.Fatalf("zero floor mutated to %v", inner.filters[0].LatestSince)
 	}
 }
+
+// A refused query is a statement about the request, not about the upstream: a
+// hop read past its row cap fails identically on every retry. Answering it from
+// an expired entry serves a 200 carrying a window the read can no longer
+// produce, and forever — only a success ever bumps an entry's expiry.
+func TestCachingReader_RefusalIsNotServedFromStaleCache(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+
+	reads := map[string]func(*CachingReader) error{
+		"QueryHopsTimeline": func(c *CachingReader) error {
+			_, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{Source: "master"})
+			return err
+		},
+		"QueryLatestHops": func(c *CachingReader) error {
+			_, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{})
+			return err
+		},
+		"QueryHopsAt": func(c *CachingReader) error {
+			_, err := c.QueryHopsAt(context.Background(), ref, now, 30*time.Minute, QueryFilter{})
+			return err
+		},
+		"QueryCycles": func(c *CachingReader) error {
+			_, err := c.QueryCycles(context.Background(), ref, from, now, QueryFilter{})
+			return err
+		},
+	}
+
+	for name, read := range reads {
+		t.Run(name, func(t *testing.T) {
+			clock := now
+			inner := &fakeReader{
+				hops: []HopPoint{{Time: now, Index: 1, IP: "1.1.1.1"}},
+				out:  []CyclePoint{{Time: now, Median: 1.5}},
+			}
+			c := NewCachingReader(inner, 8, 8)
+			c.nowFn = func() time.Time { return clock }
+
+			if err := read(c); err != nil {
+				t.Fatalf("warm: %v", err)
+			}
+			clock = now.Add(cacheTTLLive + time.Second)
+			inner.err = ErrHopsTruncated
+
+			// Twice: the second call also proves the refusal was not itself
+			// stored as the entry's new result.
+			for i := range 2 {
+				if err := read(c); !errors.Is(err, ErrHopsTruncated) {
+					t.Fatalf("call %d: err = %v, want the refusal to reach the caller", i, err)
+				}
+			}
+
+			// An unreachable upstream is a different claim and still resolves
+			// to the stale entry — the refusal check must not have widened.
+			inner.err = errors.New("clickhouse down")
+			if err := read(c); err != nil {
+				t.Fatalf("availability failure: err = %v, want the stale entry served", err)
+			}
+		})
+	}
+}

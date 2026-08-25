@@ -57,6 +57,15 @@ const (
 // request may succeed once in-flight work retires.
 var ErrOverloaded = errors.New("storage: too many queries in flight")
 
+// isRefusal reports whether err says the request was rejected rather than the
+// upstream failed. A refusal is deterministic — retrying it produces the same
+// answer — so serving an expired entry in its place would turn it into a 200
+// that never expires, since only a success bumps an entry's TTL. Every new
+// semantic sentinel a Reader can return belongs here.
+func isRefusal(err error) bool {
+	return errors.Is(err, ErrHopsTruncated)
+}
+
 // CachingReader wraps a Reader with two LRU+singleflight decorators: one for
 // QueryCycles, one for the three hops query paths. QueryRTTs and
 // QueryHTTPSamples pass through unchanged because they hit narrow raw-only
@@ -304,7 +313,7 @@ func (c *CachingReader) runCyclesLeader(ctx context.Context, key cycleCacheKey, 
 	c.mu.Lock()
 	if err == nil {
 		c.storeLocked(key, pts, ttl)
-	} else if elem, ok := c.items[key]; ok {
+	} else if elem, ok := c.items[key]; ok && !isRefusal(err) {
 		e := elem.Value.(*cycleCacheEntry)
 		stale = make([]CyclePoint, len(e.points))
 		copy(stale, e.points)
@@ -509,7 +518,7 @@ func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl
 	c.hopsMu.Lock()
 	if err == nil {
 		c.hopsStoreLocked(key, res, ttl)
-	} else if elem, ok := c.hopsItems[key]; ok {
+	} else if elem, ok := c.hopsItems[key]; ok && !isRefusal(err) {
 		e := elem.Value.(*hopsCacheEntry)
 		clone := cloneHopsResult(e.result)
 		stale = &clone
