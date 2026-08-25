@@ -66,9 +66,10 @@ type aggKey struct {
 type alertState struct {
 	state      State
 	consecHits int // consecutive cycles the condition has been true
-	// lastSeen is the cycle timestamp, not wall-clock. Cycle time is already
-	// a deterministic injected input, which makes staleness pruning testable
-	// without a fake clock.
+	// lastSeen is the master's receive time, not the cycle's own timestamp:
+	// the latter is slave-supplied, and ingest accepts one up to
+	// config.MaxFutureSkew ahead, which was enough for one hostile slave to
+	// age every honest source out of tally and become a majority of itself.
 	lastSeen time.Time
 }
 
@@ -110,6 +111,11 @@ type Evaluator struct {
 	// and drop the now-stale aggregate for that alert (see pruneStaleAggregates).
 	quorumEnabled map[string]bool
 
+	// nowFn is the master's receive clock, injected so tests can drive
+	// staleness without sleeping. Never the cycle's own timestamp: that is
+	// slave-supplied.
+	nowFn func() time.Time
+
 	mu     sync.Mutex
 	states map[aggKey]map[string]*alertState // target+alert → source → per-source state
 	agg    map[aggKey]State                  // target+alert → last dispatched aggregate state (quorum alerts only)
@@ -121,6 +127,7 @@ func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) 
 		log:        log,
 		store:      store,
 		dispatcher: dispatcher,
+		nowFn:      time.Now,
 		conds:      make(map[string]Condition),
 		states:     make(map[aggKey]map[string]*alertState),
 		agg:        make(map[aggKey]State),
@@ -206,6 +213,16 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	if len(alerts) == 0 {
 		return
 	}
+	// One read for the whole pass, and the only clock any state below is keyed
+	// on — never cy.Time, which the pushing slave chose.
+	now := e.nowFn()
+	window := stalenessWindow(cfg.Interval)
+	// Skipped whole like a cycle that sent nothing, so the source ages out
+	// rather than voting on data it replayed out of its own history.
+	if age := now.Sub(cy.Time); age > alertFreshness(cfg.Interval) {
+		e.log.Debug("alert.stale_cycle", "target", cy.Target.ID(), "source", cy.Source, "age", age)
+		return
+	}
 
 	var toDispatch []Event
 
@@ -231,7 +248,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			st = &alertState{state: StateOK}
 			bySource[cy.Source] = st
 		}
-		st.lastSeen = cy.Time
+		st.lastSeen = now
 
 		triggered := cond.Eval(cy)
 		prev := st.state
@@ -256,8 +273,6 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			st.state = StateOK
 		}
 
-		window := stalenessWindow(cfg.Interval)
-
 		if !alertCfg.Quorum.Enabled() {
 			if prev != st.state {
 				toDispatch = append(toDispatch, Event{
@@ -272,13 +287,13 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 					// stale sources. A per-source alert dispatches its own
 					// resolve from the state kept here, so evicting a source
 					// that went quiet while firing would drop that resolve.
-					FiringSources: firingSources(bySource, cy.Time, window),
+					FiringSources: firingSources(bySource, now, window),
 				})
 			}
 			continue
 		}
 
-		firing, live := e.tally(bySource, cy.Time, window)
+		firing, live := e.tally(bySource, now, window)
 		next := StateOK
 		if live > 0 && firing >= alertCfg.Quorum.Threshold(live) {
 			next = StateFiring
@@ -290,7 +305,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 
 		w, ok := e.warmup[key]
 		if !ok {
-			w = &aggWarmup{firstSeen: cy.Time, sourcesSeen: make(map[string]struct{}, 4)}
+			w = &aggWarmup{firstSeen: now, sourcesSeen: make(map[string]struct{}, 4)}
 			e.warmup[key] = w
 		}
 		w.sourcesSeen[cy.Source] = struct{}{}
@@ -298,7 +313,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		// Only a *new* FIRING transition is gated — an already-firing
 		// aggregate staying firing, and any transition to OK, pass through
 		// untouched so a real resolve can never get stuck behind warm-up.
-		if next == StateFiring && prevAgg != StateFiring && !w.ready(cy.Time, window) {
+		if next == StateFiring && prevAgg != StateFiring && !w.ready(now, window) {
 			next = prevAgg
 		}
 
@@ -316,7 +331,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 				Live:      live,
 				// tally has already evicted the stale sources, so this sees
 				// exactly the set the quorum decision was made on.
-				FiringSources: firingSources(bySource, cy.Time, window),
+				FiringSources: firingSources(bySource, now, window),
 			})
 		}
 	}
@@ -365,7 +380,9 @@ func scrubHealthAddresses(ev Event) Event {
 }
 
 // tally counts firing and live sources, evicting any that have gone stale.
-// Must be called with e.mu held.
+// now is the master's receive clock: a slave choosing this value could date a
+// cycle forward and age every honest source out of the denominator, becoming a
+// majority of itself. Must be called with e.mu held.
 //
 // Pruning is essential rather than cosmetic: a slave that dies while healthy
 // would otherwise sit in the denominator forever, so a real outage seen by
@@ -405,10 +422,22 @@ func firingSources(bySource map[string]*alertState, now time.Time, window time.D
 	return out
 }
 
-// stalenessWindow is how long a source's last cycle stays counted. Three
-// intervals tolerates one missed cycle plus scheduling jitter, and is wide
-// enough that ordinary clock skew between master and slaves — the cycle
-// timestamps come from different hosts — cannot evict a live source.
+// alertFreshness is how old a cycle may be, measured on the master's receive
+// clock, and still be evaluated for alerting. Alerting is a statement about
+// now: ingest accepts a cycle up to config.MaxCycleAge (7d) old, and
+// evaluating one replays a historical transition as if it were current, which
+// a slave can do at will. It is never tighter than the liveness window it
+// feeds — a slow-interval deployment must still be able to keep a source live
+// — nor than the skew ingest already tolerates, since master and slave clocks
+// are compared here and an honest slave at the accepted limit must not be
+// silently excluded.
+func alertFreshness(interval time.Duration) time.Duration {
+	return max(stalenessWindow(interval), config.MaxFutureSkew)
+}
+
+// stalenessWindow is how long a source's last cycle stays counted, measured
+// from when the master received it. Three intervals tolerates one missed cycle
+// plus scheduling jitter and one push cadence.
 func stalenessWindow(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		interval = time.Minute

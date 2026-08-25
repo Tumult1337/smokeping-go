@@ -556,7 +556,33 @@ Key points a reader can't derive from a single file:
   (absolute minimum), gating dispatch only — per-source `sustained`
   counters stay independent. Sources stale beyond 3× the probe interval
   are pruned from the live count so a dead slave can't suppress a real
-  alert. A quorum alert also has a warm-up: it won't dispatch FIRING
+  alert.
+
+  **Every clock the evaluator keys on is the master's receive clock**
+  (`Evaluator.nowFn`, injected, `time.Now` in production; read once per
+  `OnCycle` pass). `alertState.lastSeen`, `tally`, `firingSources` and
+  `aggWarmup.firstSeen` all use it. Keying them on `Cycle.Time` made the
+  liveness clock slave-supplied: ingest accepts `config.MaxFutureSkew` (5m)
+  of forward skew and the staleness window at a 20s interval is 60s, so one
+  hostile slave dating a cycle forward pruned every honest source and became
+  a majority of itself — in either direction, manufacturing a page or
+  silencing a real outage. The same skew backwards satisfied warm-up's
+  window on a slave's very first cycle. The cycle's own timestamp still
+  reaches storage and still stamps `Event.Time`; it is only not a clock.
+
+  A cycle older than `alertFreshness` = max(3× interval,
+  `config.MaxFutureSkew`) is **not evaluated at all** — returned on like a
+  cycle that sent nothing, so the source ages out rather than voting on
+  replayed data. Alerting is a statement about now, and ingest accepts a
+  cycle up to `config.MaxCycleAge` (7d) old, so without this a slave could
+  replay a week of history into sustained-state transitions. The window is
+  never tighter than the liveness window it feeds, or a slow-interval
+  deployment could not keep a source live, and never tighter than the skew
+  ingest already tolerates, or an honest slave at the accepted limit is
+  silently excluded. The cost: a slave whose clock lags the master by more
+  than that window stops contributing to alerts (its data is still stored),
+  and a backlog delivered after an outage longer than the window is stored
+  but not alerted on. `alert.stale_cycle` is the Debug log for it. A quorum alert also has a warm-up: it won't dispatch FIRING
   until either 2 distinct sources have reported for that target+alert or
   the 3×-interval window has elapsed, so a master restart doesn't page
   and immediately resolve on partial data. Webhook/log templates get

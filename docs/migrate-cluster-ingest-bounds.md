@@ -43,6 +43,25 @@ a deep ECMP path is no longer refused as if it were abuse. An install pushing
 fewer than 300 hop rows per cycle — every icmp walk does, at 3 × 30 = 90 — sees
 no change.
 
+## Alert liveness now runs off the master's clock
+
+Quorum liveness, per-source staleness and the quorum warm-up window are
+measured from when the master received a cycle, not from the timestamp the
+cycle carries. A slave chose that timestamp, and ingest accepts one up to five
+minutes ahead — enough for a single slave to age every other source out of the
+quorum denominator and become a majority of itself.
+
+Two operator-visible consequences:
+
+- A cycle older than `max(3 × interval, 5m)` on arrival is stored but not
+  evaluated for alerting. A backlog delivered after an outage longer than that
+  window will not replay alert transitions; the next fresh cycle drives the
+  correct state. The Debug log line is `alert.stale_cycle`.
+- A slave whose clock **lags** the master by more than that window stops
+  contributing to alerts, silently, while its data keeps being stored. Keep
+  NTP working on slaves. (A slave more than five minutes *ahead* was already
+  refused at ingest.)
+
 ## Schema
 
 `probe_hop` gains `unreach` (`LowCardinality(String)`) and `target_reply`

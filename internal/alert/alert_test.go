@@ -123,6 +123,7 @@ func TestEvaluatorLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	pinClock(e, time.Time{})
 
 	ref := cfg.AllTargets()[0]
 	highCycle := scheduler.Cycle{
@@ -183,6 +184,7 @@ func TestEvaluatorPerSourceState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	pinClock(e, time.Time{})
 
 	ref := cfg.AllTargets()[0]
 	high := func(src string) scheduler.Cycle {
@@ -556,26 +558,22 @@ func TestQuorumResolvesOnce(t *testing.T) {
 // A dead slave must not hold the denominator up forever — otherwise one
 // silent source permanently suppresses a real alert.
 func TestQuorumPrunesStaleSources(t *testing.T) {
-	ev, disp := newTestEvaluator(t, config.Alert{
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
 		Quorum: config.Quorum{Majority: true},
 	})
 
 	ctx := context.Background()
-	base := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
 
 	// Three healthy sources, then two go silent.
 	for _, src := range []string{"master", "tokyo-1", "frankfurt-1"} {
-		c := healthyCycle(src)
-		c.Time = base
-		ev.OnCycle(ctx, c)
+		ev.OnCycle(ctx, cycleAt(clk, src, 0))
 	}
 	disp.reset()
 
 	// Well past the staleness window (3x interval), only master reports.
-	c := lossyCycle("master", 100)
-	c.Time = base.Add(time.Hour)
-	ev.OnCycle(ctx, c)
+	clk.advance(time.Hour)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
 
 	evs := disp.events()
 	if len(evs) != 1 {
@@ -679,24 +677,20 @@ func TestQuorumWarmupSuppressesRestartFlap(t *testing.T) {
 // once the staleness window elapses since the key's first cycle, quorum
 // degrades to majority-of-1 rather than blocking forever.
 func TestQuorumWarmupWindowElapsesForSingleSourceDeployment(t *testing.T) {
-	ev, disp := newTestEvaluator(t, config.Alert{
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
 		Quorum: config.Quorum{Majority: true},
 	})
 
 	ctx := context.Background()
-	base := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
 
-	c := lossyCycle("master", 100)
-	c.Time = base
-	ev.OnCycle(ctx, c)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
 	if got := len(disp.events()); got != 0 {
 		t.Fatalf("got %d events, want 0 (still inside the warm-up window)", got)
 	}
 
-	c2 := lossyCycle("master", 100)
-	c2.Time = base.Add(4 * time.Minute) // > 3x interval(1m) warm-up window
-	ev.OnCycle(ctx, c2)
+	clk.advance(4 * time.Minute) // > 3x interval(1m) warm-up window
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
 
 	evs := disp.events()
 	if len(evs) != 1 {
@@ -726,6 +720,7 @@ func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
+	pinClock(ev, testBase)
 
 	ctx := context.Background()
 
@@ -826,7 +821,40 @@ func (d *recordingDispatcher) reset() {
 	d.evs = nil
 }
 
+// fakeClock is the master's receive clock under test. Alert liveness must run
+// off it and never off a cycle's own timestamp, which a slave chooses.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+// testBase is both the fake clock's start and testCycle's timestamp, so a
+// cycle built by the helpers is exactly as fresh as the clock says.
+var testBase = time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+
+// cycleAt stamps a cycle at the current receive time, which is what an honest
+// slave with a synchronised clock produces.
+func cycleAt(clk *fakeClock, source string, lossPct float64) scheduler.Cycle {
+	c := testCycle(source, lossPct)
+	c.Time = clk.t
+	return c
+}
+
+// pinClock installs a receive clock at a fixed instant. Every test that drives
+// OnCycle needs one: cycles carry fixed fixture timestamps, and alerting skips
+// a cycle older than alertFreshness relative to the receive clock.
+func pinClock(e *Evaluator, at time.Time) *fakeClock {
+	clk := &fakeClock{t: at}
+	e.nowFn = clk.now
+	return clk
+}
+
 func newTestEvaluator(t *testing.T, a config.Alert) (*Evaluator, *recordingDispatcher) {
+	ev, disp, _ := newTestEvaluatorClock(t, a)
+	return ev, disp
+}
+
+func newTestEvaluatorClock(t *testing.T, a config.Alert) (*Evaluator, *recordingDispatcher, *fakeClock) {
 	t.Helper()
 	cfg := &config.Config{
 		Interval: time.Minute,
@@ -840,7 +868,7 @@ func newTestEvaluator(t *testing.T, a config.Alert) (*Evaluator, *recordingDispa
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	return ev, disp
+	return ev, disp, pinClock(ev, testBase)
 }
 
 // testCycle populates LossCount/Sent, the fields fieldGetter("loss_pct")
@@ -848,7 +876,7 @@ func newTestEvaluator(t *testing.T, a config.Alert) (*Evaluator, *recordingDispa
 // exist as a condition field.
 func testCycle(source string, lossPct float64) scheduler.Cycle {
 	return scheduler.Cycle{
-		Time:   time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC),
+		Time:   testBase,
 		Source: source,
 		Target: config.TargetRef{
 			Group:  "core",
@@ -886,6 +914,7 @@ func TestDispatchedHealthEventCarriesNoAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	pinClock(e, time.Time{})
 
 	// Exactly what master.LocalTargets hands the scheduler: the synthetic
 	// health target with its real address still attached.
@@ -976,6 +1005,7 @@ func TestDispatchedOrdinaryEventKeepsAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	pinClock(e, time.Time{})
 
 	ref := cfg.AllTargets()[0]
 	e.OnCycle(context.Background(), scheduler.Cycle{
@@ -1062,16 +1092,13 @@ func TestQuorumResolveNamesStillFiringSources(t *testing.T) {
 // non-quorum path is the one at risk: it never prunes, so the filter has to
 // do the work.
 func TestFiringSourcesExcludesStaleSource(t *testing.T) {
-	ev, disp := newTestEvaluator(t, config.Alert{
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
 	})
 
 	ctx := context.Background()
-	base := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
 
-	c := lossyCycle("tokyo-1", 100)
-	c.Time = base
-	ev.OnCycle(ctx, c)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
 	if evs := disp.events(); len(evs) != 1 || !slices.Equal(evs[0].FiringSources, []string{"tokyo-1"}) {
 		t.Fatalf("setup: got %+v, want tokyo-1 firing", evs)
 	}
@@ -1079,9 +1106,8 @@ func TestFiringSourcesExcludesStaleSource(t *testing.T) {
 
 	// Well past the staleness window (3x interval) — tokyo-1 has said nothing
 	// since, so it can no longer be reported as currently firing.
-	c2 := lossyCycle("master", 100)
-	c2.Time = base.Add(time.Hour)
-	ev.OnCycle(ctx, c2)
+	clk.advance(time.Hour)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
 
 	evs := disp.events()
 	if len(evs) != 1 {
@@ -1097,16 +1123,13 @@ func TestFiringSourcesExcludesStaleSource(t *testing.T) {
 // back healthy still owes an operator its resolve. Pruning would reset it to
 // StateOK, so prev == next and the resolve would never dispatch.
 func TestNonQuorumResolveSurvivesSilentGap(t *testing.T) {
-	ev, disp := newTestEvaluator(t, config.Alert{
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
 	})
 
 	ctx := context.Background()
-	base := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
 
-	c := lossyCycle("tokyo-1", 100)
-	c.Time = base
-	ev.OnCycle(ctx, c)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
 	if evs := disp.events(); len(evs) != 1 || evs[0].Next != StateFiring {
 		t.Fatalf("setup: got %+v, want tokyo-1 FIRING", evs)
 	}
@@ -1115,17 +1138,15 @@ func TestNonQuorumResolveSurvivesSilentGap(t *testing.T) {
 	// A peer dispatches its own transition while tokyo-1 is silent past the
 	// staleness window. The firing set is collected on exactly this cycle, so
 	// a collector that pruned like tally would evict tokyo-1's state here.
-	peer := lossyCycle("master", 100)
-	peer.Time = base.Add(time.Hour)
-	ev.OnCycle(ctx, peer)
+	clk.advance(time.Hour)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
 	if evs := disp.events(); len(evs) != 1 || evs[0].Cycle.Source != "master" {
 		t.Fatalf("setup: got %+v, want master's own FIRING event", evs)
 	}
 	disp.reset()
 
-	c2 := healthyCycle("tokyo-1")
-	c2.Time = base.Add(time.Hour + time.Minute)
-	ev.OnCycle(ctx, c2)
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
 
 	evs := disp.events()
 	if len(evs) != 1 {
@@ -1140,9 +1161,8 @@ func TestNonQuorumResolveSurvivesSilentGap(t *testing.T) {
 	disp.reset()
 
 	// Once the last firing source recovers the set is empty, not a stale echo.
-	c3 := healthyCycle("master")
-	c3.Time = base.Add(time.Hour + 2*time.Minute)
-	ev.OnCycle(ctx, c3)
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
 
 	evs = disp.events()
 	if len(evs) != 1 || evs[0].Next != StateOK {
@@ -1456,6 +1476,7 @@ func TestNoMeasurementCycleDoesNotResetSustained(t *testing.T) {
 	}
 	ref := cfg.AllTargets()[0]
 	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	pinClock(e, base.Add(2*time.Minute))
 	lost := func(at time.Time) scheduler.Cycle {
 		return scheduler.Cycle{Time: at, Target: ref, ProbeName: "mtr", Sent: 10, LossCount: 10}
 	}
@@ -1484,11 +1505,160 @@ func TestNoMeasurementCycleDoesNotResolveFiring(t *testing.T) {
 	}
 	ref := cfg.AllTargets()[0]
 	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	pinClock(e, base.Add(time.Minute))
 	ctx := context.Background()
 	e.OnCycle(ctx, scheduler.Cycle{Time: base, Target: ref, ProbeName: "mtr", Sent: 10, LossCount: 10})
 	e.OnCycle(ctx, scheduler.Cycle{Time: base.Add(time.Minute), Target: ref, ProbeName: "mtr"})
 
 	if got := transitions(disp.snapshot()); got != "ok>firing" {
 		t.Fatalf("transitions = %q, want %q", got, "ok>firing")
+	}
+}
+
+// A cycle's timestamp is slave-supplied and ingest accepts one up to
+// config.MaxFutureSkew ahead of the master. Reading liveness off it let one
+// hostile slave date a cycle forward far enough to age every honest source
+// out of tally and become a majority of one — manufacturing a page out of a
+// healthy fleet. Liveness runs off the master's receive clock instead.
+func TestQuorumLivenessIgnoresSlaveSuppliedTime(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	for _, src := range []string{"master", "tokyo-1", "frankfurt-1"} {
+		ev.OnCycle(ctx, cycleAt(clk, src, 0))
+	}
+	disp.reset()
+
+	hostile := lossyCycle("evil-1", 100)
+	hostile.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, hostile)
+
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %d events, want 0 — one source out of four is not a majority: %+v", len(evs), evs)
+	}
+}
+
+// The same skew in the other direction is the more damaging one: silencing a
+// real outage every honest source is reporting.
+func TestQuorumSkewCannotResolveALiveAlert(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	for _, src := range []string{"master", "tokyo-1", "frankfurt-1"} {
+		ev.OnCycle(ctx, cycleAt(clk, src, 100))
+	}
+	if evs := disp.events(); len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("setup: got %+v, want one FIRING", evs)
+	}
+	disp.reset()
+
+	hostile := healthyCycle("evil-1")
+	hostile.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, hostile)
+
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %d events, want 0 — a skewed healthy cycle must not resolve a live alert: %+v", len(evs), evs)
+	}
+}
+
+// Ingest accepts a cycle up to config.MaxCycleAge (7d) old, so a slave can
+// replay week-old cycles at will. Alerting is a statement about now: a cycle
+// older than the liveness window can neither support nor refute the current
+// state, and evaluating it replays historical transitions as if they were
+// current. It is skipped whole, exactly like a cycle that sent nothing, so
+// the source ages out rather than voting on stale data.
+func TestStaleCycleIsNotEvaluated(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+	window := alertFreshness(time.Minute)
+
+	replay := lossyCycle("evil-1", 100)
+	replay.Time = clk.t.Add(-window - time.Second)
+	ev.OnCycle(ctx, replay)
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %d events from a replayed cycle, want 0: %+v", len(evs), evs)
+	}
+
+	// The positive counterpart: one second inside the window still alerts, so
+	// the test above is not passing because nothing alerts at all.
+	fresh := lossyCycle("tokyo-1", 100)
+	fresh.Time = clk.t.Add(-window + time.Second)
+	ev.OnCycle(ctx, fresh)
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("got %+v, want one FIRING from a cycle inside the window", evs)
+	}
+}
+
+// The freshness window must never be tighter than the liveness window it
+// feeds, or a slow-interval deployment could never keep a source live, and
+// never tighter than the skew ingest already tolerates, or an honest slave at
+// the accepted limit is silently excluded from alerting.
+func TestAlertFreshnessBounds(t *testing.T) {
+	for _, interval := range []time.Duration{0, time.Second, 20 * time.Second, time.Minute, 10 * time.Minute} {
+		got := alertFreshness(interval)
+		if w := stalenessWindow(interval); got < w {
+			t.Errorf("interval %s: freshness %s is tighter than the liveness window %s", interval, got, w)
+		}
+		if got < config.MaxFutureSkew {
+			t.Errorf("interval %s: freshness %s is tighter than the accepted clock skew %s", interval, got, config.MaxFutureSkew)
+		}
+	}
+}
+
+// The mirror image of the skew attack, and the one that costs an operator a
+// missed page: honest slaves whose clocks lag by the skew ingest tolerates
+// must still count as live. Keying lastSeen on the cycle's own timestamp
+// prunes a source on the very cycle that set it, so a whole fleet reporting an
+// outage goes to zero live sources and nothing fires.
+func TestLaggingSlaveClocksStillCountAsLive(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	for _, src := range []string{"master", "tokyo-1", "frankfurt-1"} {
+		c := lossyCycle(src, 100)
+		c.Time = clk.t.Add(-config.MaxFutureSkew) // inside alertFreshness, outside 3×interval
+		ev.OnCycle(ctx, c)
+	}
+
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("got %+v, want one FIRING — lagging clocks must not prune a live fleet", evs)
+	}
+	// Two, not three: the aggregate crosses the majority on the second
+	// source's cycle and the third changes nothing.
+	if evs[0].Live != 2 {
+		t.Fatalf("got %d live sources, want 2", evs[0].Live)
+	}
+}
+
+// Warm-up exists so a master restart cannot page on a majority-of-one. Its
+// window must be measured on the receive clock too: keyed on the cycle's own
+// timestamp, a single slave back-dating its first cycle by the window makes
+// the aggregate "ready" on that very cycle and fires alone.
+func TestQuorumWarmupCannotBeSkippedByBackdating(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	c := lossyCycle("evil-1", 100)
+	c.Time = clk.t.Add(-stalenessWindow(time.Minute) - time.Second)
+	ev.OnCycle(ctx, c)
+
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %d events, want 0 — warm-up must not be satisfied by a back-dated first cycle: %+v", len(evs), evs)
 	}
 }
