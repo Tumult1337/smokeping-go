@@ -17,3 +17,5 @@ internal/ui/dist/*
 .worktrees/
 todo.md
 docs/superpowers/
+# tsc -b rewrites this on every build; tracking it makes every UI build dirty the tree.
+ui/*.tsbuildinfo
