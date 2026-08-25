@@ -48,8 +48,9 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 
 	sinks := []scheduler.Sink{&scheduler.LogSink{Log: log}}
 	var reader storage.Reader
+	var writerStats api.WriterStats
 
-	backend, err := openStorage(ctx, log, cfg.Storage)
+	backend, err := openStorage(ctx, log, cfg.Storage, cfg.Pings)
 	switch {
 	case err == nil:
 		defer backend.close()
@@ -62,6 +63,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		// ~25GB if both caps were 256). Inner reader lifetime is still
 		// managed by backend.close.
 		reader = storage.NewCachingReader(backend.reader, 256, 16)
+		writerStats = backend.stats
 	case errors.Is(err, storage.ErrDisabled):
 		log.Warn("storage backend disabled, running without persistent storage",
 			"storage", "clickhouse")
@@ -160,6 +162,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		ClusterHandler: clusterHandler,
 		Slaves:         slaveLister,
 		Health:         healthLister,
+		WriterStats:    writerStats,
 		Version:        version,
 	})
 	serverDone := make(chan error, 1)

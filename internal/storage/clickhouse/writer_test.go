@@ -160,7 +160,9 @@ func TestFlushColumnParity(t *testing.T) {
 			return w.flushRTTs(ctx, []any{rttRow{ts: cy.Time, target: "gw", group: "core", source: "master"}})
 		}},
 		{"hops", ddlProbeHop, func(w *Writer, ctx context.Context) error {
-			return w.flushHops(ctx, []any{hopRow{cycle: cy, hop: cy.Hops[0]}})
+			return w.flushHops(ctx, []any{hopRow{
+				ts: cy.Time, target: "gw", group: "core", source: "master", hop: cy.Hops[0],
+			}})
 		}},
 		{"http", ddlProbeHTTP, func(w *Writer, ctx context.Context) error {
 			return w.flushHTTP(ctx, []any{httpRow{ts: cy.Time, target: "gw", group: "core", source: "master"}})
@@ -204,7 +206,8 @@ func TestFlushHopsCarriesAnnotations(t *testing.T) {
 	hop := probe.Hop{Index: 2, IP: "10.0.0.2", Sent: 3, Lost: 1, Unreach: "admin-prohibited", TargetReply: true}
 	conn := &prepConn{batch: &recordBatch{}}
 	w := &Writer{conn: conn}
-	if err := w.flushHops(context.Background(), []any{hopRow{cycle: cy, hop: hop}}); err != nil {
+	row := hopRow{ts: cy.Time, target: "gw", group: "core", source: "master", hop: hop}
+	if err := w.flushHops(context.Background(), []any{row}); err != nil {
 		t.Fatal(err)
 	}
 	cols := insertColumns(t, conn.query)
@@ -230,5 +233,60 @@ func TestFlushHopsCarriesAnnotations(t *testing.T) {
 	if byCol["target_id"] != "gw" || byCol["target_group"] != "core" || byCol["source"] != "master" {
 		t.Fatalf("identity columns scrambled: id=%v group=%v source=%v",
 			byCol["target_id"], byCol["target_group"], byCol["source"])
+	}
+}
+
+// Capacities equalize time-to-overflow at the sizing estimate: a table with
+// N rows per cycle gets N× the slots, clamped so a hostile pings value
+// cannot balloon memory and a tiny one cannot shrink below today's floor.
+// At the deployed 122-target/20s install: cycles buffer ≈671s of ClickHouse
+// stall; hops at the clamp buffer ≈239s at icmp's 90-row worst case and
+// ≈71s at MTR's 300-row worst case — before this change hops died first at
+// 96s in the ORDINARY case.
+func TestWriterChanCap(t *testing.T) {
+	tests := []struct {
+		table, pings, want int
+	}{
+		{tableProbeCycle, 10, 4096},
+		{tableProbeRTT, 10, 40960},
+		{tableProbeHop, 10, 131072},
+		{tableProbeHTTP, 10, 8192},
+		{tableProbeRTT, 0, 4096},      // floor: nonsense pings never shrinks below base
+		{tableProbeRTT, 1000, 131072}, // ceiling
+		{tableProbeCycle, 1000, 4096}, // pings does not inflate tables it doesn't drive
+	}
+	for _, tc := range tests {
+		if got := writerChanCap(tc.table, tc.pings); got != tc.want {
+			t.Errorf("writerChanCap(%s, %d) = %d, want %d", tableName(tc.table), tc.pings, got, tc.want)
+		}
+	}
+	chans := newWriterChans(10)
+	if cap(chans[tableProbeHop]) != 131072 || cap(chans[tableProbeCycle]) != 4096 {
+		t.Fatalf("newWriterChans caps = %d/%d, want 131072/4096",
+			cap(chans[tableProbeHop]), cap(chans[tableProbeCycle]))
+	}
+}
+
+// OnCycle projects the cycle's identity onto every hop row, and hopRow no
+// longer carries the cycle to fall back on. TestFlushHopsCarriesAnnotations
+// builds its row by hand, so it covers the flush half of the mapping only.
+func TestOnCycleProjectsHopIdentity(t *testing.T) {
+	w := newTestWriter(t, 4)
+	cy := testCycle(time.Now())
+	cy.Hops = []probe.Hop{{Index: 2, IP: "10.0.0.2", Sent: 3, Lost: 1}}
+	w.OnCycle(context.Background(), cy)
+
+	select {
+	case raw := <-w.chans[tableProbeHop]:
+		row := raw.(hopRow)
+		if !row.ts.Equal(cy.Time) || row.target != "gw" || row.group != "core" || row.source != "master" {
+			t.Fatalf("hop identity = %v/%q/%q/%q, want %v/gw/core/master",
+				row.ts, row.target, row.group, row.source, cy.Time)
+		}
+		if row.hop.Index != 2 || row.hop.IP != "10.0.0.2" {
+			t.Fatalf("hop payload = %+v", row.hop)
+		}
+	default:
+		t.Fatal("no hop row queued")
 	}
 }

@@ -69,9 +69,50 @@ const (
 // semantics of the slave push ring.
 const flushRetainFactor = 4
 
+// Channel sizing, in slots per table, bound once at startup. A flat 4096
+// everywhere equalized nothing: a cycle produces ~1 cycle row, `pings` rtt
+// rows and ~20 hop rows, so at the deployed 122-target/20s install a
+// ClickHouse stall drank 11 minutes of cycle buffer against 96 seconds of hop
+// buffer and hops died first. Scaling by rows-per-cycle equalizes
+// time-to-overflow instead. hopRowFactor is clamp-limited on purpose: 4096×32
+// is maxChanCap exactly, so any larger factor is inert, and the worst-case
+// hop cycles (90 rows for icmp's 3 rounds × 30 TTLs, 300 for MTR's 10 × 30)
+// still overflow first — drop-oldest and the drop counters are the bound
+// there, not the buffer.
+const (
+	baseChanCap   = 4096
+	maxChanCap    = 131072
+	hopRowFactor  = 32
+	httpRowFactor = 2
+)
+
+func writerChanCap(table, pings int) int {
+	factor := 1
+	switch table {
+	case tableProbeRTT:
+		factor = pings
+	case tableProbeHop:
+		factor = hopRowFactor
+	case tableProbeHTTP:
+		factor = httpRowFactor
+	}
+	return min(max(baseChanCap*factor, baseChanCap), maxChanCap)
+}
+
+// newWriterChans is the single construction point for the per-table buffers;
+// NewWriter must build w.chans through it, never inline make().
+func newWriterChans(pings int) [numTables]chan any {
+	var chans [numTables]chan any
+	for i := range chans {
+		chans[i] = make(chan any, writerChanCap(i, pings))
+	}
+	return chans
+}
+
 // NewWriter opens a connection and starts one consumer goroutine per
-// table. Returns an error if the initial Ping fails.
-func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) (*Writer, error) {
+// table, sizing each table's buffer from pings. Returns an error if the
+// initial Ping fails.
+func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pings int) (*Writer, error) {
 	// Pool must be at least numTables so all four flushers can run
 	// concurrently on the ticker without queueing on the connection
 	// pool. On larger hosts GOMAXPROCS wins; on 1-2 vCPU containers
@@ -100,10 +141,7 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) (*W
 	}
 
 	loopCtx, cancel := context.WithCancel(context.Background())
-	w := &Writer{log: log, conn: conn, cfg: cfg, cancel: cancel}
-	for i := range w.chans {
-		w.chans[i] = make(chan any, 4096)
-	}
+	w := &Writer{log: log, conn: conn, cfg: cfg, cancel: cancel, chans: newWriterChans(pings)}
 
 	maxInterval, _ := time.ParseDuration(cfg.Batch.MaxInterval) // validated at config-load
 	for i := 0; i < numTables; i++ {
@@ -123,7 +161,10 @@ func (w *Writer) OnCycle(ctx context.Context, c scheduler.Cycle) {
 		})
 	}
 	for _, hop := range c.Hops {
-		w.offer(tableProbeHop, hopRow{cycle: c, hop: hop})
+		w.offer(tableProbeHop, hopRow{
+			ts: c.Time, target: c.Target.Target.Name, group: c.Target.Group, source: c.Source,
+			hop: hop,
+		})
 	}
 	for i, s := range c.HTTPSamples {
 		w.offer(tableProbeHTTP, httpRow{
@@ -142,8 +183,9 @@ type rttRow struct {
 }
 
 type hopRow struct {
-	cycle scheduler.Cycle
-	hop   probe.Hop
+	ts                    time.Time
+	target, group, source string
+	hop                   probe.Hop
 }
 
 type httpRow struct {
@@ -383,10 +425,10 @@ func (w *Writer) flushHops(ctx context.Context, rows []any) error {
 			lossPct = float32(100 * float64(r.hop.Lost) / float64(r.hop.Sent))
 		}
 		err := batch.Append(
-			r.cycle.Time,
-			r.cycle.Target.Target.Name,
-			r.cycle.Target.Group,
-			r.cycle.Source,
+			r.ts,
+			r.target,
+			r.group,
+			r.source,
 			uint8(r.hop.Index),
 			r.hop.IP,
 			r.hop.Unreach,

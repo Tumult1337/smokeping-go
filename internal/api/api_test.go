@@ -97,6 +97,10 @@ func withHealth(h HealthLister) testOpt {
 	return func(o *Options) { o.Health = h }
 }
 
+func withWriterStats(s WriterStats) testOpt {
+	return func(o *Options) { o.WriterStats = s }
+}
+
 func newTestServer(t *testing.T, opts ...testOpt) http.Handler {
 	t.Helper()
 	cfg := &config.Config{
@@ -1413,5 +1417,31 @@ func TestGetHopsCarriesAnnotationsForOrdinaryTarget(t *testing.T) {
 	// and this pair is what makes the absence assertion falsifiable.
 	if strings.Contains(rawTL, "TargetReply") {
 		t.Fatalf("/hops/timeline serves TargetReply, which its DTO must omit:\n%s", rawTL)
+	}
+}
+
+type dropStub map[string]uint64
+
+func (d dropStub) Dropped() map[string]uint64 { return d }
+
+// Dropped() had no read site outside tests: the counters existed and were
+// unreachable by an operator. /health is the read site.
+func TestHealthReportsWriterDrops(t *testing.T) {
+	srv := newTestServer(t, withWriterStats(dropStub{"probe_hop": 7, "probe_cycle": 0}))
+	var body struct {
+		WriterDrops map[string]uint64 `json:"writer_drops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/health", &body)
+	if body.WriterDrops["probe_hop"] != 7 {
+		t.Fatalf("writer_drops = %+v, want probe_hop=7", body.WriterDrops)
+	}
+}
+
+func TestHealthOmitsWriterDropsWithoutWriter(t *testing.T) {
+	srv := newTestServer(t)
+	var body map[string]any
+	doJSON(t, srv, "GET", "/api/v1/health", &body)
+	if _, ok := body["writer_drops"]; ok {
+		t.Fatal("writer_drops present with no writer wired")
 	}
 }

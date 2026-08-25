@@ -91,6 +91,17 @@ Key points a reader can't derive from a single file:
   - cycles: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h, >180d 1d
   - hops:   ≤2h raw, ≤24h 5m, >24h 15m
 
+  **Write buffers.** Each table's channel is sized by
+  `writerChanCap(table, pings)` (base 4096 slots × a rows-per-cycle factor,
+  clamped to [4096, 131072]) so all four absorb a comparable ClickHouse
+  stall at ordinary rates — a flat 4096 gave the deployed 122-target/20s
+  install 11 minutes of cycle buffer against 96 seconds of hop buffer, and
+  hops died first. The hop factor is clamp-limited by design: 4096×32 is
+  the ceiling exactly, so a larger factor is inert and worst-case hop cycles
+  (90 rows for icmp's 3×30 walk, 300 for MTR's 10×30) still overflow first
+  — drop-oldest and the counters are the bound there, not the buffer. Those
+  per-table counters are served as `writer_drops` on `/api/v1/health`.
+
   **Window caps.** The binary ships no auth, so on every endpoint that
   returns unbucketed rows the window cap is the only bound on an
   anonymous request's scan: `/rtts` 24h (`api.maxRTTWindow`), `/http`

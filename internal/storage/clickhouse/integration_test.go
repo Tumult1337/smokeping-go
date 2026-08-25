@@ -140,7 +140,7 @@ func TestWriterCycleRoundTrip(t *testing.T) {
 		t.Fatalf("bootstrap: %v", err)
 	}
 
-	w, err := NewWriter(ctx, log, cfg)
+	w, err := NewWriter(ctx, log, cfg, 10)
 	if err != nil {
 		t.Fatalf("new writer: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestWriterRTTHopHTTPRoundTrip(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, err := NewWriter(ctx, log, cfg)
+	w, err := NewWriter(ctx, log, cfg, 10)
 	if err != nil {
 		t.Fatalf("new writer: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestReaderQueryCyclesRaw(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	at := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 3; i++ {
 		w.OnCycle(ctx, scheduler.Cycle{
@@ -291,7 +291,7 @@ func TestReaderQueryCyclesBucketed(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 	for i := 0; i < 120; i++ { // two hours worth at 1/min
@@ -333,7 +333,7 @@ func TestReaderBucketedPercentilesMonotone(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 	// Mix two RTT profiles so per-cycle medians differ across the bucket —
@@ -396,7 +396,7 @@ func TestReaderBucketedLossExcludesFullLossCycles(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 	clean := makeRTTs(20, 99*time.Millisecond, 101*time.Millisecond)
@@ -462,7 +462,7 @@ func TestReaderBucketedAllLossBucketIsFinite(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 	target := config.TargetRef{Target: config.Target{Name: "tal"}, Group: "g"}
@@ -517,7 +517,7 @@ func TestReaderBucketedSourcesPreserved(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 	sources := []string{"master", "slave-a", "slave-b"}
@@ -569,7 +569,7 @@ func TestReaderQueryOverview(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	// Seed a 1h window of cycles, one per minute.
@@ -690,7 +690,7 @@ func TestReaderQueryOverviewScopesToTargets(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	now := time.Now().UTC().Truncate(time.Second)
 	from := now.Add(-30 * time.Minute)
@@ -766,7 +766,7 @@ func TestReaderQueryRTTs(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	at := time.Now().UTC().Truncate(time.Second)
 	w.OnCycle(ctx, scheduler.Cycle{
 		Time:   at,
@@ -799,7 +799,7 @@ func TestReaderQueryHTTPSamples(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	at := time.Now().UTC().Truncate(time.Second)
 	w.OnCycle(ctx, scheduler.Cycle{
 		Time:        at,
@@ -832,7 +832,7 @@ func TestReaderQueryLatestHops(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	at := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 3; i++ {
 		w.OnCycle(ctx, scheduler.Cycle{
@@ -881,7 +881,7 @@ func TestReaderQueryLatestHopsPerSource(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	base := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Minute)
 	// Two sources, each with multiple cycles. Source "slave-eu" gets its
 	// most-recent cycle written *after* "master"'s most-recent — the bug
@@ -944,7 +944,7 @@ func TestReaderQueryLatestHopsStaleSourceDropped(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	now := time.Now().UTC().Truncate(time.Second)
 	// "live" wrote 1 minute ago; "removed" last wrote an hour ago.
 	srcTimes := map[string]time.Time{
@@ -1023,7 +1023,7 @@ func TestReaderQueryHopsAtSingleCycle(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	base := time.Now().UTC().Truncate(time.Second).Add(-5 * time.Minute)
 	cycleTimes := []time.Time{
 		base,
@@ -1083,7 +1083,7 @@ func TestReaderQueryHopsAtPerSourceCycle(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	base := time.Now().UTC().Truncate(time.Second).Add(-5 * time.Minute)
 	// Two sources, each with three cycles at staggered offsets.
 	for _, src := range []string{"master", "slave-eu"} {
@@ -1155,7 +1155,7 @@ func TestReaderQueryHopsTimelineRawAndBucketed(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	_ = Bootstrap(ctx, log, cfg)
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	start := time.Now().UTC().Truncate(time.Hour).Add(-26 * time.Hour) // forces bucketed tier
 	// Two cycles, second one's hop 2 addr flips (path flap).
@@ -1234,7 +1234,7 @@ func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 
 	// All 10 cycles inside the same 15-min bucket. Truncate to the bucket
 	// boundary so all writes land in the same toStartOfInterval slot.
@@ -1396,7 +1396,7 @@ func TestReaderSourceFilter(t *testing.T) {
 	if err := Bootstrap(ctx, log, cfg); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	w, _ := NewWriter(ctx, log, cfg)
+	w, _ := NewWriter(ctx, log, cfg, 10)
 	at := time.Now().UTC().Truncate(time.Second)
 	for i, source := range []string{"master", "slave-eu", "slave-us"} {
 		w.OnCycle(ctx, scheduler.Cycle{

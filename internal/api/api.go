@@ -35,6 +35,12 @@ type HealthLister interface {
 	PublicTargets() []config.TargetRef
 }
 
+// WriterStats exposes the storage writer's per-table drop counters to
+// /health; nil when no writer is wired (slave mode, storage disabled).
+type WriterStats interface {
+	Dropped() map[string]uint64
+}
+
 type Server struct {
 	log            *slog.Logger
 	store          *config.Store
@@ -43,6 +49,7 @@ type Server struct {
 	clusterHandler http.Handler
 	slaves         SlaveLister
 	healthLister   HealthLister
+	writerStats    WriterStats
 	version        string
 	startAt        time.Time
 }
@@ -63,6 +70,9 @@ type Options struct {
 	// Health lists synthetic slave-health targets. Nil in standalone and
 	// slave mode; set when the master runs a health mesh.
 	Health HealthLister
+	// WriterStats reports the storage writer's drop counters on /health. Nil
+	// in slave mode and when storage is disabled.
+	WriterStats WriterStats
 	// Version is the build version reported by /health. Empty falls back to "dev".
 	Version string
 }
@@ -80,6 +90,7 @@ func New(opts Options) *Server {
 		clusterHandler: opts.ClusterHandler,
 		slaves:         opts.Slaves,
 		healthLister:   opts.Health,
+		writerStats:    opts.WriterStats,
 		version:        v,
 		startAt:        time.Now(),
 	}
@@ -176,11 +187,15 @@ func Serve(ctx context.Context, log *slog.Logger, addr string, handler http.Hand
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"status":  "ok",
 		"uptime":  time.Since(s.startAt).String(),
 		"version": s.version,
-	})
+	}
+	if s.writerStats != nil {
+		payload["writer_drops"] = s.writerStats.Dropped()
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 type targetDTO struct {
