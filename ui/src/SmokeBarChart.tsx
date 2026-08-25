@@ -637,7 +637,7 @@ function buildSources(points: CyclePoint[]): Built {
 
     const hasLoss = losses.some((l) => l > 0);
     if (hasLoss) anyLoss = true;
-    lossSeries.push({ ts, losses, hasLoss });
+    lossSeries.push({ source: name, ts, losses, hasLoss });
 
     const valid = pts.filter((p) => p.LossPct < 100);
     if (valid.length > 0) {

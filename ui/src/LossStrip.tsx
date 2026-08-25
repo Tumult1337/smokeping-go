@@ -1,36 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { lossColor } from "./palette";
+import { lossColor, paletteForSorted } from "./palette";
 
 export const LOSS_STRIP_H = 6;
 
 export type LossSeries = {
+  source: string;
   ts: number[];
   losses: number[];
   hasLoss: boolean;
 };
-
-// When multiple lossy sources are shown together, fold them into a single row
-// by taking the max loss at each timestamp. Different sources probe at slightly
-// different times, so all unique timestamps across sources are kept.
-function aggregateSeries(series: LossSeries[]): LossSeries {
-  const tsMap = new Map<number, number>();
-  for (const src of series) {
-    src.ts.forEach((t, i) => {
-      const prev = tsMap.get(t) ?? 0;
-      tsMap.set(t, Math.max(prev, src.losses[i]));
-    });
-  }
-  const ts = [...tsMap.keys()].sort((a, b) => a - b);
-  const losses = ts.map((t) => tsMap.get(t)!);
-  return { ts, losses, hasLoss: losses.some((l) => l > 0) };
-}
 
 // LossStripCanvas renders a loss lane as a standalone element below a chart.
 // X-positions are computed linearly from fromSec/toSec; cell widths follow the
 // neighbour-midpoint rule so cells always touch without overlap.
 // plotLeft (CSS px) should match the uPlot chart's left gutter (u.bbox.left/dpr)
 // so the strip's x-axis aligns pixel-for-pixel with the chart above.
-// When multiple sources are passed, they are aggregated into a single row.
+// One lane per lossy source, keyed to the chart palette by a gutter swatch.
 export function LossStripCanvas({
   lossSeries,
   fromSec,
@@ -49,12 +34,16 @@ export function LossStripCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  // Aggregate multiple lossy sources into a single row.
-  const effectiveSeries = useMemo((): LossSeries[] => {
-    const lossy = lossSeries.filter((s) => s.hasLoss);
-    if (lossy.length <= 1) return lossy;
-    return [aggregateSeries(lossy)];
-  }, [lossSeries]);
+  const effectiveSeries = useMemo(
+    () => lossSeries.filter((s) => s.hasLoss),
+    [lossSeries],
+  );
+  // Indexed over every source, lossy or not, because the chart assigns its
+  // palette by position in the full sorted source list.
+  const palette = useMemo(
+    () => paletteForSorted(lossSeries.map((s) => s.source)),
+    [lossSeries],
+  );
 
   const effectiveSeriesRef = useRef(effectiveSeries);
   const fromSecRef = useRef(fromSec);
@@ -147,16 +136,52 @@ export function LossStripCanvas({
       ref={wrapRef}
       style={{
         display: "flex",
-        alignItems: "center",
+        alignItems: "stretch",
         gap: GAP,
         borderTop: "1px solid #2a3142",
         paddingTop: 3,
         marginTop: 2,
       }}
     >
-      <span style={{ fontSize: 10, color: "#8a93a6", flexShrink: 0, width: labelWidth, textAlign: "right" }}>
-        loss
-      </span>
+      <div
+        style={{
+          flexShrink: 0,
+          width: labelWidth,
+          position: "relative",
+          height: effectiveSeries.length * LOSS_STRIP_H,
+        }}
+      >
+        {effectiveSeries.length > 1 ? (
+          effectiveSeries.map((s, i) => (
+            <span
+              key={s.source || "—"}
+              title={`loss — ${s.source || "—"}`}
+              style={{
+                position: "absolute",
+                right: 0,
+                top: i * LOSS_STRIP_H + (LOSS_STRIP_H - 6) / 2,
+                width: 6,
+                height: 6,
+                borderRadius: 1,
+                background: palette.get(s.source)?.stroke ?? "#8a93a6",
+              }}
+            />
+          ))
+        ) : (
+          <span
+            style={{
+              position: "absolute",
+              right: 0,
+              top: 0,
+              fontSize: 10,
+              lineHeight: `${effectiveSeries.length * LOSS_STRIP_H}px`,
+              color: "var(--text-muted)",
+            }}
+          >
+            loss
+          </span>
+        )}
+      </div>
       <canvas
         ref={canvasRef}
         style={{
