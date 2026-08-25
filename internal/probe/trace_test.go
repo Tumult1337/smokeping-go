@@ -80,3 +80,31 @@ func TestTraceErrLogThrottle(t *testing.T) {
 		t.Fatalf("suppressed count must reset once reported: ok=%v n=%d", ok, n)
 	}
 }
+
+// CanonicalUnreach is the wire-ingest guard: every closed-set label passes
+// verbatim, an unknown non-empty value folds to the fixed fallback, and
+// empty stays empty (empty means "no annotation", and inventing one would
+// annotate every hop). All 13 labels are enumerated so a whitelist that
+// shrank to the two labels other tests happen to use goes RED here.
+func TestCanonicalUnreach(t *testing.T) {
+	valid := []string{
+		"net-unreachable", "host-unreachable", "proto-unreachable",
+		"port-unreachable", "frag-needed", "source-route-failed",
+		"admin-prohibited", "no-route", "beyond-scope",
+		"addr-unreachable", "policy-fail", "reject-route",
+		"unreachable-other",
+	}
+	for _, label := range valid {
+		if got := CanonicalUnreach(label); got != label {
+			t.Errorf("CanonicalUnreach(%q) = %q, want it unchanged", label, got)
+		}
+	}
+	if got := CanonicalUnreach(""); got != "" {
+		t.Fatalf("empty must stay empty, got %q", got)
+	}
+	for _, hostile := range []string{"<img src=x onerror=alert(1)>", "unreachable-code-999999", "x"} {
+		if got := CanonicalUnreach(hostile); got != "unreachable-other" {
+			t.Fatalf("CanonicalUnreach(%q) = %q, want unreachable-other", hostile, got)
+		}
+	}
+}

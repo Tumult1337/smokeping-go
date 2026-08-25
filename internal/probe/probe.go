@@ -37,9 +37,18 @@ type HTTPSample struct {
 type Hop struct {
 	Index int
 	IP    string
-	RTTs  []time.Duration
-	Sent  int
-	Lost  int
+	// TargetReply marks a row whose responder answered as the target itself
+	// (an echo reply): under a per-round walk the target's row is not
+	// guaranteed to be the deepest, so redaction and the MTR mirror key on
+	// this rather than on position.
+	TargetReply bool
+	// Unreach carries the label of the ICMP unreachable that ended the walk
+	// at this hop, from the closed set in unreachLabels; empty for ordinary
+	// hops.
+	Unreach string
+	RTTs    []time.Duration
+	Sent    int
+	Lost    int
 }
 
 // Target is the normalized view of a target passed to a Probe.

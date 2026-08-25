@@ -61,16 +61,40 @@ func classifyListenErr(err error) error {
 	return fmt.Errorf("open trace socket: %w", err)
 }
 
+const unreachOther = "unreachable-other"
+
+// unreachLabels is the closed set the pipeline stores and serves; the wire
+// ingest folds anything else to unreachOther so a hostile slave cannot mint
+// dictionary entries or ship arbitrary text to the UI.
+var unreachLabels = map[string]struct{}{
+	"net-unreachable": {}, "host-unreachable": {}, "proto-unreachable": {},
+	"port-unreachable": {}, "frag-needed": {}, "source-route-failed": {},
+	"admin-prohibited": {}, "no-route": {}, "beyond-scope": {},
+	"addr-unreachable": {}, "policy-fail": {}, "reject-route": {},
+	unreachOther: {},
+}
+
+func CanonicalUnreach(s string) string {
+	if s == "" {
+		return ""
+	}
+	if _, ok := unreachLabels[s]; ok {
+		return s
+	}
+	return unreachOther
+}
+
 // traceOnConn is the core TTL-walk loop, separated from socket setup so the
 // caller can supply a shared conn if it already has one open.
 func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
 	id := int(rand.Uint32() & 0xffff)
 
 	type hopAgg struct {
-		ip   string
-		rtts []time.Duration
-		sent int
-		lost int
+		ip          string
+		targetReply bool
+		rtts        []time.Duration
+		sent        int
+		lost        int
 	}
 	agg := make([]hopAgg, maxTTL+1)
 	finalTTL := maxTTL
@@ -99,6 +123,7 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 				finalTTL = ttl
 			}
 			if reached {
+				agg[ttl].targetReply = true
 				reachedAny = true
 				break
 			}
@@ -118,11 +143,12 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 			continue
 		}
 		hops = append(hops, Hop{
-			Index: ttl,
-			IP:    h.ip,
-			RTTs:  h.rtts,
-			Sent:  h.sent,
-			Lost:  h.lost,
+			Index:       ttl,
+			IP:          h.ip,
+			TargetReply: h.targetReply,
+			RTTs:        h.rtts,
+			Sent:        h.sent,
+			Lost:        h.lost,
 		})
 	}
 	return hops, reachedAny, nil
