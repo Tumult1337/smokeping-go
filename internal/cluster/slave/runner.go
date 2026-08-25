@@ -275,6 +275,8 @@ func (r *Runner) pushLoop(ctx context.Context) error {
 //   - ErrAuth: returned up so Run exits non-zero (token rotation required)
 //   - ErrNotFound: master lost our state; drop the batch (next /register
 //     re-establishes us)
+//   - ErrRejected: a permanent 4xx; drop the batch loudly, because retrying it
+//     blocks every cycle queued behind it until drop-oldest eats them
 //   - ErrUnregistered: master's registry has no entry for us; re-register and
 //     requeue. Registration is otherwise only attempted at boot, so with
 //     cluster.pull_every "0" (no /config refresh to heartbeat through) a
@@ -301,6 +303,10 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 	}
 	if errors.Is(err, ErrNotFound) {
 		r.log.Warn("master returned 404, dropping batch", "count", len(batch))
+		return nil
+	}
+	if errors.Is(err, ErrRejected) {
+		r.log.Error("master permanently rejected the batch, dropping it", "count", len(batch), "err", err)
 		return nil
 	}
 	if errors.Is(err, ErrUnregistered) {

@@ -3,6 +3,7 @@ package slave
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -169,5 +170,88 @@ func TestFlushOnceReregistersAndRequeuesWhenUnregistered(t *testing.T) {
 	}
 	if got := r.sink.Len(); got != 1 {
 		t.Errorf("buffered cycles = %d, want the batch requeued (1)", got)
+	}
+}
+
+// pushOnce runs one flush against a master that answers every /cycles with
+// status, and reports what the ring holds afterwards.
+func pushOnce(t *testing.T, status int, body string) (buffered int, err error) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/register") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ack":true}`))
+			return
+		}
+		http.Error(w, body, status)
+	}))
+	defer srv.Close()
+
+	r := NewRunner(slog.New(slog.DiscardHandler), &config.Config{
+		Cluster: &config.Cluster{MasterURL: srv.URL, Token: "tok", Name: "tokyo-1"},
+	}, "v9")
+	r.sink.OnCycle(context.Background(), scheduler.Cycle{
+		Target: config.TargetRef{Group: "g", Target: config.Target{Name: "t"}},
+	})
+	err = r.flushOnce(context.Background())
+	return r.sink.Len(), err
+}
+
+// A batch the master will refuse identically forever — oversized, or older
+// than MaxCycleAge after a long outage — must be dropped, not requeued.
+// Requeueing it head-of-line blocks the ring: every later flush re-sends the
+// same doomed batch while drop-oldest discards the live cycles behind it.
+func TestFlushOnceDropsPermanentlyRejectedBatch(t *testing.T) {
+	for _, status := range []int{
+		http.StatusBadRequest,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnsupportedMediaType,
+		http.StatusUnprocessableEntity,
+	} {
+		buffered, err := pushOnce(t, status, "batch outside ingest bounds")
+		if err != nil {
+			t.Errorf("status %d: flushOnce returned %v, want nil (dropped, not fatal)", status, err)
+		}
+		if buffered != 0 {
+			t.Errorf("status %d: %d cycles requeued, want the batch dropped", status, buffered)
+		}
+	}
+}
+
+// What dropping now makes possible: a master, WAF or proxy answering 4xx to
+// everything turns into silent data loss. The 4xx that are genuinely
+// transient must still requeue, and 5xx must be untouched.
+func TestFlushOnceRequeuesRetryableStatuses(t *testing.T) {
+	for _, status := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooEarly,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		buffered, err := pushOnce(t, status, "try later")
+		if err != nil {
+			t.Errorf("status %d: flushOnce returned %v, want nil", status, err)
+		}
+		if buffered != 1 {
+			t.Errorf("status %d: %d cycles buffered, want the batch requeued (1)", status, buffered)
+		}
+	}
+}
+
+// 401 stays fatal and 404 stays a drop — the two statuses that already had
+// their own meaning must not be swallowed by the new permanent-4xx class.
+func TestFlushOncePreservesAuthAndNotFound(t *testing.T) {
+	if _, err := pushOnce(t, http.StatusUnauthorized, "nope"); !errors.Is(err, ErrAuth) {
+		t.Errorf("401: got %v, want ErrAuth", err)
+	}
+	buffered, err := pushOnce(t, http.StatusNotFound, "gone")
+	if err != nil {
+		t.Errorf("404: got %v, want nil", err)
+	}
+	if buffered != 0 {
+		t.Errorf("404: %d cycles buffered, want the batch dropped", buffered)
 	}
 }

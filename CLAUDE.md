@@ -416,7 +416,14 @@ Key points a reader can't derive from a single file:
 - **Slave push buffer + auth:** `slave.PushSink` is a fixed 600-cycle
   ring with drop-oldest on overflow; a failed push `Requeue`s on 5xx /
   network errors and drops on 404 (master lost state; next /register
-  re-establishes us). A 401 on any endpoint cancels the runner's
+  re-establishes us) and on `ErrRejected` — every 4xx except 401, 403, 404
+  and the transient `retryable4xx` set (408, 425, 429). A 4xx the master
+  will answer identically forever (a batch outside the ingest bounds, or
+  one whose oldest cycle aged past `MaxCycleAge` during an outage) must not
+  requeue: it head-of-line blocks the ring, so every later flush re-sends
+  the same doomed batch while drop-oldest discards the live cycles behind
+  it. The drop logs at Error with the master's own message, because a
+  master, WAF or proxy answering 4xx to everything is now silent data loss. A 401 on any endpoint cancels the runner's
   context with cause = `ErrAuth` so the process exits non-zero and the
   operator must rotate the token. Target-set fingerprint changes (group
   + name + probe + host + url + interval + pings) trigger a scheduler

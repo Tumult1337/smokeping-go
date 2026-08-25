@@ -44,6 +44,25 @@ var ErrNotModified = errors.New("cluster: 304 not modified")
 // /register cadence re-establishes us.
 var ErrNotFound = errors.New("cluster: 404 not found")
 
+// ErrRejected signals a 4xx the master will answer identically however often
+// the batch is resent — a batch outside the ingest bounds, or one whose oldest
+// cycle aged past config.MaxCycleAge during an outage. Push callers drop it:
+// requeueing head-of-line blocks the ring, so every later flush re-sends the
+// same doomed batch while drop-oldest discards the live cycles behind it.
+var ErrRejected = errors.New("cluster: batch permanently rejected")
+
+// retryable4xx are the client-error statuses that are a condition of the
+// moment rather than of the batch, so resending the same bytes can succeed.
+// Anything else in 4xx is ErrRejected; 401, 403 and 404 are classified before
+// this is consulted.
+func retryable4xx(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	}
+	return false
+}
+
 // Client is the HTTP wrapper the slave uses to talk to the master. Thread-safe;
 // the runner holds one instance shared between the config-refresh loop and
 // the push loop.
@@ -100,10 +119,10 @@ func (c *Client) PullConfig(ctx context.Context, etag string) (cluster.ClusterCo
 	return resp, respBody.etag, nil
 }
 
-// PushCycles ships a batch of cycles to the master. Returns the master's
-// accepted count or an error. On 5xx/network error the caller should retain
-// the batch for retry; on 404 the master has lost us and the caller should
-// drop the batch.
+// PushCycles ships a batch of cycles to the master. On a 5xx, a network error
+// or a transient 4xx the caller should retain the batch for retry; on 404 or
+// ErrRejected the master will never accept these bytes and the caller should
+// drop them.
 func (c *Client) PushCycles(ctx context.Context, batch cluster.CycleBatch) error {
 	headers := map[string]string{
 		"X-Slave-Name":    c.name,
@@ -161,7 +180,11 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 		return resp.StatusCode, httpResult{}, ErrNotFound
 	}
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotModified {
-		return resp.StatusCode, httpResult{body: buf}, fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(buf)))
+		err := fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(buf)))
+		if resp.StatusCode < 500 && !retryable4xx(resp.StatusCode) {
+			err = fmt.Errorf("%w: %w", ErrRejected, err)
+		}
+		return resp.StatusCode, httpResult{body: buf}, err
 	}
 	return resp.StatusCode, httpResult{body: buf, etag: resp.Header.Get("ETag")}, nil
 }
