@@ -255,10 +255,17 @@ loss.
 | GET | `/api/v1/targets/{group}/{name}/cycles?from&to` | Aggregated latency, optionally bucketed |
 | GET | `/api/v1/targets/{group}/{name}/rtts?from&to` | Raw per-ping samples (window ≤24h) |
 | GET | `/api/v1/targets/{group}/{name}/http?from&to` | Raw HTTP samples (window ≤7d) |
-| GET | `/api/v1/targets/{group}/{name}/hops?at=<unix>` | Latest MTR path, or the one nearest `at` |
+| GET | `/api/v1/targets/{group}/{name}/hops?at=<rfc3339>` | Latest MTR path, or the cycle nearest `at` (±15m) |
 | GET | `/api/v1/targets/{group}/{name}/hops/timeline?from&to&source` | Per-hop loss history (window ≤7d, `source` required) |
 
-`from` / `to` accept RFC3339, unix seconds, or relative durations like `-24h`.
+`from` / `to` accept RFC3339, unix seconds, or relative durations like
+`-24h`, and `at` on `/hops` takes the same forms. Give `at` as RFC3339 or
+RFC3339Nano when the cycle you mean is not on a whole second: the unix form
+is integer-only, `at` resolves the *nearest* cycle rather than an exact one,
+and at a sub-2s cadence a second names more than one. An absolute timestamp
+outside 1900–2299 — the range the stored `timestamp` column spans — is
+refused with `400`.
+
 The bucket width on `/cycles` and `/hops/timeline` is picked server-side from
 the window. Cycles ladder: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h,
 >180d 1d. Hops ladder: ≤2h 11s, ≤24h 5m, >24h 15m, and never finer than the

@@ -460,9 +460,9 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// `at` is an optional unix-seconds/RFC3339 timestamp. When present we pick
-	// the single cycle closest to it (within ±30m) so the UI can show the
-	// hops view from any moment of the main chart. Absent = latest.
+	// `at` pins the cycle nearest it within ±15m — half the window passed
+	// below — and only its RFC3339 form carries the sub-second precision that
+	// names one cycle at a sub-2s cadence; absent = latest.
 	var res storage.HopsResult
 	var err error
 	filter := storage.QueryFilter{Source: r.URL.Query().Get("source")}

@@ -36,6 +36,10 @@ type stubReader struct {
 	// lastOverviewTargets records how many target refs were passed in, so a
 	// test can assert the handler scopes the query to configured targets.
 	lastOverviewTargets int
+	// lastAt/lastWindow capture the pin and the window width passed to the
+	// most recent QueryHopsAt, so a test can assert what `at` resolved to.
+	lastAt     time.Time
+	lastWindow time.Duration
 	// lastStep captures the bucket width passed to the most recent cycle
 	// query, so a test can tell a raw query from a bucketed one.
 	lastStep time.Duration
@@ -72,6 +76,8 @@ func (s *stubReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, 
 
 func (s *stubReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) (storage.HopsResult, error) {
 	s.lastSource = f.Source
+	s.lastAt, s.lastWindow = at, window
+	s.queries++
 	return storage.HopsResult{Hops: s.hops, Cycles: s.cycleCounters}, s.err
 }
 
@@ -1817,5 +1823,34 @@ func TestTimestampOutsideStorableRangeIsRejected(t *testing.T) {
 				t.Fatalf("status=%d body=%s, want 200", code, body)
 			}
 		})
+	}
+}
+
+// What the README promises about `at`: RFC3339 carries the sub-second
+// precision that names one cycle at a sub-2s cadence, the unix form is
+// integer-only, and the 30-minute window handed to the reader is centred — so
+// the documented reach is ±15m, not ±30m.
+func TestHopsAtFormsAndWindow(t *testing.T) {
+	reader := &stubReader{}
+	h := newTestServer(t, withReader(reader))
+
+	code, body := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops?at=2026-04-01T00:00:00.900Z")
+	if code != http.StatusOK {
+		t.Fatalf("rfc3339 with milliseconds: status=%d body=%s", code, body)
+	}
+	if got := reader.lastAt.UTC(); !got.Equal(time.Date(2026, 4, 1, 0, 0, 0, 900_000_000, time.UTC)) {
+		t.Errorf("reader saw at=%s, want the milliseconds it was given", got)
+	}
+	if reader.lastWindow != 30*time.Minute {
+		t.Errorf("window = %s, want 30m (±15m around at)", reader.lastWindow)
+	}
+
+	reader.queries = 0
+	code, _ = do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops?at=1775001600.9")
+	if code != http.StatusBadRequest {
+		t.Errorf("fractional unix: status=%d, want 400 — the unix branch is integer-only", code)
+	}
+	if reader.queries != 0 {
+		t.Errorf("reader ran %d queries for a rejected at", reader.queries)
 	}
 }
