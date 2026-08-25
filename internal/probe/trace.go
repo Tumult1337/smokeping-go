@@ -85,13 +85,56 @@ func CanonicalUnreach(s string) string {
 	return unreachOther
 }
 
+// unreachLabel maps RFC 792 type-3 and RFC 4443 type-1 codes onto the closed
+// set, normalized across families.
+func unreachLabel(isV6 bool, code int) string {
+	if isV6 {
+		switch code {
+		case 0:
+			return "no-route"
+		case 1:
+			return "admin-prohibited"
+		case 2:
+			return "beyond-scope"
+		case 3:
+			return "addr-unreachable"
+		case 4:
+			return "port-unreachable"
+		case 5:
+			return "policy-fail"
+		case 6:
+			return "reject-route"
+		}
+		return unreachOther
+	}
+	switch code {
+	case 0:
+		return "net-unreachable"
+	case 1:
+		return "host-unreachable"
+	case 2:
+		return "proto-unreachable"
+	case 3:
+		return "port-unreachable"
+	case 4:
+		return "frag-needed"
+	case 5:
+		return "source-route-failed"
+	case 9, 10, 13:
+		return "admin-prohibited"
+	}
+	return unreachOther
+}
+
 // replyKind classifies what answered a TTL probe: nothing, an intermediate
-// router's TimeExceeded, or the target's own echo reply.
+// router's TimeExceeded, a gateway's unreachable, or the target's own echo
+// reply.
 type replyKind uint8
 
 const (
 	replyNone replyKind = iota
 	replyTimeExceeded
+	replyUnreachable
 	replyEcho
 )
 
@@ -108,8 +151,9 @@ type ttlReply struct {
 type stepFunc func(ctx context.Context, round, ttl int) ttlReply
 
 // walkRounds runs the TTL walk over an injected per-probe step so tests drive
-// this exact loop. Each round walks 1..maxTTL and stops at its own terminal,
-// so a route that changes mid-cycle is followed rather than clamped to the
+// this exact loop. Each round walks 1..maxTTL and stops at its own terminal —
+// an echo reply or a gateway's unreachable, which is the real end of the path
+// — so a route that changes mid-cycle is followed rather than clamped to the
 // shortest path seen; reached reports whether any round got an echo. Every
 // responder at a TTL gets its own row, and each row that echoed is marked
 // TargetReply because the target's row is no longer guaranteed to be the
@@ -152,9 +196,14 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 				if r.kind == replyEcho {
 					row.targetReply = true
 				}
+				if row.unreach == "" {
+					row.unreach = r.unreach
+				}
 			}
 			if r.kind == replyEcho {
 				reached = true
+			}
+			if r.kind == replyEcho || r.kind == replyUnreachable {
 				break
 			}
 			if ttl < maxTTL {
@@ -208,9 +257,37 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 	return hops, reached, nil
 }
 
-// sendTTL sends one echo at the given TTL and waits for either an EchoReply
-// (we reached the target) or a TimeExceeded whose embedded packet matches our
-// seq (an intermediate router). Replies for other sequences are ignored and
+// classifyReply reports whether a reply is an answer to our own probe at
+// (id, seq) and what kind it is. A raw ICMP socket receives every reply on the
+// host, including anything an off-path attacker can spoof, so nothing is
+// classified before id and seq match: concurrent traces reuse the short seq
+// range, and an Echo Request parses to the same body as an Echo Reply, which
+// would otherwise read as reaching the target.
+func classifyReply(reply *icmp.Message, isV6 bool, id, seq int) (bool, replyKind, string) {
+	switch body := reply.Body.(type) {
+	case *icmp.Echo:
+		if reply.Type != ipv4.ICMPTypeEchoReply && reply.Type != ipv6.ICMPTypeEchoReply {
+			return false, replyNone, ""
+		}
+		if body.ID != id || body.Seq != seq {
+			return false, replyNone, ""
+		}
+		return true, replyEcho, ""
+	case *icmp.TimeExceeded:
+		if eid, eseq := embeddedIDSeq(body.Data, isV6); eid == id && eseq == seq {
+			return true, replyTimeExceeded, ""
+		}
+	case *icmp.DstUnreach:
+		if eid, eseq := embeddedIDSeq(body.Data, isV6); eid == id && eseq == seq {
+			return true, replyUnreachable, unreachLabel(isV6, reply.Code)
+		}
+	}
+	return false, replyNone, ""
+}
+
+// sendTTL sends one echo at the given TTL and waits for the first reply
+// classifyReply matches: the target's EchoReply, an intermediate router's
+// TimeExceeded, or a gateway's unreachable. Everything else is ignored and
 // reading continues until the per-probe deadline.
 func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int, timeout time.Duration) ttlReply {
 	var msg icmp.Message
@@ -273,24 +350,8 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 			peerIP = pa.IP.String()
 		}
 
-		switch body := reply.Body.(type) {
-		case *icmp.Echo:
-			// Raw ICMP sockets receive every Echo reply on the host, not just
-			// ones for our requests, so concurrent traces with overlapping seq
-			// numbers (seq range is 1..maxTTL*rounds ≈ 93) will see each
-			// other's replies. Filter by the randomized id to disambiguate.
-			if body.ID != id || body.Seq != seq {
-				continue
-			}
-			return ttlReply{addr: peerIP, rtt: elapsed, kind: replyEcho}
-		case *icmp.TimeExceeded:
-			if eid, eseq := embeddedIDSeq(body.Data, isV6); eid == id && eseq == seq {
-				return ttlReply{addr: peerIP, rtt: elapsed, kind: replyTimeExceeded}
-			}
-		case *icmp.DstUnreach:
-			if eid, eseq := embeddedIDSeq(body.Data, isV6); eid == id && eseq == seq {
-				return ttlReply{addr: peerIP, rtt: elapsed, kind: replyTimeExceeded}
-			}
+		if matched, kind, unreach := classifyReply(reply, isV6, id, seq); matched {
+			return ttlReply{addr: peerIP, rtt: elapsed, kind: kind, unreach: unreach}
 		}
 	}
 }

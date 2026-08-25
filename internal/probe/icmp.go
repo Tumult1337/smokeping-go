@@ -348,6 +348,12 @@ func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		if err != nil {
 			continue
 		}
+		// An Echo Request parses to the same body as a Reply, so a spoofed
+		// request with a matching seq would read as a successful ping on the
+		// raw-socket path (UDP ping sockets are kernel-demuxed).
+		if reply.Type != ipv4.ICMPTypeEchoReply && reply.Type != ipv6.ICMPTypeEchoReply {
+			continue
+		}
 		echo, ok := reply.Body.(*icmp.Echo)
 		if !ok {
 			continue

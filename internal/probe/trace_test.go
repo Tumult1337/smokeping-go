@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 // swapListenRaw routes traceHops' socket open through a stub for the duration
@@ -354,5 +356,162 @@ func TestWalkRoundsMarksEveryEchoResponder(t *testing.T) {
 	}
 	if marked != 2 {
 		t.Fatalf("want 2 marked target rows, got %d: %+v", marked, hops)
+	}
+}
+
+func unreach(addr, label string) ttlReply {
+	return ttlReply{addr: addr, rtt: time.Millisecond, kind: replyUnreachable, unreach: label}
+}
+
+// An unreachable-reporting gateway is the true end of the path: continuing
+// past it re-elicits the same gateway at every later TTL and fabricates a
+// clean 30-hop path out of a single router, at zero loss, in exactly the
+// cycle an operator is debugging.
+func TestWalkRoundsStopsAtUnreachable(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{}}
+	for round := range 3 {
+		s.replies[[2]int{round, 1}] = te("10.0.0.1")
+		for ttl := 2; ttl <= 30; ttl++ {
+			s.replies[[2]int{round, ttl}] = unreach("10.0.0.2", "host-unreachable")
+		}
+	}
+	hops, reached := walkRounds(context.Background(), 3, 30, 0, s.step)
+	if reached {
+		t.Fatal("an unreachable reply must not count as reaching the target")
+	}
+	if len(hops) != 2 {
+		t.Fatalf("fabricated path: got %d hops, want 2: %+v", len(hops), hops)
+	}
+	for _, c := range s.calls {
+		if c[1] > 2 {
+			t.Fatalf("walk probed ttl %d past the unreachable terminal in round %d", c[1], c[0])
+		}
+	}
+	gw := hopByIndex(t, hops, 2)
+	if gw.Unreach != "host-unreachable" || gw.IP != "10.0.0.2" || gw.Sent != 3 || gw.TargetReply {
+		t.Fatalf("gateway row wrong: %+v", gw)
+	}
+	if h := hopByIndex(t, hops, 1); h.Unreach != "" {
+		t.Fatalf("intermediate hop must carry no annotation: %+v", h)
+	}
+}
+
+// The annotation belongs to the responder that sent it: a TTL answered by
+// router A (TimeExceeded) in one round and by gateway B (unreachable) in
+// another must annotate B's row only.
+func TestWalkRoundsAnnotatesTheUnreachableResponder(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"),
+		{1, 1}: unreach("10.0.9.9", "admin-prohibited"),
+	}}
+	hops, _ := walkRounds(context.Background(), 2, 5, 0, s.step)
+	var a, b Hop
+	for _, h := range hops {
+		switch h.IP {
+		case "10.0.0.1":
+			a = h
+		case "10.0.9.9":
+			b = h
+		}
+	}
+	if a.Unreach != "" {
+		t.Fatalf("TimeExceeded responder annotated: %+v", a)
+	}
+	if b.Unreach != "admin-prohibited" {
+		t.Fatalf("unreachable responder lost its annotation: %+v", b)
+	}
+}
+
+// First non-empty label per responder wins across rounds — a flapping
+// annotation must not erase the one that ended the first round.
+func TestWalkRoundsKeepsFirstUnreachLabel(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: unreach("10.0.0.2", "host-unreachable"),
+		{1, 1}: unreach("10.0.0.2", "admin-prohibited"),
+	}}
+	hops, _ := walkRounds(context.Background(), 2, 5, 0, s.step)
+	if h := hopByIndex(t, hops, 1); h.Unreach != "host-unreachable" {
+		t.Fatalf("label = %q, want the first round's host-unreachable", h.Unreach)
+	}
+}
+
+func TestUnreachLabel(t *testing.T) {
+	tests := []struct {
+		isV6 bool
+		code int
+		want string
+	}{
+		{false, 0, "net-unreachable"},
+		{false, 1, "host-unreachable"},
+		{false, 2, "proto-unreachable"},
+		{false, 3, "port-unreachable"},
+		{false, 4, "frag-needed"},
+		{false, 5, "source-route-failed"},
+		{false, 9, "admin-prohibited"},
+		{false, 10, "admin-prohibited"},
+		{false, 13, "admin-prohibited"},
+		{false, 7, "unreachable-other"},
+		{true, 0, "no-route"},
+		{true, 1, "admin-prohibited"},
+		{true, 2, "beyond-scope"},
+		{true, 3, "addr-unreachable"},
+		{true, 4, "port-unreachable"},
+		{true, 5, "policy-fail"},
+		{true, 6, "reject-route"},
+		{true, 200, "unreachable-other"},
+	}
+	for _, tc := range tests {
+		if got := unreachLabel(tc.isV6, tc.code); got != tc.want {
+			t.Errorf("unreachLabel(%v, %d) = %q, want %q", tc.isV6, tc.code, got, tc.want)
+		}
+	}
+}
+
+// embeddedEcho builds the quoted-packet bytes an ICMP error carries: an IP
+// header followed by the first 8 bytes of the original echo request.
+func embeddedEcho(isV6 bool, id, seq int) []byte {
+	hdr := []byte{8, 0, 0, 0, byte(id >> 8), byte(id), byte(seq >> 8), byte(seq)}
+	if isV6 {
+		return append(make([]byte, 40), hdr...)
+	}
+	ip := make([]byte, 20)
+	ip[0] = 0x45
+	return append(ip, hdr...)
+}
+
+// classifyReply is the parser boundary for bytes any host on the network can
+// put on a raw socket: it must match strictly on id+seq, classify only
+// matched replies, and discriminate on reply.Type — an Echo REQUEST parses
+// to the same *icmp.Echo body as a Reply, and treating a spoofed request as
+// "reached" both falsely terminates the round and falsely marks the row.
+func TestClassifyReply(t *testing.T) {
+	const id, seq = 0x1234, 7
+	tests := []struct {
+		name        string
+		msg         *icmp.Message
+		isV6        bool
+		wantMatch   bool
+		wantKind    replyKind
+		wantUnreach string
+	}{
+		{"echo reply match", &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq}}, false, true, replyEcho, ""},
+		{"echo REQUEST is not the target", &icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: id, Seq: seq}}, false, false, replyNone, ""},
+		{"v6 echo REQUEST is not the target", &icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq}}, true, false, replyNone, ""},
+		{"echo wrong id", &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id + 1, Seq: seq}}, false, false, replyNone, ""},
+		{"echo wrong seq", &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq + 1}}, false, false, replyNone, ""},
+		{"time exceeded match", &icmp.Message{Type: ipv4.ICMPTypeTimeExceeded, Body: &icmp.TimeExceeded{Data: embeddedEcho(false, id, seq)}}, false, true, replyTimeExceeded, ""},
+		{"unreach v4 host", &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(false, id, seq)}}, false, true, replyUnreachable, "host-unreachable"},
+		{"unreach v6 admin", &icmp.Message{Type: ipv6.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(true, id, seq)}}, true, true, replyUnreachable, "admin-prohibited"},
+		{"unreach wrong embedded id", &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(false, id+1, seq)}}, false, false, replyNone, ""},
+		{"unreach truncated data", &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: []byte{0x45, 0}}}, false, false, replyNone, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			matched, kind, unreach := classifyReply(tc.msg, tc.isV6, id, seq)
+			if matched != tc.wantMatch || kind != tc.wantKind || unreach != tc.wantUnreach {
+				t.Fatalf("got (%v, %d, %q), want (%v, %d, %q)",
+					matched, kind, unreach, tc.wantMatch, tc.wantKind, tc.wantUnreach)
+			}
+		})
 	}
 }
