@@ -1996,3 +1996,79 @@ func TestGuardHoldsForAZeroStampedCycle(t *testing.T) {
 		t.Fatalf("got %+v, want only PENDING — the second zero-stamped cycle is the same cycle", evs)
 	}
 }
+
+// The replay floor is a slave-supplied timestamp, and ingest accepts one up to
+// config.MaxFutureSkew ahead. A token holder can post under any registered
+// peer's name, so a single forward-dated cycle could park that source's floor
+// in the future and silence every genuine cycle behind it — the same class the
+// lastSeen clock fix closed, reopened through the floor.
+func TestFutureDatedCycleCannotMuteASource(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	poison := healthyCycle("tokyo-1")
+	poison.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, poison)
+	disp.reset()
+
+	clk.advance(time.Second)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("got %+v, want one FIRING — a forward-dated cycle must not silence the source", evs)
+	}
+}
+
+// ...and the mute must not be reachable by degrees either: a quorum's
+// denominator is what a mute really attacks, so a poisoned source must still
+// be counted live off its own genuine cycles.
+func TestFutureDatedCycleCannotEmptyTheQuorumDenominator(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	for _, src := range []string{"tokyo-1", "frankfurt-1"} {
+		poison := healthyCycle(src)
+		poison.Time = clk.t.Add(config.MaxFutureSkew)
+		ev.OnCycle(ctx, poison)
+	}
+	disp.reset()
+
+	clk.advance(time.Second)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+	ev.OnCycle(ctx, cycleAt(clk, "frankfurt-1", 100))
+
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("got %+v, want one FIRING", evs)
+	}
+	if evs[0].Live != 2 {
+		t.Fatalf("got %d live sources, want 2 — a poisoned floor emptied the denominator", evs[0].Live)
+	}
+}
+
+// The common honest case: a slave's clock is a little ahead of the master's.
+// A redelivery of one of its cycles is still one measurement, so any repair to
+// the future-dating hole above must not stop recognising it.
+func TestDuplicateIsCaughtWhenTheSlaveClockRunsAhead(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 2, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	bad := lossyCycle("tokyo-1", 100)
+	bad.Time = clk.t.Add(time.Millisecond) // slave 1ms ahead of the master
+	ev.OnCycle(ctx, bad)
+	clk.advance(2 * time.Second) // the requeue lands on a later flush
+	ev.OnCycle(ctx, bad)
+
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StatePending {
+		t.Fatalf("got %+v, want only PENDING — a redelivery from a fast-clocked slave is still one cycle", evs)
+	}
+}

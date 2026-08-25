@@ -728,6 +728,20 @@ Key points a reader can't derive from a single file:
   timestamp, which is why that skip is warned about rather than counted
   silently.
 
+  **The floor only bars a cycle once the master's clock has reached it.**
+  `cy.Time` is an identity here, never a clock — the same rule `lastSeen`
+  follows — and ingest accepts one `config.MaxFutureSkew` ahead. Without the
+  `!lastCycle.After(now)` arm, one forward-dated cycle posted under a peer's
+  name parked that peer's floor five minutes out, skipped every genuine cycle
+  behind it *before* `lastSeen`, and let `tally` evict the source: a per-name
+  mute that empties the quorum denominator until `live` reaches 0 and every
+  alert resolves. Clamping the *stored* floor to `now` instead is the obvious
+  repair and is wrong — it reopens the replay hole for any slave whose clock
+  runs a millisecond fast, which is most of them
+  (`TestDuplicateIsCaughtWhenTheSlaveClockRunsAhead` pins that). Disarming the
+  floor while it sits in the future costs a dedup window no wider than the
+  skew, against a caller who can already push whatever cycles it likes.
+
   A quorum alert also has a warm-up: it won't dispatch FIRING
   until either 2 distinct sources have reported for that target+alert or
   the 3×-interval window has elapsed, so a master restart doesn't page

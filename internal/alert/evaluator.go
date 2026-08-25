@@ -291,7 +291,13 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		}
 		// Before any mutation, and before lastSeen: a source that only ever
 		// replays must age out of the quorum denominator rather than vote.
-		if st.seenCycle && !cy.Time.After(st.lastCycle) {
+		// The floor only bars a cycle once the master's own clock has reached
+		// it — cy.Time is slave-supplied and ingest accepts one
+		// config.MaxFutureSkew ahead, so an unclamped floor let a single
+		// forward-dated cycle silence every genuine cycle behind it. Clamping
+		// the stored floor instead would reopen the replay hole for any slave
+		// whose clock runs even a millisecond fast.
+		if st.seenCycle && !cy.Time.After(st.lastCycle) && !st.lastCycle.After(now) {
 			skipped = append(skipped, st.lastCycle.Sub(cy.Time))
 			continue
 		}
