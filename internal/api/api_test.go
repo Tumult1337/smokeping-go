@@ -1336,16 +1336,16 @@ func TestRedactTerminalHopAddressMatchIsPerSource(t *testing.T) {
 	}
 }
 
-// A silent terminal (IP "") with no marker anywhere: intermediates with real
-// addresses must survive.
-func TestRedactTerminalHopSilentTerminalKeepsIntermediates(t *testing.T) {
+// A silent terminal (IP "") with no marker anywhere names no address, so the
+// intermediate below it may itself be the slave and is blanked with it.
+func TestRedactTerminalHopSilentTerminalBlanksIntermediates(t *testing.T) {
 	hops := []storage.HopPoint{
 		{Source: "a", Index: 1, IP: "198.51.100.1"},
 		{Source: "a", Index: 2, IP: ""},
 	}
 	got := redactTerminalHops(hops)
-	if got[0].IP != "198.51.100.1" {
-		t.Fatalf("silent terminal blanked the whole path: %+v", got)
+	if got[0].IP != "" {
+		t.Fatalf("silent terminal left an address unblanked: %+v", got)
 	}
 }
 
@@ -1512,5 +1512,97 @@ func TestGetHopsServesMarkerForRedactedHealthTarget(t *testing.T) {
 	}
 	if !body.Hops[1].TargetReply || body.Hops[1].IP != "" {
 		t.Fatalf("marked row must be served blanked but still marked: %+v", body.Hops[1])
+	}
+}
+
+// A hostile slave can write a health-target trace whose deepest row is silent
+// and whose only address sits on an unmarked intermediate: neither redaction
+// arm names a terminal, so a set-membership implementation serves the slave's
+// address. The group must be blanked wholesale instead.
+func TestRedactTerminalHopBlanksGroupWithNoTerminalAddress(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "tokyo-1", Index: 2, IP: "10.44.0.2"},
+		{Source: "tokyo-1", Index: 30, IP: ""},
+	}
+	got := redactTerminalHops(hops)
+	for _, h := range got {
+		if h.IP != "" {
+			t.Fatalf("address survived a group with no confident terminal: %+v", h)
+		}
+	}
+}
+
+// The fail-closed blanking is scoped to the group that lacks a terminal: a
+// sibling source whose trace does name one keeps its intermediates.
+func TestRedactTerminalHopFailClosedIsPerGroup(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "a", Index: 2, IP: "10.44.0.2"},
+		{Source: "a", Index: 30, IP: ""},
+		{Source: "b", Index: 1, IP: "198.51.100.1"},
+		{Source: "b", Index: 2, IP: "10.44.0.3", TargetReply: true},
+	}
+	got := redactTerminalHops(hops)
+	for _, h := range got {
+		if h.Source == "a" && h.IP != "" {
+			t.Fatalf("source a not blanked: %+v", h)
+		}
+		if h.Source == "b" && h.Index == 1 && h.IP != "198.51.100.1" {
+			t.Fatalf("source b's intermediate blanked by source a's ambiguity: %+v", h)
+		}
+		if h.Source == "b" && h.Index == 2 && h.IP != "" {
+			t.Fatalf("source b's target row not blanked: %+v", h)
+		}
+	}
+}
+
+// The address-mates arm compares addresses, not their spelling: a slave that
+// writes the same address in two equivalent textual forms must not defeat it.
+func TestRedactTerminalHopMatesNormalizeSpelling(t *testing.T) {
+	hops := []storage.HopPoint{
+		{Source: "v6", Index: 1, IP: "2001:db8:ffff::1"},
+		{Source: "v6", Index: 2, IP: "2001:db8::1"},
+		{Source: "v6", Index: 3, IP: "2001:0db8:0000:0000:0000:0000:0000:0001", TargetReply: true},
+		{Source: "v4", Index: 1, IP: "198.51.100.1"},
+		{Source: "v4", Index: 2, IP: "::ffff:10.44.0.2"},
+		{Source: "v4", Index: 3, IP: "10.44.0.2", TargetReply: true},
+		{Source: "zone", Index: 1, IP: "2001:db8:ffff::1"},
+		{Source: "zone", Index: 2, IP: "fe80::1%eth0"},
+		{Source: "zone", Index: 3, IP: "fe80::1", TargetReply: true},
+	}
+	got := redactTerminalHops(hops)
+	for _, h := range got {
+		if h.Index == 2 && h.IP != "" {
+			t.Fatalf("target address mate survived under a different spelling: %+v", h)
+		}
+	}
+	if got[0].IP != "2001:db8:ffff::1" {
+		t.Fatalf("unrelated v6 intermediate altered: %+v", got[0])
+	}
+	if got[3].IP != "198.51.100.1" {
+		t.Fatalf("unrelated v4 intermediate altered: %+v", got[3])
+	}
+}
+
+// End-to-end counterpart: the hostile row shape must not reach the browser
+// through /hops either.
+func TestGetHopsFailsClosedOnAmbiguousHealthPath(t *testing.T) {
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "tokyo-1", Index: 2, IP: "10.44.0.2"},
+		{Source: "tokyo-1", Index: 30, IP: ""},
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []storage.HopPoint `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops", &body)
+
+	if len(body.Hops) != 2 {
+		t.Fatalf("got %d hops, want 2: %+v", len(body.Hops), body.Hops)
+	}
+	for _, h := range body.Hops {
+		if h.IP != "" {
+			t.Fatalf("address served for an ambiguous health path: %+v", h)
+		}
 	}
 }

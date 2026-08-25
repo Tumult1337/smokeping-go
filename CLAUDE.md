@@ -361,7 +361,17 @@ Key points a reader can't derive from a single file:
   the marker existed covered, and the address arm catches a
   `TimeExceeded` quoting the target's own address. Every comparison is
   against the served rows themselves, never a configured address, so
-  the Probe/Public split still holds. `/hops/timeline` buckets across
+  the Probe/Public split still holds. Those three arms are all set
+  membership, so they fail *open* alone: a slave holding the shared
+  token can write a trace whose deepest row is silent and whose only
+  address sits on an unmarked intermediate, and no arm names a terminal.
+  A `(source, timestamp)` group that yields no terminal address
+  therefore has every address blanked — the whole path, not one row.
+  Address comparison is on parsed `netip.Addr` values (unmapped,
+  zone-stripped), because `hop_addr` is slave-supplied text and
+  `::ffff:10.0.0.1` / `2001:0db8::0001` / `fe80::1%eth0` would otherwise
+  each split a row from its own mate; text the parser rejects keeps its
+  exact bytes as its identity. `/hops/timeline` buckets across
   `(bucket_ts, source, ttl, hop_addr)`, so no rule identifies a terminal
   row and every non-empty `IP` there is replaced with the sentinel
   `"redacted"` instead — not `""`, because the heatmap reads `IP` as a

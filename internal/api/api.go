@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -582,7 +583,9 @@ type hopTimelineDTO struct {
 
 // redactTerminalHops blanks the union of three row sets per (source,
 // timestamp): every TargetReply row, the furthest-index row, and every row
-// sharing an address with either.
+// sharing an address with either. A group in which neither the marker nor the
+// furthest-index row yields an address has no identifiable terminal, so every
+// address in it is blanked instead.
 //
 // For a health target those rows are the slave itself, and it is the one
 // address this whole feature exists to keep out of the API. The marker arm
@@ -593,6 +596,19 @@ type hopTimelineDTO struct {
 // address on an unmarked row. Every comparison is against the served rows
 // themselves, never against a configured address, so the Probe/Public split
 // still holds.
+//
+// The group-wide arm is what makes the other three fail closed. Rows arrive
+// from a slave holding the shared cluster token, which is free to submit a
+// trace whose deepest row is silent and whose only address sits on an
+// unmarked intermediate — under set membership alone that address is the
+// slave's own and is served publicly.
+//
+// Addresses are compared as parsed values, so the equivalent spellings of one
+// address (`::ffff:10.0.0.1` for `10.0.0.1`, `2001:0db8::0001` for
+// `2001:db8::1`, a scoped `fe80::1%eth0`) cannot split a row from its mate.
+// An address the parser rejects keeps its exact text as its identity, which
+// mates it only with a byte-identical twin — the fail-closed reading, since
+// nothing else can be established about it.
 //
 // A blanked row loses Unreach with its address — an unreachable reason that
 // outlives its address describes the slave's transit. TargetReply survives:
@@ -636,27 +652,42 @@ func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 			maxIndex[key] = h.Index
 		}
 	}
-	targetIPs := make(map[sourceTime]map[string]bool, len(maxIndex))
+	targetIPs := make(map[sourceTime]map[hopAddr]bool, len(maxIndex))
 	for _, h := range hops {
 		key := sourceTime{h.Source, h.Time.UnixNano()}
 		if (h.TargetReply || h.Index == maxIndex[key]) && h.IP != "" {
 			if targetIPs[key] == nil {
-				targetIPs[key] = make(map[string]bool, 1)
+				targetIPs[key] = make(map[hopAddr]bool, 1)
 			}
-			targetIPs[key][h.IP] = true
+			targetIPs[key][canonHopAddr(h.IP)] = true
 		}
 	}
 	out := make([]storage.HopPoint, len(hops))
 	copy(out, hops)
 	for i := range out {
 		key := sourceTime{out[i].Source, out[i].Time.UnixNano()}
-		if out[i].TargetReply || out[i].Index == maxIndex[key] ||
-			(out[i].IP != "" && targetIPs[key][out[i].IP]) {
+		mates := targetIPs[key]
+		if out[i].TargetReply || out[i].Index == maxIndex[key] || len(mates) == 0 ||
+			(out[i].IP != "" && mates[canonHopAddr(out[i].IP)]) {
 			out[i].IP = ""
 			out[i].Unreach = ""
 		}
 	}
 	return out
+}
+
+// hopAddr is the comparison identity of a stored hop address: the parsed
+// address when the text parses, the raw text when it does not.
+type hopAddr struct {
+	ip  netip.Addr
+	raw string
+}
+
+func canonHopAddr(s string) hopAddr {
+	if a, err := netip.ParseAddr(s); err == nil {
+		return hopAddr{ip: a.Unmap().WithZone("")}
+	}
+	return hopAddr{raw: s}
 }
 
 // hopAddrSentinel replaces every non-empty hop address on /hops/timeline.
