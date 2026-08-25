@@ -2099,3 +2099,150 @@ func TestExclusionWarningDoesNotClaimASingleTarget(t *testing.T) {
 		t.Errorf("warning still carries a bare target=%q; the record spans every target for this source", got)
 	}
 }
+
+// The floor is disarmed while it sits ahead of the master's clock, which is
+// what keeps a forward-dated cycle from muting a source — but disarmed also
+// meant the forward-dated cycle itself was readmitted. Ingest accepts one
+// config.MaxFutureSkew ahead and PushSink resends any batch whose ack was
+// lost, so one measurement drove two sustained increments.
+func TestFutureDatedCycleIsNotAppliedTwiceWhileTheFloorIsAhead(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 2, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	bad := lossyCycle("tokyo-1", 100)
+	bad.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, bad)
+	clk.advance(time.Second) // the requeue lands while the floor is still ahead
+	ev.OnCycle(ctx, bad)
+
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StatePending {
+		t.Fatalf("got %+v, want only PENDING — one measurement cannot sustain an alert twice", evs)
+	}
+}
+
+// The same replay, taken through the sequence that empties master.cycleDedup:
+// genuine cycles replace the poisoned floor with their own while it is still
+// ahead of the clock, more than dedupWindowPerSource identities roll the
+// forward-dated one out of the ingest window, and it is redelivered against a
+// floor that now sits behind it.
+func TestFutureDatedCycleIsNotAppliedTwiceOnceTheFloorSitsBehindIt(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	bad := lossyCycle("tokyo-1", 100)
+	bad.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, bad)
+
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0)) // genuine, and behind the poisoned floor
+	clk.advance(5 * time.Minute)                // the master's clock passes the poisoned stamp
+	disp.reset()
+
+	ev.OnCycle(ctx, bad)
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("replayed cycle produced %+v, want nothing — it was applied when it first arrived", evs)
+	}
+}
+
+// The guard is exact, not a window over everything ahead of the clock: a slave
+// whose clock is genuinely fast produces one distinct measurement per interval,
+// and every one of them must still count.
+func TestDistinctFutureDatedCyclesEachCount(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	for i := range 3 {
+		bad := lossyCycle("tokyo-1", 100)
+		bad.Time = clk.t.Add(config.MaxFutureSkew - time.Duration(2-i)*time.Minute)
+		ev.OnCycle(ctx, bad)
+		clk.advance(time.Second)
+	}
+
+	evs := disp.events()
+	if len(evs) == 0 || evs[len(evs)-1].Next != StateFiring {
+		t.Fatalf("got %+v, want FIRING — three distinct cycles are three measurements", evs)
+	}
+}
+
+// The exact-match set is per (target, alert, source) state and its entries are
+// slave-supplied timestamps, so it is bounded by what an honest producer can
+// emit inside the window an entry stays useful for, and evicts oldest-first
+// rather than growing with whatever a token holder posts.
+func TestFutureCycleTrackingIsBounded(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	for i := range 20 * aheadCap(time.Minute) {
+		bad := lossyCycle("tokyo-1", 100)
+		bad.Time = clk.t.Add(config.MaxFutureSkew + time.Duration(i)*time.Nanosecond)
+		ev.OnCycle(ctx, bad)
+	}
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	for _, bySource := range ev.states {
+		for source, st := range bySource {
+			got := len(st.ahead)
+			if got == 0 {
+				t.Errorf("%s tracks no timestamp at all; the bound below is vacuous", source)
+			}
+			if got > aheadCap(time.Minute) {
+				t.Errorf("%s tracks %d timestamps ahead of the clock, cap is %d", source, got, aheadCap(time.Minute))
+			}
+		}
+	}
+}
+
+// The high-water mark only rises. Letting a genuine cycle behind a poisoned
+// floor lower it back reopens the replay through the ordering arm instead of
+// the exact one: the forward-dated stamp is then newer than the mark again.
+func TestFutureDatedCycleIsNotAppliedTwiceAfterAGenuineCycleBehindIt(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 2, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	bad := lossyCycle("tokyo-1", 100)
+	bad.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, bad)
+
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
+	disp.reset()
+
+	ev.OnCycle(ctx, bad) // redelivered while the poisoned stamp is still ahead
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("replayed cycle produced %+v, want nothing", evs)
+	}
+}
+
+// A stamp the past-dated mark has risen past is barred by ordering alone, so
+// keeping it costs memory and buys nothing.
+func TestAcceptedFutureStampsAreDroppedOnceTheMarkPassesThem(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	bad := lossyCycle("tokyo-1", 100)
+	bad.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, bad)
+	if got := len(ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"].ahead); got != 1 {
+		t.Fatalf("tracking %d stamps ahead of the clock, want the one just accepted", got)
+	}
+
+	clk.advance(config.MaxFutureSkew + time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
+	if got := len(ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"].ahead); got != 0 {
+		t.Errorf("still tracking %d stamps the ordering mark has passed", got)
+	}
+}

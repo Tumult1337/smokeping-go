@@ -75,16 +75,59 @@ type alertState struct {
 	// letting lastCycle's zero value mean it: the two states are otherwise
 	// indistinguishable, and the zero value would admit rather than deny.
 	seenCycle bool
-	// lastCycle is the timestamp of the last cycle accepted for this source,
-	// and the identity a replay is recognised by: (target, source, timestamp)
+	// lastCycle is the newest timestamp accepted for this source, and the
+	// identity a replay is recognised by: (target, source, timestamp)
 	// identifies one measurement in storage too, so the alert path reads the
-	// same tuple rather than inventing a second one. It is a floor, not a set,
-	// which is the concern master.cycleDedup does not cover: an older healthy
-	// batch delivered late is a distinct measurement that must be stored and
+	// same tuple rather than inventing a second one. Ordering is the concern
+	// master.cycleDedup's set does not cover: an older healthy batch
+	// delivered late is a distinct measurement that must be stored and
 	// must not clear a newer firing state. A requeue after a lost ack
 	// redelivers the same measurement, which incremented consecHits twice and
 	// fired a sustained:2 alert off one bad cycle.
 	lastCycle time.Time
+	// pastCycle is the same high-water mark over the cycles that were not
+	// ahead of the master's clock when they arrived. Ordering a genuine cycle
+	// against this one rather than lastCycle is what keeps a forward-dated
+	// stamp from barring the real cycles behind it.
+	pastCycle time.Time
+	// ahead holds, oldest first, the timestamps accepted while they were ahead
+	// of the master's clock. Once the clock passes one, no ordering mark
+	// separates its redelivery from a genuine cycle of the same age, so the
+	// stamps are matched exactly until pastCycle rises past them.
+	ahead []int64
+}
+
+// admits reports whether this timestamp is a measurement this source has not
+// had applied yet.
+func (st *alertState) admits(t, now time.Time) bool {
+	if !st.seenCycle {
+		return true
+	}
+	if t.After(now) {
+		return t.After(st.lastCycle)
+	}
+	return t.After(st.pastCycle) && !slices.Contains(st.ahead, t.UnixNano())
+}
+
+// accept records a timestamp as applied. Eviction past limit drops the oldest,
+// which fails open to the pre-guard double-apply rather than to silence.
+func (st *alertState) accept(t, now time.Time, limit int) {
+	st.seenCycle = true
+	if t.After(st.lastCycle) {
+		st.lastCycle = t
+	}
+	if t.After(now) {
+		st.ahead = append(st.ahead, t.UnixNano())
+		if len(st.ahead) > limit {
+			st.ahead = append(st.ahead[:0], st.ahead[len(st.ahead)-limit:]...)
+		}
+		return
+	}
+	st.pastCycle = t
+	nano := t.UnixNano()
+	// pastCycle only rises, so a stamp at or below it is already barred by the
+	// ordering arm and needs no exact match.
+	st.ahead = slices.DeleteFunc(st.ahead, func(v int64) bool { return v <= nano })
 }
 
 // aggWarmup tracks how much cross-source consensus a quorum aggregate has
@@ -259,6 +302,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	// on — never cy.Time, which the pushing slave chose.
 	now := e.nowFn()
 	window := stalenessWindow(cfg.Interval)
+	aheadLimit := aheadCap(cfg.Interval)
 	// Skipped whole like a cycle that sent nothing, so the source ages out
 	// rather than voting on data it replayed out of its own history.
 	if age := now.Sub(cy.Time); age > alertFreshness(cfg.Interval) {
@@ -293,17 +337,11 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		}
 		// Before any mutation, and before lastSeen: a source that only ever
 		// replays must age out of the quorum denominator rather than vote.
-		// The floor only bars a cycle once the master's own clock has reached
-		// it — cy.Time is slave-supplied and ingest accepts one
-		// config.MaxFutureSkew ahead, so an unclamped floor let a single
-		// forward-dated cycle silence every genuine cycle behind it. Clamping
-		// the stored floor instead would reopen the replay hole for any slave
-		// whose clock runs even a millisecond fast.
-		if st.seenCycle && !cy.Time.After(st.lastCycle) && !st.lastCycle.After(now) {
+		if !st.admits(cy.Time, now) {
 			skipped = append(skipped, st.lastCycle.Sub(cy.Time))
 			continue
 		}
-		st.seenCycle, st.lastCycle = true, cy.Time
+		st.accept(cy.Time, now, aheadLimit)
 		st.lastSeen = now
 
 		triggered := cond.Eval(cy)
@@ -530,6 +568,18 @@ func firingSources(bySource map[string]*alertState, now time.Time, window time.D
 // silently excluded.
 func alertFreshness(interval time.Duration) time.Duration {
 	return max(stalenessWindow(interval), config.MaxFutureSkew)
+}
+
+// aheadCap bounds how many timestamps one source's state remembers as having
+// arrived ahead of the master's clock. An entry is consulted only while a
+// cycle carrying it could still be evaluated at all, so it lives for the skew
+// ingest accepts plus one freshness window, over which an honest producer
+// emits one cycle per interval per target.
+func aheadCap(interval time.Duration) int {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	return int((config.MaxFutureSkew+alertFreshness(interval))/interval) + 1
 }
 
 // stalenessWindow is how long a source's last cycle stays counted, measured

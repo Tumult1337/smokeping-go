@@ -468,7 +468,7 @@ Key points a reader can't derive from a single file:
   canonicalized and landed in `hop_addr` — the leaf attack the paragraph
   above closed, reconstructed through the one field that looked already
   validated. `parseHopAddr` is now the single reading both `validate` and
-  `ToCycle` take: `MaxHopAddrLen` (302) bounds the whole encoded value
+  `ToCycle` take: `MaxHopAddrLen` (76) bounds the whole encoded value
   *before* `ParseAddr` sees it, and a zone must be shaped like the interface
   name or decimal index Go fills one from. `MaxHopZoneLen` is twice
   `maxInterfaceNameLen` (15 — `IFNAMSIZ`−1 on Linux, macOS and the BSDs, the
@@ -856,8 +856,8 @@ Key points a reader can't derive from a single file:
   the guard for its source forever. The timestamp is the
   `(target, source, timestamp)` tuple that *identifies* one measurement, the
   same tuple `master.cycleDedup` keys on. That one does not make this one
-  redundant: it is a set and this is a floor, and they disagree exactly where
-  it matters — an unseen *older* cycle is a real measurement ingest must store
+  redundant: it is a window of identities and this is an ordering guard, and
+  they disagree exactly where it matters — an unseen *older* cycle is a real measurement ingest must store
   and alerting must not apply, so ingest admits it and this skips it. This is
   also the only guard on the local probe path, which never reaches ingest, and
   the one that still holds past `dedupWindowPerSource`.
@@ -869,23 +869,37 @@ Key points a reader can't derive from a single file:
   state. Skipping before `lastSeen` is what makes it fail closed — a source
   that only replays ages out of the quorum denominator rather than voting
   healthy from its ring. The cost is that a producer whose clock steps
-  backwards contributes nothing until its clock passes the last accepted
-  timestamp, which is why that skip is warned about rather than counted
+  backwards contributes nothing until its clock passes the newest timestamp
+  accepted from it, which is why that skip is warned about rather than counted
   silently.
 
-  **The floor only bars a cycle once the master's clock has reached it.**
-  `cy.Time` is an identity here, never a clock — the same rule `lastSeen`
-  follows — and ingest accepts one `config.MaxFutureSkew` ahead. Without the
-  `!lastCycle.After(now)` arm, one forward-dated cycle posted under a peer's
-  name parked that peer's floor five minutes out, skipped every genuine cycle
-  behind it *before* `lastSeen`, and let `tally` evict the source: a per-name
-  mute that empties the quorum denominator until `live` reaches 0 and every
-  alert resolves. Clamping the *stored* floor to `now` instead is the obvious
-  repair and is wrong — it reopens the replay hole for any slave whose clock
-  runs a millisecond fast, which is most of them
-  (`TestDuplicateIsCaughtWhenTheSlaveClockRunsAhead` pins that). Disarming the
-  floor while it sits in the future costs a dedup window no wider than the
-  skew, against a caller who can already push whatever cycles it likes.
+  **A cycle ahead of the master's clock is ordered separately, never
+  unordered.** `cy.Time` is an identity here, never a clock — the same rule
+  `lastSeen` follows — and ingest accepts one `config.MaxFutureSkew` ahead, so
+  one floor over both kinds of stamp cannot serve: raising it to a
+  forward-dated cycle skipped every genuine cycle behind it *before*
+  `lastSeen` and let `tally` evict the source, a per-name mute that empties
+  the quorum denominator until `live` reaches 0 and every alert resolves.
+  `alertState` therefore carries **two** rising marks and one exact set, all
+  in `admits`/`accept`: `lastCycle` over every accepted stamp, `pastCycle`
+  over only those that were not ahead of the clock, and `ahead`, the stamps
+  accepted while they were. A cycle ahead of the clock must beat `lastCycle`;
+  one behind it must beat `pastCycle` **and** miss `ahead`. Neither of the two
+  simpler repairs works: clamping the stored floor to `now` reopens the replay
+  for any slave whose clock runs a millisecond fast, which is most of them
+  (`TestDuplicateIsCaughtWhenTheSlaveClockRunsAhead` pins it), and simply
+  disarming the floor while it sits in the future re-admitted the
+  forward-dated cycle itself — directly, and again once genuine cycles had
+  moved the floor behind it, which 1024 identities of ingest dedup then let
+  arrive as a redelivery. `ahead` is why the exact stamp is still recognised
+  after the clock passes it, when no ordering mark separates it from a genuine
+  cycle of the same age; `pastCycle` is why an ordinary replay never needs the
+  set at all, so the slice stays nil for every source whose clock is not
+  ahead. It is bounded by `aheadCap` — the skew plus one `alertFreshness`
+  window, over which an honest producer emits one cycle per interval per
+  target, so 11 entries at the 1m interval and 31 at 20s — and evicts
+  oldest-first, failing open to the pre-guard double-apply rather than to
+  silence, like both of `cycleDedup`'s own eviction paths.
 
   A quorum alert also has a warm-up: it won't dispatch FIRING
   until either 2 distinct sources have reported for that target+alert or
