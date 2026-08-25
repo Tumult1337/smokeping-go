@@ -140,6 +140,10 @@ body {
   text-align: inherit;
   cursor: pointer;
 }
+/* The sortable header's padding moves onto its button so the whole cell stays
+   a pointer target rather than the 14px text box. */
+th.overview-th { padding: 0; }
+.overview-th-btn { padding: 8px 10px; }
 
 .overview-row td {
   padding: 8px 10px;
