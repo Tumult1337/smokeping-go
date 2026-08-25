@@ -258,6 +258,20 @@ Key points a reader can't derive from a single file:
   fail-closed at both layers: `Store.Reload` keeps the last-good config, and
   `scheduler.RunLifecycle` keeps the previous targets when `Build` errors.
 
+  **A cycle that sent nothing is not a healthy cycle.** `Sent == 0` means no
+  measurement — neither 0% nor 100% loss — so `alert.Evaluator.OnCycle`
+  returns before touching any state and the writer omits the `probe_cycle`
+  row entirely, leaving a gap rather than a fabricated point. Hop rows still
+  write: the TTL walk carries its own per-hop `sent`/`lost`, which are real
+  measurements even when the echo batch got no budget. Returning before
+  `lastSeen` is written is deliberate — the source then ages out of the
+  quorum denominator instead of voting healthy on no data. The cost is that
+  a target which only ever sends nothing is silent rather than alerting,
+  since there is no `no_data` condition; `clickhouse.writer.no_measurement`
+  is the only signal. A validated config cannot reach that state
+  persistently, because the per-ping budget floor guarantees every ping at
+  least `minPingBudget`.
+
 - **Address-family pinning:** `Target.Family` is `""` / `"v4"` / `"v6"` and
   every probe routes it through the shared `familyNetwork(base, family)`
   helper in `internal/probe/probe.go`. Interpretation is per-probe and
