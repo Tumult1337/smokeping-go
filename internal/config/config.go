@@ -486,6 +486,14 @@ const (
 	MaxPingsPerCycle = 1<<16 - icmpTraceSeqReserve
 )
 
+// MaxLabelLen bounds every identifier that becomes a ClickHouse
+// LowCardinality value — a group, a target name, a probe name, a cycle's
+// source. Config.Validate refuses a longer one so a config the master accepts
+// is always ingestable from a slave, and cluster's ingest refuses a longer one
+// so a slave cannot mint a label the config never held. 256 is double the
+// master's 128-byte slave-name ceiling and far above any real target name.
+const MaxLabelLen = 256
+
 // TTL-walk bounds. They live here for the same reason the ICMP schedule
 // policy above does: the producer is probe and the consumer is cluster's
 // ingest bound, and config is the only package both import.
@@ -624,9 +632,15 @@ func (c *Config) Validate() error {
 		if g.Group == reservedGroup {
 			return fmt.Errorf("group %q is reserved for cluster slave health", reservedGroup)
 		}
+		if len(g.Group) > MaxLabelLen {
+			return fmt.Errorf("group name is %d bytes, limit %d", len(g.Group), MaxLabelLen)
+		}
 		for _, t := range g.Targets {
 			if t.Name == "" {
 				return fmt.Errorf("group %q: target name is required", g.Group)
+			}
+			if len(t.Name) > MaxLabelLen {
+				return fmt.Errorf("group %q: target name is %d bytes, limit %d", g.Group, len(t.Name), MaxLabelLen)
 			}
 			id := g.Group + "/" + t.Name
 			if prev, dup := seenTargets[id]; dup {
@@ -638,6 +652,9 @@ func (c *Config) Validate() error {
 			}
 			if _, ok := c.Probes[t.Probe]; !ok {
 				return fmt.Errorf("target %q: probe %q not defined", id, t.Probe)
+			}
+			if len(t.Probe) > MaxLabelLen {
+				return fmt.Errorf("target %q: probe name is %d bytes, limit %d", id, len(t.Probe), MaxLabelLen)
 			}
 			if t.Host == "" && t.URL == "" {
 				return fmt.Errorf("target %q: host or url is required", id)

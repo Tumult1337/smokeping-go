@@ -60,6 +60,10 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) int {
 		// it produces locally, so nothing legitimate depends on trusting
 		// the wire value here.
 		p.Source = batch.Source
+		// probe_type is LowCardinality too, and the resolved target already
+		// names its probe, so the wire value is discarded for the same reason
+		// Source is: it is free text a token holder chooses.
+		p.ProbeName = target.Probe
 		cycle := p.ToCycle(target)
 		s.sink.OnCycle(sinkCtx, cycle)
 		accepted++

@@ -527,3 +527,40 @@ func TestValidateRefusesUnschedulablePingCount(t *testing.T) {
 		}
 	})
 }
+
+// A target whose identifiers exceed MaxLabelLen would be served to slaves and
+// then refused at ingest, so every cycle for it would be lost with the master
+// showing a valid  Refuse it at load instead, where the operator sees it.
+func TestValidateBoundsLabelLengths(t *testing.T) {
+	long := strings.Repeat("x", MaxLabelLen+1)
+	base := func() *Config {
+		return &Config{
+			Interval: time.Minute,
+			Pings:    5,
+			Storage:  Storage{ClickHouse: ClickHouse{Addr: "ch:9000"}},
+			Probes:   map[string]Probe{"icmp": {Type: "icmp"}},
+			Targets: []Group{{Group: "g", Targets: []Target{
+				{Name: "t", Probe: "icmp", Host: "1.1.1.1"},
+			}}},
+		}
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("the baseline config is not valid: %v", err)
+	}
+
+	cases := map[string]func(*Config){
+		"group":  func(c *Config) { c.Targets[0].Group = long },
+		"target": func(c *Config) { c.Targets[0].Targets[0].Name = long },
+		"probe": func(c *Config) {
+			c.Probes[long] = Probe{Type: "icmp"}
+			c.Targets[0].Targets[0].Probe = long
+		},
+	}
+	for name, mutate := range cases {
+		cfg := base()
+		mutate(cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s name of %d bytes accepted, want rejected", name, MaxLabelLen+1)
+		}
+	}
+}

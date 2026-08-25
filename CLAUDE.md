@@ -384,6 +384,36 @@ Key points a reader can't derive from a single file:
   failing, so it is refused here). The deployed 122-target / 6-source /
   20s install sits at or below 10% of every one.
 
+  **Leaf values, not only collection lengths.** Bounding `len(Hops)` left
+  every value inside unbounded: 256 hop rows whose `ip` strings summed to
+  the 100 MiB body cap all landed in the `LowCardinality(String)`
+  `hop_addr` column, which an unauthenticated `/hops` then served back. So
+  `validate` also refuses: a hop `ip` that is neither empty nor a
+  `netip.ParseAddr`-parseable address (empty is the producer's "nothing
+  answered at this TTL"); `lost > sent` on a cycle or a hop, which no
+  probe can produce and which drives `loss_pct` and every alert condition;
+  any latency — cycle RTT, hop RTT, http RTT, every `stats.Summary` field,
+  walked through `stats.PercentileSet` so a new percentile is covered the
+  day it is added — outside `[0, MaxSampleRTT]` (1h, under `durUS`'s
+  71m35s saturation point so an accepted value is stored as itself); an
+  `HTTPSample.Time` outside the *cycle's* window, which is otherwise a
+  second `probe_http` TTL evasion; a `Status` outside `[0, 999]`, which
+  wraps in the `UInt16` column; an `Err` past `MaxHTTPErrLen` (4096, twice
+  the de-facto URL ceiling so a maximal operator URL plus its wrapper
+  fits); and any of group / name / probe / source past
+  `config.MaxLabelLen` (256) — `Config.Validate` refuses a longer one too,
+  so a config the master accepts is always ingestable.
+  Two values are **overridden** rather than bounded, because the master
+  already holds the authoritative one: `ingestBatch` stamps `Source` from
+  the authenticated identity and `ProbeName` from the resolved target's
+  own `Probe`. Both are `LowCardinality` columns, so free text there is a
+  permanent dictionary entry per distinct value.
+  `ToCycle` stores the *parsed* address's canonical form, not the wire
+  bytes: `2001:0DB8::0001` and `2001:db8::1` are one address and must not
+  be two dictionary entries, and it is the form `/hops` redaction already
+  compares on. Text that fails to parse becomes `""` there as well —
+  fail-closed if a future caller reaches `ToCycle` without `Validate`.
+
   **The hop bound is derived from the producer, not picked.**
   `config.MaxHopRowsPerCycle` = `MaxTraceRounds` (10) × `MaxTraceTTL` (30)
   = 300 is `walkRounds`' exact ceiling — one row per (ttl, distinct

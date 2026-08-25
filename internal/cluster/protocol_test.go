@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -315,5 +316,130 @@ func TestHopBoundIsDerivedWithHeadroom(t *testing.T) {
 	}}
 	if err := batch.Validate(now); err == nil {
 		t.Fatal("one row past the bound was accepted")
+	}
+}
+
+// Validate bounded collection *lengths* but not the values inside them. A
+// registered slave could put an arbitrary string in every hop's ip — text that
+// is not an address at all, and that lands in probe_hop.hop_addr, a
+// LowCardinality dictionary an unauthenticated /hops then serves back. Same
+// for the http error string, the identifiers, and every timestamp below the
+// cycle's own.
+func TestCycleBatchRejectsHostileLeafValues(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	long := strings.Repeat("x", config.MaxLabelLen+1)
+
+	cases := map[string]cluster.CyclePayload{
+		"group over the label bound":  {Time: now, Group: long},
+		"name over the label bound":   {Time: now, Name: long},
+		"probe over the label bound":  {Time: now, ProbeName: long},
+		"source over the label bound": {Time: now, Source: long},
+
+		"loss exceeds sent":     {Time: now, Sent: 5, LossCount: 6},
+		"hop lost exceeds sent": {Time: now, Hops: []cluster.HopDTO{{Index: 1, Sent: 2, Lost: 3}}},
+
+		"hop ip is not an address":  {Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: "not-an-ip"}}},
+		"hop ip is a hostname":      {Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: "gw.example.com"}}},
+		"hop ip carries a port":     {Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: "10.0.0.1:53"}}},
+		"hop ip is a padded string": {Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: strings.Repeat("A", 4096)}}},
+
+		"negative cycle rtt": {Time: now, RTTs: []time.Duration{-time.Millisecond}},
+		"absurd cycle rtt":   {Time: now, RTTs: []time.Duration{cluster.MaxSampleRTT + 1}},
+		"negative hop rtt": {Time: now, Hops: []cluster.HopDTO{
+			{Index: 1, IP: "10.0.0.1", Sent: 1, RTTs: []time.Duration{-1}},
+		}},
+		"absurd summary max": {Time: now, Summary: stats.Summary{Max: cluster.MaxSampleRTT + 1}},
+		"negative summary median": {Time: now, Summary: stats.Summary{
+			Median: -time.Second,
+		}},
+		"absurd summary percentile": {Time: now, Summary: func() stats.Summary {
+			var s stats.Summary
+			stats.PercentileSet[len(stats.PercentileSet)-1].Set(&s, cluster.MaxSampleRTT+1)
+			return s
+		}()},
+
+		"http sample dated years ahead": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
+			{Time: now.AddDate(3, 0, 0), Status: 200},
+		}},
+		"http sample dated past max age": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
+			{Time: now.Add(-config.MaxCycleAge - time.Second), Status: 200},
+		}},
+		"http status wraps uint16": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
+			{Time: now, Status: 1 << 16},
+		}},
+		"http status negative": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
+			{Time: now, Status: -1},
+		}},
+		"http err over the bound": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
+			{Time: now, Status: 0, Err: strings.Repeat("e", cluster.MaxHTTPErrLen+1)},
+		}},
+		"http rtt negative": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
+			{Time: now, Status: 200, RTT: -time.Second},
+		}},
+	}
+	for name, c := range cases {
+		batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{c}}
+		if err := batch.Validate(now); err == nil {
+			t.Errorf("%s: accepted, want rejected", name)
+		}
+	}
+}
+
+// The bounds must not refuse what a probe legitimately produces: an empty hop
+// ip means "nothing answered at this TTL", an ipv6 hop address with a zone is
+// a link-local responder, and an http sample stamped a moment before its cycle
+// is ordinary.
+func TestCycleBatchAcceptsLegitimateLeafValues(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	c := cluster.CyclePayload{
+		Time:      now,
+		Group:     "core-backbone",
+		Name:      "frankfurt",
+		ProbeName: "icmp",
+		Source:    "edge-1",
+		Sent:      20,
+		LossCount: 20,
+		RTTs:      []time.Duration{12 * time.Millisecond, 0},
+		Summary:   stats.Summary{Min: time.Millisecond, Max: 40 * time.Millisecond},
+		Hops: []cluster.HopDTO{
+			{Index: 1, IP: "", Sent: 3, Lost: 3},
+			{Index: 2, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{time.Millisecond}},
+			{Index: 3, IP: "2001:db8::1", Sent: 3, Lost: 1},
+			{Index: 4, IP: "fe80::1%eth0", Sent: 3, Lost: 0},
+			{Index: 5, IP: "::ffff:10.0.0.9", Sent: 3, Lost: 0, TargetReply: true},
+		},
+		HTTPSamples: []cluster.HTTPSampleDTO{
+			{Time: now.Add(-time.Second), RTT: 250 * time.Millisecond, Status: 200},
+			{Time: now, Status: 0, Err: `Get "https://example.test": dial tcp 10.0.0.1:443: connect: connection refused`},
+		},
+	}
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{c}}
+	if err := batch.Validate(now); err != nil {
+		t.Fatalf("a legitimate cycle was refused: %v", err)
+	}
+}
+
+// hop_addr is a LowCardinality dictionary, so three spellings of one address
+// are three permanent entries. ToCycle stores the parsed address's canonical
+// form, which is also what the API's redaction compares on.
+func TestToCycleCanonicalizesHopAddresses(t *testing.T) {
+	target := config.Target{Name: "gw"}
+	cases := map[string]string{
+		"2001:0DB8::0001": "2001:db8::1",
+		"10.0.0.1":        "10.0.0.1",
+		"fe80::1%eth0":    "fe80::1%eth0",
+		"":                "",
+	}
+	for in, want := range cases {
+		p := cluster.CyclePayload{Hops: []cluster.HopDTO{{Index: 1, IP: in}}}
+		if got := p.ToCycle(target).Hops[0].IP; got != want {
+			t.Errorf("ToCycle(%q) stored %q, want %q", in, got, want)
+		}
+	}
+	// Fail closed if validation was somehow skipped: unparseable text must
+	// never reach the dictionary as itself.
+	p := cluster.CyclePayload{Hops: []cluster.HopDTO{{Index: 1, IP: "not-an-ip"}}}
+	if got := p.ToCycle(target).Hops[0].IP; got != "" {
+		t.Errorf("unvalidated text stored as %q, want the empty no-reply value", got)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -434,5 +435,41 @@ func TestHandleCyclesRejectsUnboundedBatch(t *testing.T) {
 	}
 	if len(sink.got) != 0 {
 		t.Fatalf("sink saw %d cycles from a rejected batch, want 0", len(sink.got))
+	}
+}
+
+// probe_type is a ClickHouse LowCardinality column, so a slave free to name it
+// mints a permanent dictionary entry per push. The master already resolved the
+// target from its own config, and that target names its probe, so the wire
+// value has nothing to add.
+func TestIngestBatchOverridesForgedProbeName(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := config.NewStore("", &config.Config{
+		Cluster: &config.Cluster{Token: "tok"},
+		Targets: []config.Group{
+			{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}},
+		},
+	})
+	sink := &captureSink{}
+	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, nil)
+	srv.registry.Touch("edge-1", "", "", "")
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	body := `{"source":"edge-1","cycles":[{"group":"g","name":"t","probe":"` +
+		strings.Repeat("z", 200) + `","time":"` + now + `","sent":5,"loss_count":0}]}`
+	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("X-Slave-Name", "edge-1")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(sink.got) != 1 {
+		t.Fatalf("sink saw %d cycles, want 1", len(sink.got))
+	}
+	if got := sink.got[0].ProbeName; got != "icmp" {
+		t.Fatalf("cycle stamped probe %q, want the configured %q", got, "icmp")
 	}
 }
