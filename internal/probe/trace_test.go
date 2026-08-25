@@ -108,3 +108,142 @@ func TestCanonicalUnreach(t *testing.T) {
 		}
 	}
 }
+
+// scriptStep replays a per-(round,ttl) script and records every call, so
+// assertions can cover both what the walk produced and what it probed.
+type scriptStep struct {
+	replies map[[2]int]ttlReply
+	calls   [][2]int
+}
+
+func (s *scriptStep) step(_ context.Context, round, ttl int) ttlReply {
+	s.calls = append(s.calls, [2]int{round, ttl})
+	if r, ok := s.replies[[2]int{round, ttl}]; ok {
+		return r
+	}
+	return ttlReply{}
+}
+
+func (s *scriptStep) called(round, ttl int) bool {
+	for _, c := range s.calls {
+		if c == [2]int{round, ttl} {
+			return true
+		}
+	}
+	return false
+}
+
+func hopByIndex(t *testing.T, hops []Hop, idx int) Hop {
+	t.Helper()
+	for _, h := range hops {
+		if h.Index == idx {
+			return h
+		}
+	}
+	t.Fatalf("no hop at index %d in %+v", idx, hops)
+	return Hop{}
+}
+
+func te(addr string) ttlReply {
+	return ttlReply{addr: addr, rtt: time.Millisecond, kind: replyTimeExceeded}
+}
+func ech(addr string) ttlReply { return ttlReply{addr: addr, rtt: time.Millisecond, kind: replyEcho} }
+
+// A route that lengthens mid-cycle must have its new downstream hops probed:
+// the old cross-round finalTTL clamp froze the walk at the shortest path yet
+// seen, so hops added by a reroute never appeared at all.
+func TestWalkRoundsFollowsRouteLengthening(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
+		{1, 1}: te("10.0.0.1"), {1, 2}: te("10.0.1.2"), {1, 3}: te("10.0.1.3"), {1, 4}: ech("192.0.2.9"),
+	}}
+	hops, reached := walkRounds(context.Background(), 2, 10, 0, s.step)
+	if !reached {
+		t.Fatal("target answered in both rounds; reached must be true")
+	}
+	if !s.called(1, 3) || !s.called(1, 4) {
+		t.Fatalf("round 1 never probed past the round-0 path length; calls: %v", s.calls)
+	}
+	if h := hopByIndex(t, hops, 3); h.Sent != 1 {
+		t.Fatalf("hop 3 sent = %d, want 1", h.Sent)
+	}
+	hopByIndex(t, hops, 4)
+}
+
+// A route that shortens must not discard rows already collected on the longer
+// path: they carry real measurements from the rounds that walked it.
+func TestWalkRoundsKeepsRowsFromShortenedRoute(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: te("10.0.0.2"), {0, 3}: te("10.0.0.3"), {0, 4}: ech("192.0.2.9"),
+		{1, 1}: te("10.0.0.1"), {1, 2}: ech("192.0.2.9"),
+	}}
+	hops, _ := walkRounds(context.Background(), 2, 10, 0, s.step)
+	if h := hopByIndex(t, hops, 3); h.Sent != 1 || h.IP != "10.0.0.3" {
+		t.Fatalf("longer-path hop 3 lost or altered: %+v", h)
+	}
+	if h := hopByIndex(t, hops, 4); h.Sent != 1 {
+		t.Fatalf("longer-path hop 4 lost: %+v", h)
+	}
+}
+
+// Reaching the target still ends the round — the per-round stop is what keeps
+// a stable path from costing maxTTL probes every round.
+func TestWalkRoundsStopsEachRoundAtEcho(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
+		{1, 1}: te("10.0.0.1"), {1, 2}: ech("192.0.2.9"),
+	}}
+	_, _ = walkRounds(context.Background(), 2, 10, 0, s.step)
+	for _, c := range s.calls {
+		if c[1] > 2 {
+			t.Fatalf("walk probed ttl %d past the reached target in round %d", c[1], c[0])
+		}
+	}
+}
+
+// The composed shape behind the redaction and mirror designs: the target
+// echoes at ttl 2 in round 0, later rounds stay silent through maxTTL. The
+// echo row must carry TargetReply, deeper silent rows must not, and reached
+// stays true — TestRedactTerminalHopKeysOnTargetReply (internal/api) and
+// TestMTRMirrorsTargetRows both fix their fixtures to this exact output.
+func TestWalkRoundsMarksEarlyEchoRow(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
+	}}
+	hops, reached := walkRounds(context.Background(), 2, 4, 0, s.step)
+	if !reached {
+		t.Fatal("round 0 reached the target; a silent round 1 must not clear it")
+	}
+	target := hopByIndex(t, hops, 2)
+	if !target.TargetReply || target.IP != "192.0.2.9" {
+		t.Fatalf("echo row not marked: %+v", target)
+	}
+	for _, h := range hops {
+		if h.Index != 2 && h.TargetReply {
+			t.Fatalf("non-echo row marked at index %d: %+v", h.Index, h)
+		}
+	}
+	if deepest := hopByIndex(t, hops, 4); deepest.IP != "" || deepest.TargetReply {
+		t.Fatalf("silent deep row must stay unmarked and addressless: %+v", deepest)
+	}
+}
+
+// Cancellation stops the walk but still emits what was collected.
+func TestWalkRoundsEmitsPartialOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	step := func(_ context.Context, round, ttl int) ttlReply {
+		calls++
+		if calls == 2 {
+			cancel()
+		}
+		return te(fmt.Sprintf("10.0.0.%d", ttl))
+	}
+	hops, reached := walkRounds(ctx, 3, 10, 0, step)
+	if reached {
+		t.Fatal("nothing echoed; reached must be false")
+	}
+	if len(hops) != 2 {
+		t.Fatalf("got %d hops, want the 2 collected before cancel: %+v", len(hops), hops)
+	}
+}

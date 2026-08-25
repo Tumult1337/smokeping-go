@@ -84,50 +84,70 @@ func CanonicalUnreach(s string) string {
 	return unreachOther
 }
 
-// traceOnConn is the core TTL-walk loop, separated from socket setup so the
-// caller can supply a shared conn if it already has one open.
-func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
-	id := int(rand.Uint32() & 0xffff)
+// replyKind classifies what answered a TTL probe: nothing, an intermediate
+// router's TimeExceeded, or the target's own echo reply.
+type replyKind uint8
 
+const (
+	replyNone replyKind = iota
+	replyTimeExceeded
+	replyEcho
+)
+
+// ttlReply is one TTL probe's outcome; addr is empty unless something matched.
+type ttlReply struct {
+	addr    string
+	rtt     time.Duration
+	kind    replyKind
+	unreach string
+	err     error
+}
+
+// stepFunc sends one probe at ttl during round and reports what answered.
+type stepFunc func(ctx context.Context, round, ttl int) ttlReply
+
+// walkRounds runs the TTL walk over an injected per-probe step so tests drive
+// this exact loop. Each round walks 1..maxTTL and stops at its own terminal,
+// so a route that changes mid-cycle is followed rather than clamped to the
+// shortest path seen; reached reports whether any round got an echo, and the
+// echoing row is marked TargetReply because it is no longer guaranteed to be
+// the deepest.
+func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, step stepFunc) ([]Hop, bool) {
 	type hopAgg struct {
 		ip          string
 		targetReply bool
+		unreach     string
 		rtts        []time.Duration
 		sent        int
 		lost        int
 	}
 	agg := make([]hopAgg, maxTTL+1)
-	finalTTL := maxTTL
-	reachedAny := false
+	reached := false
 
 	for round := range rounds {
 		if ctx.Err() != nil {
 			break
 		}
-		for ttl := 1; ttl <= finalTTL; ttl++ {
+		for ttl := 1; ttl <= maxTTL; ttl++ {
 			if ctx.Err() != nil {
 				break
 			}
-			seq := ((round * (maxTTL + 1)) + ttl) & 0xffff
-			srcIP, rtt, reached, err := sendTTL(ctx, conn, ip, isV6, id, seq, ttl, timeout)
+			r := step(ctx, round, ttl)
 			agg[ttl].sent++
-			if err != nil || srcIP == "" {
+			if r.err != nil || r.addr == "" {
 				agg[ttl].lost++
 			} else {
-				agg[ttl].rtts = append(agg[ttl].rtts, rtt)
+				agg[ttl].rtts = append(agg[ttl].rtts, r.rtt)
 				if agg[ttl].ip == "" {
-					agg[ttl].ip = srcIP
+					agg[ttl].ip = r.addr
 				}
 			}
-			if reached && ttl < finalTTL {
-				finalTTL = ttl
-			}
-			if reached {
+			if r.kind == replyEcho {
 				agg[ttl].targetReply = true
-				reachedAny = true
+				reached = true
 				break
 			}
-			if ttl < finalTTL {
+			if ttl < maxTTL {
 				select {
 				case <-ctx.Done():
 				case <-time.After(spacing):
@@ -137,7 +157,7 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 	}
 
 	var hops []Hop
-	for ttl := 1; ttl <= finalTTL; ttl++ {
+	for ttl := 1; ttl <= maxTTL; ttl++ {
 		h := agg[ttl]
 		if h.sent == 0 {
 			continue
@@ -146,19 +166,32 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 			Index:       ttl,
 			IP:          h.ip,
 			TargetReply: h.targetReply,
+			Unreach:     h.unreach,
 			RTTs:        h.rtts,
 			Sent:        h.sent,
 			Lost:        h.lost,
 		})
 	}
-	return hops, reachedAny, nil
+	return hops, reached
+}
+
+// traceOnConn is the core TTL-walk loop, separated from socket setup so the
+// caller can supply a shared conn if it already has one open.
+func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+	id := int(rand.Uint32() & 0xffff)
+	step := func(ctx context.Context, round, ttl int) ttlReply {
+		seq := ((round * (maxTTL + 1)) + ttl) & 0xffff
+		return sendTTL(ctx, conn, ip, isV6, id, seq, ttl, timeout)
+	}
+	hops, reached := walkRounds(ctx, rounds, maxTTL, spacing, step)
+	return hops, reached, nil
 }
 
 // sendTTL sends one echo at the given TTL and waits for either an EchoReply
 // (we reached the target) or a TimeExceeded whose embedded packet matches our
 // seq (an intermediate router). Replies for other sequences are ignored and
 // reading continues until the per-probe deadline.
-func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int, timeout time.Duration) (string, time.Duration, bool, error) {
+func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int, timeout time.Duration) ttlReply {
 	var msg icmp.Message
 	if isV6 {
 		msg = icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq, Data: icmpPayload}}
@@ -167,7 +200,7 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 	}
 	wire, err := msg.Marshal(nil)
 	if err != nil {
-		return "", 0, false, err
+		return ttlReply{err: err}
 	}
 
 	if isV6 {
@@ -185,12 +218,12 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		dl = ctxDL
 	}
 	if err := conn.SetReadDeadline(dl); err != nil {
-		return "", 0, false, err
+		return ttlReply{err: err}
 	}
 
 	start := time.Now()
 	if _, err := conn.WriteTo(wire, dst); err != nil {
-		return "", 0, false, err
+		return ttlReply{err: err}
 	}
 
 	bufp := icmpBufPool.Get().(*[]byte)
@@ -203,7 +236,7 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 	for {
 		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {
-			return "", 0, false, err
+			return ttlReply{err: err}
 		}
 		reply, perr := icmp.ParseMessage(proto, buf[:n])
 		if perr != nil {
@@ -228,14 +261,14 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 			if body.ID != id || body.Seq != seq {
 				continue
 			}
-			return peerIP, elapsed, true, nil
+			return ttlReply{addr: peerIP, rtt: elapsed, kind: replyEcho}
 		case *icmp.TimeExceeded:
 			if eid, eseq := embeddedIDSeq(body.Data, isV6); eid == id && eseq == seq {
-				return peerIP, elapsed, false, nil
+				return ttlReply{addr: peerIP, rtt: elapsed, kind: replyTimeExceeded}
 			}
 		case *icmp.DstUnreach:
 			if eid, eseq := embeddedIDSeq(body.Data, isV6); eid == id && eseq == seq {
-				return peerIP, elapsed, false, nil
+				return ttlReply{addr: peerIP, rtt: elapsed, kind: replyTimeExceeded}
 			}
 		}
 	}
