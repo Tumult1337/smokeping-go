@@ -373,7 +373,13 @@ Key points a reader can't derive from a single file:
   it.
   This is a cardinality and data-integrity bound, **not** authentication:
   the cluster token is shared, so any registered slave can still claim
-  any other registered slave's name. That is accepted, not overlooked.
+  any other registered slave's name — including one that spells a peer's
+  advertised address. That is an **accepted risk, decided deliberately**,
+  not an oversight: holding the token means already having compromised a
+  node the operator runs, and nothing reaches that from outside the fleet.
+  Reviews keep re-raising it; the answer is settled. Binding the name to a
+  per-slave credential is the only real fix and is out of scope until the
+  threat model changes.
   A slave **running this binary or newer** gets 403, re-registers and
   requeues the batch rather than dropping it; registration is otherwise
   attempted only at boot, so under `cluster.pull_every` `"0"` — where no
