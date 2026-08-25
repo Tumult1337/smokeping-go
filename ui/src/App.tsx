@@ -122,6 +122,10 @@ const HTTP_RANGES: Range[] = ["-1h", "-6h", "-24h", "-7d"];
 
 const AUTO_REFRESH_MS = 30_000;
 
+// Focusable descendants of the drawer, for the Tab wrap. Kept narrow on
+// purpose: the drawer contains only the search input and target buttons.
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export default function App() {
   // URL state is read once at mount; later writes go through the sync effect
   // so the address bar tracks the UI without forcing React to re-parse on
@@ -215,6 +219,47 @@ export default function App() {
   const [chartSoloSource, setChartSoloSource] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const aside = sidebarRef.current;
+    const backdrop = backdropRef.current;
+    // The drawer only exists below the CSS breakpoint; read that from the
+    // backdrop's computed display rather than restating 768px in JS.
+    if (!aside || !backdrop || getComputedStyle(backdrop).display === "none") return;
+    const opener = document.activeElement as HTMLElement | null;
+    searchInputRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setSidebarOpen(false);
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const focusable = aside.querySelectorAll<HTMLElement>(FOCUSABLE);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    const onResize = () => {
+      if (getComputedStyle(backdrop).display === "none") setSidebarOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize);
+      opener?.focus();
+    };
+  }, [sidebarOpen]);
 
   useEffect(() => {
     try {
@@ -603,9 +648,9 @@ export default function App() {
   return (
     <div className={`app ${sidebarOpen ? "sidebar-open" : ""}`}>
       {sidebarOpen && (
-        <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+        <div className="sidebar-backdrop" ref={backdropRef} onClick={() => setSidebarOpen(false)} />
       )}
-      <aside className="sidebar">
+      <aside className="sidebar" ref={sidebarRef}>
         <h1>gosmokeping</h1>
         <div className="search-wrap">
           <input
