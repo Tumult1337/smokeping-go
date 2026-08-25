@@ -28,6 +28,9 @@ test-integration:
 
 ui:
 	cd $(UI_DIR) && npm install && npm run build
+	@# vite's emptyOutDir deletes the tracked .gitkeep that go:embed needs
+	@# for a dist-less clone to build.
+	touch internal/ui/dist/.gitkeep
 
 ui-dev:
 	cd $(UI_DIR) && npm run dev

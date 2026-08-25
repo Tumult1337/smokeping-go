@@ -34,9 +34,15 @@ discards up to `MaxCyclesPerBatch` unrelated cycles.
   drift. `internal/config/tracebounds_test.go` does this.
 - If no derivable ceiling exists, that is the finding. Say so, and truncate at
   the producer instead of rejecting at the boundary.
-- The same rule governs accepted *shapes*, not just lengths. Rejecting `%`
-  inside an IPv6 zone refused a valid Linux interface name — a bound on a
-  character set, set below what the producer emits.
+- The same rule governs accepted *shapes*, not just lengths, and a shape rule
+  needs the same evidence a numeric one does. A review asserted that rejecting
+  `%` inside an IPv6 zone refused a valid Linux interface name; that premise
+  was relayed as fact and is false — `register_netdevice` routes any `%`
+  through `dev_alloc_name`'s `%d` expansion, so Linux refuses such a name on
+  both create and rename. Testing it on the kernel also found Linux *permits*
+  UTF-8 and ASCII control bytes, which the class still refuses deliberately.
+  Verify a claim about what a producer can emit against the producer, not
+  against whoever told you.
 
 ## Fixes
 
