@@ -12,6 +12,7 @@ import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
 import { MtrSection } from "./MtrSection";
 import { paletteForSorted, lossColor } from "./palette";
+import { windowLoss } from "./chartUtils";
 import { OverviewView, type SortKey, type SortDir } from "./OverviewView";
 import type { OverviewWindow } from "./api";
 
@@ -479,7 +480,7 @@ export default function App() {
       : points;
     if (filtered.length === 0) return null;
     const valid = filtered.filter((p) => p.LossPct < 100);
-    const loss = filtered.reduce((s, p) => s + p.LossPct, 0) / filtered.length;
+    const loss = windowLoss(filtered);
     const maxLoss = filtered.reduce((m, p) => (p.LossPct > m ? p.LossPct : m), 0);
     if (valid.length === 0) return { median: null, p95: null, min: null, max: null, loss, maxLoss };
     const median = valid.reduce((s, p) => s + p.Median, 0) / valid.length;
@@ -896,9 +897,13 @@ export default function App() {
                     </span>
                     <span>
                       loss:{" "}
-                      <strong style={{ color: lossColor(windowStats.loss, "#8a93a6") }}>
-                        {windowStats.loss.toFixed(1)}%
-                      </strong>{" "}
+                      {windowStats.loss == null ? (
+                        <strong>—</strong>
+                      ) : (
+                        <strong style={{ color: lossColor(windowStats.loss, "#8a93a6") }}>
+                          {windowStats.loss.toFixed(1)}%
+                        </strong>
+                      )}{" "}
                       <span style={{ color: "var(--text-muted)" }}>
                         (max{" "}
                         <strong style={{ color: lossColor(windowStats.maxLoss, "#8a93a6") }}>

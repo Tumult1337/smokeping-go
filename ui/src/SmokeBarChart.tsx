@@ -3,6 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
+import { windowLoss } from "./chartUtils";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
@@ -646,10 +647,10 @@ function buildSources(points: CyclePoint[]): Built {
         p75: avg((p) => p.P75),
         p95: avg((p) => p.P95),
         max: valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity),
-        loss: pts.reduce((s, p) => s + p.LossPct, 0) / pts.length,
+        loss: windowLoss(pts),
       });
     } else {
-      aggregates.push({ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null, loss: pts.reduce((s, p) => s + p.LossPct, 0) / pts.length });
+      aggregates.push({ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null, loss: windowLoss(pts) });
     }
   });
 
