@@ -18,12 +18,15 @@ import (
 )
 
 type stubReader struct {
-	cycles   []storage.CyclePoint
-	rtts     []storage.RTTPoint
-	http     []storage.HTTPPoint
-	hops     []storage.HopPoint
-	overview []storage.OverviewSourceRow
-	err      error
+	cycles []storage.CyclePoint
+	rtts   []storage.RTTPoint
+	http   []storage.HTTPPoint
+	hops   []storage.HopPoint
+	// cycleCounters is what the hop reads pair with s.hops: target loss comes
+	// from the cycle, not from a hop row.
+	cycleCounters []storage.CycleCounters
+	overview      []storage.OverviewSourceRow
+	err           error
 	// lastSource captures the source filter passed to the most recent query,
 	// so tests can assert the handler threaded ?source=… correctly.
 	lastSource string
@@ -62,20 +65,20 @@ func (s *stubReader) QueryHTTPSamples(ctx context.Context, ref config.TargetRef,
 	return s.http, s.err
 }
 
-func (s *stubReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
+func (s *stubReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) (storage.HopsResult, error) {
 	s.lastSource = f.Source
-	return s.hops, s.err
+	return storage.HopsResult{Hops: s.hops, Cycles: s.cycleCounters}, s.err
 }
 
-func (s *stubReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) ([]storage.HopPoint, error) {
+func (s *stubReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) (storage.HopsResult, error) {
 	s.lastSource = f.Source
-	return s.hops, s.err
+	return storage.HopsResult{Hops: s.hops, Cycles: s.cycleCounters}, s.err
 }
 
-func (s *stubReader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
+func (s *stubReader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) (storage.HopsResult, error) {
 	s.lastSource = f.Source
 	s.queries++
-	return s.hops, s.err
+	return storage.HopsResult{Hops: s.hops}, s.err
 }
 
 func (s *stubReader) QueryOverview(ctx context.Context, from, to time.Time, targets []config.TargetRef) ([]storage.OverviewSourceRow, error) {
@@ -1628,5 +1631,98 @@ func TestTruncatedHopReadIsARequestError(t *testing.T) {
 				t.Fatalf("body does not tell the operator what to do: %s", body)
 			}
 		})
+	}
+}
+
+// Target loss cannot be read off hop rows: a per-round walk marks the target
+// at every TTL it answered at, so the three marked rows below sum to 6 sent
+// and 3 lost — 50% — for a cycle that reached the target on all three of its
+// rounds. /hops therefore ships the cycle's own counters under a key that is
+// a sibling of hops, not a field on one.
+func TestGetHopsCarriesTargetLoss(t *testing.T) {
+	cycleTime := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	r := &stubReader{
+		hops: []storage.HopPoint{
+			{Source: "master", Time: cycleTime, Index: 1, IP: "10.0.0.1", Sent: 3},
+			{Source: "master", Time: cycleTime, Index: 2, IP: "192.0.2.9", Sent: 3, LossCount: 2, TargetReply: true},
+			{Source: "master", Time: cycleTime, Index: 3, IP: "192.0.2.9", Sent: 2, LossCount: 1, TargetReply: true},
+			{Source: "master", Time: cycleTime, Index: 4, IP: "192.0.2.9", Sent: 1, TargetReply: true},
+		},
+		cycleCounters: []storage.CycleCounters{
+			{Source: "master", Time: cycleTime, Sent: 3, LossCount: 0, LossPct: 0},
+		},
+	}
+	srv := newTestServer(t, withReader(r))
+
+	var body struct {
+		Hops       []storage.HopPoint `json:"hops"`
+		TargetLoss []struct {
+			Source    string  `json:"Source"`
+			Sent      int64   `json:"Sent"`
+			LossCount int64   `json:"LossCount"`
+			LossPct   float64 `json:"LossPct"`
+		} `json:"target_loss"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops", &body)
+
+	var markedSent, markedLost int64
+	for _, h := range body.Hops {
+		if h.TargetReply {
+			markedSent += h.Sent
+			markedLost += h.LossCount
+		}
+	}
+	if markedSent != 6 || markedLost != 3 {
+		t.Fatalf("fixture no longer reproduces the row-summed lie: sent=%d lost=%d", markedSent, markedLost)
+	}
+	if len(body.TargetLoss) != 1 {
+		t.Fatalf("got %d target_loss entries, want one per source: %+v", len(body.TargetLoss), body.TargetLoss)
+	}
+	got := body.TargetLoss[0]
+	if got.Source != "master" || got.Sent != 3 || got.LossCount != 0 || got.LossPct != 0 {
+		t.Fatalf("target_loss = %+v, want master 3 sent 0 lost", got)
+	}
+}
+
+// A source whose cycle sent nothing wrote no probe_cycle row, so it has no
+// counters. The key must then be an empty array rather than a zeroed entry:
+// 0 sent / 0 lost renders as a healthy 0%, which is the fabricated point the
+// writer refuses to store in the first place.
+func TestGetHopsOmitsTargetLossWithoutAMeasurement(t *testing.T) {
+	r := &stubReader{hops: []storage.HopPoint{{Source: "master", Index: 1, IP: "10.0.0.1", Sent: 1, LossCount: 1}}}
+	srv := newTestServer(t, withReader(r))
+
+	code, raw := do(t, srv, http.MethodGet, "/api/v1/targets/core/gw/hops")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", code, raw)
+	}
+	if !strings.Contains(string(raw), `"target_loss":[]`) {
+		t.Fatalf("target_loss is not an empty array: %s", raw)
+	}
+}
+
+// Cycle counters carry no address, but they are served from the same handler
+// that redacts one — so the health path has to be exercised end to end rather
+// than reasoned about.
+func TestGetHopsTargetLossLeaksNoAddressForHealthTarget(t *testing.T) {
+	cycleTime := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	r := &stubReader{
+		hops: []storage.HopPoint{
+			{Source: "tokyo-1", Time: cycleTime, Index: 1, IP: "203.0.113.1"},
+			{Source: "tokyo-1", Time: cycleTime, Index: 2, IP: "10.44.0.2", TargetReply: true},
+		},
+		cycleCounters: []storage.CycleCounters{{Source: "tokyo-1", Time: cycleTime, Sent: 10, LossCount: 1, LossPct: 10}},
+	}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	code, raw := do(t, srv, http.MethodGet, "/api/v1/targets/_cluster/tokyo-1/hops")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", code, raw)
+	}
+	if strings.Contains(string(raw), "10.44.0.2") {
+		t.Fatalf("health target response carries the slave's address: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Sent":10`) || !strings.Contains(string(raw), `"LossCount":1`) {
+		t.Fatalf("health target lost its cycle counters, which carry no address: %s", raw)
 	}
 }

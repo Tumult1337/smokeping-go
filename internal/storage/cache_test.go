@@ -18,6 +18,7 @@ type fakeReader struct {
 	latestHops   atomic.Int64
 	out          []CyclePoint
 	hops         []HopPoint
+	cycleLoss    []CycleCounters
 	err          error
 }
 
@@ -34,26 +35,26 @@ func (f *fakeReader) QueryRTTs(context.Context, config.TargetRef, time.Time, tim
 func (f *fakeReader) QueryHTTPSamples(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) ([]HTTPPoint, error) {
 	return nil, nil
 }
-func (f *fakeReader) QueryLatestHops(context.Context, config.TargetRef, QueryFilter) ([]HopPoint, error) {
+func (f *fakeReader) QueryLatestHops(context.Context, config.TargetRef, QueryFilter) (HopsResult, error) {
 	f.latestHops.Add(1)
 	if f.err != nil {
-		return nil, f.err
+		return HopsResult{}, f.err
 	}
-	return f.hops, nil
+	return HopsResult{Hops: f.hops, Cycles: f.cycleLoss}, nil
 }
-func (f *fakeReader) QueryHopsAt(context.Context, config.TargetRef, time.Time, time.Duration, QueryFilter) ([]HopPoint, error) {
+func (f *fakeReader) QueryHopsAt(context.Context, config.TargetRef, time.Time, time.Duration, QueryFilter) (HopsResult, error) {
 	f.hopsAt.Add(1)
 	if f.err != nil {
-		return nil, f.err
+		return HopsResult{}, f.err
 	}
-	return f.hops, nil
+	return HopsResult{Hops: f.hops, Cycles: f.cycleLoss}, nil
 }
-func (f *fakeReader) QueryHopsTimeline(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) ([]HopPoint, error) {
+func (f *fakeReader) QueryHopsTimeline(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) (HopsResult, error) {
 	f.hopsTimeline.Add(1)
 	if f.err != nil {
-		return nil, f.err
+		return HopsResult{}, f.err
 	}
-	return f.hops, nil
+	return HopsResult{Hops: f.hops}, nil
 }
 func (f *fakeReader) QueryOverview(context.Context, time.Time, time.Time, []config.TargetRef) ([]OverviewSourceRow, error) {
 	return nil, nil
@@ -86,20 +87,20 @@ func (s *slowFakeReader) QueryRTTs(context.Context, config.TargetRef, time.Time,
 func (s *slowFakeReader) QueryHTTPSamples(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) ([]HTTPPoint, error) {
 	return nil, nil
 }
-func (s *slowFakeReader) QueryLatestHops(context.Context, config.TargetRef, QueryFilter) ([]HopPoint, error) {
+func (s *slowFakeReader) QueryLatestHops(context.Context, config.TargetRef, QueryFilter) (HopsResult, error) {
 	s.calls.Add(1)
 	<-s.gate
-	return s.hops, nil
+	return HopsResult{Hops: s.hops}, nil
 }
-func (s *slowFakeReader) QueryHopsAt(context.Context, config.TargetRef, time.Time, time.Duration, QueryFilter) ([]HopPoint, error) {
+func (s *slowFakeReader) QueryHopsAt(context.Context, config.TargetRef, time.Time, time.Duration, QueryFilter) (HopsResult, error) {
 	s.calls.Add(1)
 	<-s.gate
-	return s.hops, nil
+	return HopsResult{Hops: s.hops}, nil
 }
-func (s *slowFakeReader) QueryHopsTimeline(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) ([]HopPoint, error) {
+func (s *slowFakeReader) QueryHopsTimeline(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) (HopsResult, error) {
 	s.calls.Add(1)
 	<-s.gate
-	return s.hops, nil
+	return HopsResult{Hops: s.hops}, nil
 }
 func (s *slowFakeReader) QueryOverview(context.Context, time.Time, time.Time, []config.TargetRef) ([]OverviewSourceRow, error) {
 	return nil, nil
@@ -763,7 +764,7 @@ func TestCachingReader_Hops_NoRedundantLeaderAfterRace(t *testing.T) {
 	}
 	c.testHookAfterHopsLookup = func() {
 		c.testHookAfterHopsLookup = nil
-		c.hopsStore(key, []HopPoint{{Time: now, Index: 42}}, time.Hour)
+		c.hopsStore(key, HopsResult{Hops: []HopPoint{{Time: now, Index: 42}}}, time.Hour)
 	}
 
 	pts, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{})
@@ -773,7 +774,7 @@ func TestCachingReader_Hops_NoRedundantLeaderAfterRace(t *testing.T) {
 	if got := inner.hopsTimeline.Load(); got != 0 {
 		t.Fatalf("inner hops calls: got %d want 0 (re-check under inflight lock should serve from cache)", got)
 	}
-	if len(pts) != 1 || pts[0].Index != 42 {
+	if len(pts.Hops) != 1 || pts.Hops[0].Index != 42 {
 		t.Fatalf("expected entry stored mid-flight, got %+v", pts)
 	}
 }
@@ -831,7 +832,7 @@ func TestCachingReader_HopsTimeline_ServesStaleCacheOnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("got error %v; want stale data served silently", err)
 	}
-	if len(hops) != 1 || hops[0].Index != 1 {
+	if len(hops.Hops) != 1 || hops.Hops[0].Index != 1 {
 		t.Fatalf("got %+v; want stale hop with Index=1", hops)
 	}
 	// Inner was called twice: once to warm, once on the stale miss.
@@ -990,7 +991,7 @@ type captureLatestReader struct {
 	filters []QueryFilter
 }
 
-func (c *captureLatestReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) ([]HopPoint, error) {
+func (c *captureLatestReader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) (HopsResult, error) {
 	c.mu.Lock()
 	c.filters = append(c.filters, f)
 	c.mu.Unlock()

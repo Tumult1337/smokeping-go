@@ -278,12 +278,12 @@ func (*countRows) Close() error      { return nil }
 
 type countConn struct {
 	driver.Conn
-	rows  int
-	query string
+	rows    int
+	queries []string
 }
 
 func (c *countConn) Query(_ context.Context, query string, _ ...any) (driver.Rows, error) {
-	c.query = query
+	c.queries = append(c.queries, query)
 	return &countRows{left: c.rows}, nil
 }
 
@@ -301,17 +301,17 @@ func TestHopReadsRefuseATruncatedResult(t *testing.T) {
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	to := from.Add(24 * time.Hour)
 
-	calls := map[string]func(*Reader) ([]storage.HopPoint, error){
-		"QueryLatestHops": func(r *Reader) ([]storage.HopPoint, error) {
+	calls := map[string]func(*Reader) (storage.HopsResult, error){
+		"QueryLatestHops": func(r *Reader) (storage.HopsResult, error) {
 			return r.QueryLatestHops(context.Background(), ref, storage.QueryFilter{})
 		},
-		"QueryHopsAt": func(r *Reader) ([]storage.HopPoint, error) {
+		"QueryHopsAt": func(r *Reader) (storage.HopsResult, error) {
 			return r.QueryHopsAt(context.Background(), ref, from, 30*time.Minute, storage.QueryFilter{})
 		},
-		"QueryHopsTimeline raw": func(r *Reader) ([]storage.HopPoint, error) {
+		"QueryHopsTimeline raw": func(r *Reader) (storage.HopsResult, error) {
 			return r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{})
 		},
-		"QueryHopsTimeline bucketed": func(r *Reader) ([]storage.HopPoint, error) {
+		"QueryHopsTimeline bucketed": func(r *Reader) (storage.HopsResult, error) {
 			return r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{Step: 15 * time.Minute})
 		},
 	}
@@ -322,11 +322,11 @@ func TestHopReadsRefuseATruncatedResult(t *testing.T) {
 			if err != nil {
 				t.Fatalf("a result exactly at the cap was refused: %v", err)
 			}
-			if len(got) != cap {
-				t.Fatalf("got %d rows at the cap, want %d", len(got), cap)
+			if len(got.Hops) != cap {
+				t.Fatalf("got %d rows at the cap, want %d", len(got.Hops), cap)
 			}
-			if want := fmt.Sprintf("LIMIT %d", cap+1); !strings.Contains(atCap.query, want) {
-				t.Fatalf("query does not ask for a row past the cap (%s):%s", want, atCap.query)
+			if want := fmt.Sprintf("LIMIT %d", cap+1); !strings.Contains(atCap.queries[0], want) {
+				t.Fatalf("query does not ask for a row past the cap (%s):%s", want, atCap.queries[0])
 			}
 
 			over := &countConn{rows: cap + 1}
@@ -334,9 +334,89 @@ func TestHopReadsRefuseATruncatedResult(t *testing.T) {
 			if !errors.Is(err, storage.ErrHopsTruncated) {
 				t.Fatalf("err = %v, want ErrHopsTruncated", err)
 			}
-			if got != nil {
-				t.Fatalf("a refused read still returned %d rows", len(got))
+			if got.Hops != nil {
+				t.Fatalf("a refused read still returned %d rows", len(got.Hops))
 			}
 		})
+	}
+}
+
+// The counters query is built from a variable number of (source, timestamp)
+// pairs, so its placeholder count moves with the input the other reads' fixed
+// text never does.
+func TestCycleCounterQueryPlaceholdersMatchArgs(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	ts := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	for _, n := range []int{1, 2, 7} {
+		hops := make([]storage.HopPoint, 0, n)
+		for i := range n {
+			hops = append(hops, storage.HopPoint{Source: fmt.Sprintf("s%d", i), Time: ts.Add(time.Duration(i) * time.Second)})
+		}
+		conn := &recordConn{}
+		if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops); err != nil {
+			t.Fatalf("%d keys: %v", n, err)
+		}
+		if got, want := len(conn.args), strings.Count(conn.query, "?"); got != want {
+			t.Fatalf("%d keys: %d placeholders, %d args\nquery:%s\nargs:%v", n, want, got, conn.query, conn.args)
+		}
+		if !strings.Contains(conn.query, "FROM probe_cycle") {
+			t.Fatalf("%d keys: counters read the wrong table:%s", n, conn.query)
+		}
+	}
+}
+
+// One hop read pins one cycle per source, so many hop rows collapse to few
+// keys; asking probe_cycle once per row would turn a 30-hop path into 30
+// point lookups.
+func TestCycleKeysDedupePerCycle(t *testing.T) {
+	ts := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	hops := []storage.HopPoint{
+		{Source: "a", Time: ts, Index: 1},
+		{Source: "a", Time: ts, Index: 2},
+		{Source: "b", Time: ts.Add(time.Second), Index: 1},
+		{Source: "b", Time: ts.Add(time.Second), Index: 2},
+	}
+	got := cycleKeys(hops)
+	if len(got) != 2 {
+		t.Fatalf("cycleKeys = %+v, want one key per source", got)
+	}
+	if got[0].Source != "a" || !got[0].Time.Equal(ts) || got[1].Source != "b" {
+		t.Fatalf("cycleKeys lost identity or order: %+v", got)
+	}
+}
+
+// A hop read with no rows names no cycle, so it must not issue the counters
+// query at all — an empty IN list is not a valid one.
+func TestEmptyHopReadIssuesNoCounterQuery(t *testing.T) {
+	conn := &recordConn{}
+	if _, err := (&Reader{conn: conn}).QueryLatestHops(context.Background(),
+		config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}, storage.QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(conn.query, "FROM probe_cycle") {
+		t.Fatalf("an empty hop read still queried probe_cycle:%s", conn.query)
+	}
+}
+
+// The counters query interpolates one tuple per key, so the key count is what
+// bounds its text and its argument slice. Ingest holds live source names to
+// 512, and a hop read pins one cycle per source, so a read naming more cycles
+// than the cap is refused rather than turned into an unbounded query.
+func TestCycleCountersRefuseTooManyKeys(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	ts := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	hops := make([]storage.HopPoint, 0, maxCycleCounterKeys+1)
+	for i := range maxCycleCounterKeys + 1 {
+		hops = append(hops, storage.HopPoint{Source: strconv.Itoa(i), Time: ts})
+	}
+	conn := &recordConn{}
+	if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops); !errors.Is(err, storage.ErrHopsTruncated) {
+		t.Fatalf("err = %v, want ErrHopsTruncated", err)
+	}
+	if conn.query != "" {
+		t.Fatalf("the refused read still issued a query:%s", conn.query)
+	}
+	if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops[:maxCycleCounterKeys]); err != nil {
+		t.Fatalf("a read exactly at the key cap was refused: %v", err)
 	}
 }

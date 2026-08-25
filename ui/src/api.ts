@@ -36,9 +36,25 @@ export interface HopPoint {
   WorstTime?: string;
 }
 
+// CycleLoss is one source's target-level loss for the cycle its hop rows came
+// from. It is a sibling of the hop rows, never a field on one: a hop row's
+// Sent/LossCount count probes at a single TTL, and a per-round walk marks the
+// target at every TTL it ever answered at, so summing marked rows counts one
+// round once per marked TTL.
+export interface CycleLoss {
+  Source: string;
+  Time: string;
+  Sent: number;
+  LossCount: number;
+  LossPct: number;
+}
+
 export interface HopsResponse {
   target: string;
   hops: HopPoint[];
+  // Absent when talking to a server that predates the field, and empty for a
+  // source whose cycle recorded no measurement. Both mean "unknown", never 0%.
+  target_loss?: CycleLoss[];
 }
 
 export interface CyclePoint {

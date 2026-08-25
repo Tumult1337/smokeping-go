@@ -463,7 +463,7 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 	// `at` is an optional unix-seconds/RFC3339 timestamp. When present we pick
 	// the single cycle closest to it (within ±30m) so the UI can show the
 	// hops view from any moment of the main chart. Absent = latest.
-	var hops []storage.HopPoint
+	var res storage.HopsResult
 	var err error
 	filter := storage.QueryFilter{Source: r.URL.Query().Get("source")}
 	if atStr := r.URL.Query().Get("at"); atStr != "" {
@@ -472,7 +472,7 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid at: expected RFC3339, unix seconds, or duration like -1h")
 			return
 		}
-		hops, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute, filter)
+		res, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute, filter)
 	} else {
 		// Drop sources that have gone silent from the current-path view, using
 		// the same staleness threshold the overview uses for its silent flag.
@@ -481,16 +481,25 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 		if interval := s.store.Current().Interval; interval > 0 {
 			filter.LatestSince = time.Now().Add(-time.Duration(silentCycleMultiplier) * interval)
 		}
-		hops, err = s.reader.QueryLatestHops(r.Context(), ref, filter)
+		res, err = s.reader.QueryLatestHops(r.Context(), ref, filter)
 	}
 	if err != nil {
 		s.writeQueryErr(w, "query hops", err)
 		return
 	}
+	hops := res.Hops
 	if slavehealth.IsHealthGroup(ref.Group) {
 		hops = redactTerminalHops(hops)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"target": ref.ID(), "hops": hops})
+	// target_loss is a sibling of hops, not a field on one: a hop row's
+	// sent/lost counts probes at a single TTL, and reading that as the
+	// target's loss is the bug this key exists to retire. A source whose
+	// cycle sent nothing has no entry rather than a zeroed one.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"target":      ref.ID(),
+		"hops":        hops,
+		"target_loss": cycleCounterDTOs(res.Cycles),
+	})
 }
 
 func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
@@ -513,7 +522,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	step := storage.PickHopStep(to.Sub(from))
-	hops, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{
+	res, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{
 		Source: r.URL.Query().Get("source"),
 		Step:   step,
 	})
@@ -521,6 +530,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		s.writeQueryErr(w, "query hops timeline", err)
 		return
 	}
+	hops := res.Hops
 	if slavehealth.IsHealthGroup(ref.Group) {
 		hops = redactAllHopAddresses(hops)
 	}
@@ -555,6 +565,33 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		"step_sec": int64(step / time.Second),
 		"hops":     dtos,
 	})
+}
+
+// cycleLossDTO is one source's target-level loss for the cycle its hop rows
+// came from. Named for the quantity rather than the row so it cannot be read
+// as a hop's own sent/lost.
+type cycleLossDTO struct {
+	Source    string    `json:"Source"`
+	Time      time.Time `json:"Time"`
+	Sent      int64     `json:"Sent"`
+	LossCount int64     `json:"LossCount"`
+	LossPct   float64   `json:"LossPct"`
+}
+
+// cycleCounterDTOs always returns a non-nil slice so the key is an empty array
+// rather than JSON null when no cycle recorded a measurement.
+func cycleCounterDTOs(cycles []storage.CycleCounters) []cycleLossDTO {
+	out := make([]cycleLossDTO, 0, len(cycles))
+	for _, c := range cycles {
+		out = append(out, cycleLossDTO{
+			Source:    c.Source,
+			Time:      c.Time,
+			Sent:      c.Sent,
+			LossCount: c.LossCount,
+			LossPct:   c.LossPct,
+		})
+	}
+	return out
 }
 
 // hopTimelineDTO is the wire shape returned by /hops/timeline. Distinct

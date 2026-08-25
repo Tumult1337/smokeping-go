@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -341,7 +342,7 @@ func hopRowsWithinCap(out []storage.HopPoint, err error) ([]storage.HopPoint, er
 // the lie expires; the CTE stops considering them.
 var maxFutureSkewSeconds = strconv.Itoa(int(config.MaxFutureSkew / time.Second))
 
-func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
+func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) (storage.HopsResult, error) {
 	srcClause, srcArgs := sourceFilter(f.Source)
 	// Optional staleness floor: bounding the CTE's max() to rows at or after
 	// the cutoff means a source whose newest row predates it produces no group
@@ -386,13 +387,14 @@ ORDER BY source, ttl` + hopRowLimit()
 	args = append(args, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query latest hops: %w", err)
+		return storage.HopsResult{}, fmt.Errorf("query latest hops: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
-	return scanHopRows(rows)
+	hops, err := scanHopRows(rows)
+	return r.withCycleCounters(ctx, ref, hops, err)
 }
 
-func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) ([]storage.HopPoint, error) {
+func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) (storage.HopsResult, error) {
 	half := window / 2
 	srcClause, srcArgs := sourceFilter(f.Source)
 	// Pick the single cycle per source nearest to `at` via argMin, then
@@ -429,10 +431,106 @@ ORDER BY source, ttl` + hopRowLimit()
 	args = append(args, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query hops at: %w", err)
+		return storage.HopsResult{}, fmt.Errorf("query hops at: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
-	return scanHopRows(rows)
+	hops, err := scanHopRows(rows)
+	return r.withCycleCounters(ctx, ref, hops, err)
+}
+
+// maxCycleCounterKeys bounds the (source, cycle) pairs one hop read asks
+// probe_cycle about; ingest holds live source names to maxRegisteredSlaves.
+const maxCycleCounterKeys = 1024
+
+// withCycleCounters pairs a pinned hop read with the round counters of the
+// cycles it selected. Target loss is per cycle and cannot be recovered from
+// hop rows, so the two travel together rather than leaving a caller to derive
+// one from the other.
+func (r *Reader) withCycleCounters(ctx context.Context, ref config.TargetRef, hops []storage.HopPoint, err error) (storage.HopsResult, error) {
+	if err != nil {
+		return storage.HopsResult{}, err
+	}
+	cycles, err := r.queryCycleCounters(ctx, ref, hops)
+	if err != nil {
+		return storage.HopsResult{}, err
+	}
+	return storage.HopsResult{Hops: hops, Cycles: cycles}, nil
+}
+
+// queryCycleCounters reads probe_cycle at exactly the (source, timestamp)
+// pairs the hop rows carry. A cycle that sent nothing wrote no row there, so a
+// source can legitimately come back without counters.
+func (r *Reader) queryCycleCounters(ctx context.Context, ref config.TargetRef, hops []storage.HopPoint) ([]storage.CycleCounters, error) {
+	keys := cycleKeys(hops)
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	if len(keys) > maxCycleCounterKeys {
+		return nil, storage.ErrHopsTruncated
+	}
+	// Milliseconds, not time.Time: the driver renders a bound time.Time to
+	// second precision, so an exact DateTime64(3) comparison silently matches
+	// nothing. The range bound is redundant with the IN set and exists so the
+	// primary key still prunes.
+	pairs := make([]string, len(keys))
+	first, last := keys[0].Time.UnixMilli(), keys[0].Time.UnixMilli()
+	tuples := make([]any, 0, 2*len(keys))
+	for i, k := range keys {
+		ms := k.Time.UnixMilli()
+		pairs[i] = "(?, fromUnixTimestamp64Milli(?))"
+		tuples = append(tuples, k.Source, ms)
+		first = min(first, ms)
+		last = max(last, ms)
+	}
+	args := append([]any{ref.Target.Name, ref.Group, first, last}, tuples...)
+	q := `
+SELECT source, timestamp, sent, lost, loss_pct
+FROM probe_cycle
+WHERE target_id = ?
+  AND target_group = ?
+  AND timestamp >= fromUnixTimestamp64Milli(?)
+  AND timestamp <= fromUnixTimestamp64Milli(?)
+  AND (source, timestamp) IN (` + strings.Join(pairs, ", ") + `)
+LIMIT ` + strconv.Itoa(len(keys))
+	rows, err := r.conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query cycle counters: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // rows.Err() returned below captures any close-time error
+	var out []storage.CycleCounters
+	for rows.Next() {
+		var c storage.CycleCounters
+		var sent, lost uint16
+		var lossPct float32
+		if err := rows.Scan(&c.Source, &c.Time, &sent, &lost, &lossPct); err != nil {
+			return nil, err
+		}
+		c.Sent = int64(sent)
+		c.LossCount = int64(lost)
+		c.LossPct = float64(lossPct)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// cycleKeys reduces hop rows to the distinct cycles they came from, in the
+// order first seen.
+func cycleKeys(hops []storage.HopPoint) []storage.CycleCounters {
+	type key struct {
+		source string
+		ts     int64
+	}
+	seen := make(map[key]struct{}, 8)
+	var out []storage.CycleCounters
+	for _, h := range hops {
+		k := key{h.Source, h.Time.UnixMilli()}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, storage.CycleCounters{Source: h.Source, Time: h.Time})
+	}
+	return out
 }
 
 // scanHopRows is shared by QueryLatestHops, QueryHopsAt, and the raw
@@ -472,12 +570,21 @@ func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 	return hopRowsWithinCap(out, rows.Err())
 }
 
-func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
+func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) (storage.HopsResult, error) {
 	step := f.Step
+	var hops []storage.HopPoint
+	var err error
 	if step == 0 {
-		return r.queryHopsRaw(ctx, ref, from, to, f.Source)
+		hops, err = r.queryHopsRaw(ctx, ref, from, to, f.Source)
+	} else {
+		hops, err = r.queryHopsBucketed(ctx, ref, from, to, f.Source, step)
 	}
-	return r.queryHopsBucketed(ctx, ref, from, to, f.Source, step)
+	if err != nil {
+		return storage.HopsResult{}, err
+	}
+	// No Cycles: a bucketed row spans many cycles, so there is no single
+	// cycle whose counters it could carry.
+	return storage.HopsResult{Hops: hops}, nil
 }
 
 func (r *Reader) queryHopsRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {

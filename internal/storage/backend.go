@@ -21,9 +21,9 @@ type Reader interface {
 	QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]CyclePoint, error)
 	QueryRTTs(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]RTTPoint, error)
 	QueryHTTPSamples(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HTTPPoint, error)
-	QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) ([]HopPoint, error)
-	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f QueryFilter) ([]HopPoint, error)
-	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) ([]HopPoint, error)
+	QueryLatestHops(ctx context.Context, ref config.TargetRef, f QueryFilter) (HopsResult, error)
+	QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f QueryFilter) (HopsResult, error)
+	QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f QueryFilter) (HopsResult, error)
 	// QueryOverview returns one row per (group, name, source) for the
 	// configured targets passed in. Used by the fleet overview page; the
 	// handler collapses to worst-source per target. Sparkline length is fixed
@@ -157,6 +157,28 @@ type HTTPPoint struct {
 // reaches its row cap: hop reads order oldest-first, so the prefix is missing
 // the newest history and reads as a probe that stopped.
 var ErrHopsTruncated = errors.New("storage: hop result exceeds the row cap")
+
+// HopsResult is one hop read: the path rows, and the round counters of the
+// cycles those rows came from.
+type HopsResult struct {
+	Hops []HopPoint
+	// Cycles carries one entry per (source, cycle) present in Hops, missing
+	// for a source whose cycle sent nothing and so wrote no probe_cycle row,
+	// and empty for QueryHopsTimeline, which buckets across many cycles.
+	Cycles []CycleCounters
+}
+
+// CycleCounters is one cycle's own round accounting for one source. Loss at
+// the target is a property of the cycle and cannot be recovered from hop
+// rows: a per-round walk marks the target at every TTL it ever answered at,
+// so summing those rows counts one round once per marked TTL.
+type CycleCounters struct {
+	Source    string
+	Time      time.Time
+	Sent      int64
+	LossCount int64
+	LossPct   float64
+}
 
 // HopPoint is the most recent stats for one hop on an MTR path. Source
 // identifies the probe origin (master / slave name), matching CyclePoint;

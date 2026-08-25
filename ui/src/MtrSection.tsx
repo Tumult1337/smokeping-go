@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getHops, type HopPoint } from "./api";
+import { getHops, type CycleLoss, type HopPoint } from "./api";
 import { HopsPath } from "./HopsTable";
 import { HopsTable } from "./HopsTable";
 import { MtrHeatmap } from "./MtrHeatmap";
@@ -141,6 +141,7 @@ function MultiSourceLayout({
   onCyclePick: (timeSec: number, source?: string) => void;
 }) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
+  const [cycleLoss, setCycleLoss] = useState<CycleLoss[] | null>(null);
   const [cycleTime, setCycleTime] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const prevKey = useRef<string>("");
@@ -161,6 +162,7 @@ function MultiSourceLayout({
       .then((r) => {
         const rows = r.hops ?? [];
         setHops(rows);
+        setCycleLoss(r.target_loss ?? null);
         // Label the header from the rows on screen: atSec is the requested
         // time and the server returns the nearest cycle, not that instant.
         setCycleTime(rows.length > 0 ? rows[0].Time : null);
@@ -235,7 +237,7 @@ function MultiSourceLayout({
       <div className="mtr-sections">
         {groups.map((g) => {
           const isCollapsed = collapsed.has(g.source);
-          const endToEndLoss = targetLoss(g.hops);
+          const endToEndLoss = lossForSource(cycleLoss, g.source);
           const scale = Math.max(1, ...g.hops.map((h) => h.Max));
           return (
             <div key={g.source || "(unspecified)"} className="mtr-section">
@@ -256,9 +258,19 @@ function MultiSourceLayout({
                   {countDistinct(g.hops) === 1 ? "" : "s"}
                   <span
                     className="mtr-section-worst"
-                    style={{ color: lossTextColor(endToEndLoss, "var(--text-subtle)") }}
+                    style={{
+                      color:
+                        endToEndLoss == null
+                          ? "var(--text-subtle)"
+                          : lossTextColor(endToEndLoss, "var(--text-subtle)"),
+                    }}
+                    title={
+                      endToEndLoss == null
+                        ? "No target-level loss reported for this cycle"
+                        : undefined
+                    }
                   >
-                    loss {endToEndLoss.toFixed(1)}%
+                    loss {endToEndLoss == null ? "—" : `${endToEndLoss.toFixed(1)}%`}
                   </span>
                 </span>
               </button>
@@ -297,23 +309,15 @@ function MultiSourceLayout({
   );
 }
 
-// Loss at the target is lost-over-sent across every marked row, because a
-// per-round walk marks the target at each TTL it answered from and the
-// deepest of those is routinely the clean row a lost echo pushed a hop
-// further; unmarked data falls back to the deepest TTL as before.
-function targetLoss(hops: HopPoint[]): number {
-  let rows = hops.filter((h) => h.TargetReply);
-  if (rows.length === 0) {
-    const deepest = Math.max(...hops.map((h) => h.Index));
-    rows = hops.filter((h) => h.Index === deepest);
-  }
-  let sent = 0;
-  let lost = 0;
-  for (const h of rows) {
-    sent += h.Sent;
-    lost += h.LossCount;
-  }
-  return sent > 0 ? (100 * lost) / sent : 0;
+// Loss at the target comes from the cycle's own round counters and from
+// nowhere else — hop rows cannot answer how many rounds reached the target
+// once each round stops at its own terminal. null means unknown: the server
+// predates target_loss, or that source's cycle recorded no measurement.
+function lossForSource(cycles: CycleLoss[] | null, source: string): number | null {
+  if (cycles == null) return null;
+  const row = cycles.find((c) => (c.Source ?? "") === source);
+  if (row == null || row.Sent <= 0) return null;
+  return row.LossPct;
 }
 
 interface HopsGroup {

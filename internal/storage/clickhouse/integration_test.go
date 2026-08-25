@@ -853,7 +853,7 @@ func TestReaderQueryLatestHops(t *testing.T) {
 
 	r, _ := NewReader(ctx, cfg)
 	defer r.Close()
-	pts, err := r.QueryLatestHops(ctx,
+	pts, err := latestHops(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "tlh"}, Group: "g"},
 		storage.QueryFilter{},
 	)
@@ -913,7 +913,7 @@ func TestReaderQueryLatestHopsPerSource(t *testing.T) {
 
 	r, _ := NewReader(ctx, cfg)
 	defer r.Close() //nolint:errcheck // test cleanup
-	pts, err := r.QueryLatestHops(ctx,
+	pts, err := latestHops(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "tlhp"}, Group: "g"},
 		storage.QueryFilter{}, // unfiltered: expect both sources
 	)
@@ -975,7 +975,7 @@ func TestReaderQueryLatestHopsStaleSourceDropped(t *testing.T) {
 
 	// Cutoff at 5 minutes ago: "live" survives, "removed" is dropped.
 	cutoff := now.Add(-5 * time.Minute)
-	pts, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{LatestSince: cutoff})
+	pts, err := latestHops(ctx, r, ref, storage.QueryFilter{LatestSince: cutoff})
 	if err != nil {
 		t.Fatalf("query (floored): %v", err)
 	}
@@ -989,7 +989,7 @@ func TestReaderQueryLatestHopsStaleSourceDropped(t *testing.T) {
 	}
 
 	// Zero floor: both sources returned (existing behaviour preserved).
-	all, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	all, err := latestHops(ctx, r, ref, storage.QueryFilter{})
 	if err != nil {
 		t.Fatalf("query (unfloored): %v", err)
 	}
@@ -1052,7 +1052,7 @@ func TestReaderQueryHopsAtSingleCycle(t *testing.T) {
 	defer r.Close() //nolint:errcheck // test cleanup
 
 	target := cycleTimes[1] // the middle cycle
-	pts, err := r.QueryHopsAt(ctx,
+	pts, err := hopsAt(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "thsc"}, Group: "g"},
 		target, 30*time.Minute,
 		storage.QueryFilter{Source: "master"},
@@ -1113,7 +1113,7 @@ func TestReaderQueryHopsAtPerSourceCycle(t *testing.T) {
 	defer r.Close() //nolint:errcheck // test cleanup
 
 	at := base.Add(25 * time.Second) // between cycle[0] (5s offset for slave) and cycle[1]
-	pts, err := r.QueryHopsAt(ctx,
+	pts, err := hopsAt(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "thpc"}, Group: "g"},
 		at, 30*time.Minute,
 		storage.QueryFilter{}, // unfiltered: expect one cycle per source
@@ -1188,7 +1188,7 @@ func TestReaderQueryHopsTimelineRawAndBucketed(t *testing.T) {
 	defer r.Close()
 
 	// Bucketed query (span > 24h triggers 15m tier).
-	pts, err := r.QueryHopsTimeline(ctx,
+	pts, err := hopsTimeline(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "tht"}, Group: "g"},
 		start.Add(-time.Hour), start.Add(48*time.Hour),
 		storage.QueryFilter{Step: 15 * time.Minute},
@@ -1267,7 +1267,7 @@ func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
 	// Bucketed query — this is the SQL path that broke when the alias
 	// shadowed the column. A regression here surfaces as a query error
 	// (Fatalf below), not a wrong value.
-	pts, err := r.QueryHopsTimeline(ctx,
+	pts, err := hopsTimeline(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "thsp"}, Group: "g"},
 		start.Add(-time.Hour), start.Add(time.Hour),
 		storage.QueryFilter{Step: 15 * time.Minute},
@@ -1298,7 +1298,7 @@ func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
 
 	// Raw path must mirror LossPct into MaxLossPct so the UI can read
 	// MaxLossPct uniformly without branching.
-	rawPts, err := r.QueryHopsTimeline(ctx,
+	rawPts, err := hopsTimeline(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "thsp"}, Group: "g"},
 		start.Add(-time.Hour), start.Add(time.Hour),
 		storage.QueryFilter{Step: 0}, // raw
@@ -1501,7 +1501,7 @@ func TestIntegrationHopAnnotationsRoundTrip(t *testing.T) {
 	defer r.Close()
 
 	// Path 1: QueryLatestHops.
-	got, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	got, err := latestHops(ctx, r, ref, storage.QueryFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1523,7 +1523,7 @@ func TestIntegrationHopAnnotationsRoundTrip(t *testing.T) {
 	}
 
 	// Path 2: QueryHopsAt — its select list and scan are separate code.
-	atHops, err := r.QueryHopsAt(ctx, ref, cy2.Time, 30*time.Minute, storage.QueryFilter{})
+	atHops, err := hopsAt(ctx, r, ref, cy2.Time, 30*time.Minute, storage.QueryFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1541,7 +1541,7 @@ func TestIntegrationHopAnnotationsRoundTrip(t *testing.T) {
 	}
 
 	// Path 3: raw timeline (step 0) — third select list, shared scan.
-	rawTL, err := r.QueryHopsTimeline(ctx, ref, at.Add(-time.Hour), at.Add(time.Hour), storage.QueryFilter{})
+	rawTL, err := hopsTimeline(ctx, r, ref, at.Add(-time.Hour), at.Add(time.Hour), storage.QueryFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1562,7 +1562,7 @@ func TestIntegrationHopAnnotationsRoundTrip(t *testing.T) {
 	}
 
 	// Path 4: bucketed timeline — its own select and scan, max(unreach).
-	tl, err := r.QueryHopsTimeline(ctx, ref, at.Add(-time.Hour), at.Add(time.Hour),
+	tl, err := hopsTimeline(ctx, r, ref, at.Add(-time.Hour), at.Add(time.Hour),
 		storage.QueryFilter{Step: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
@@ -1679,7 +1679,7 @@ func TestIntegrationBootstrapUpgradesLegacyTables(t *testing.T) {
 		t.Fatalf("reader: %v", err)
 	}
 	defer r.Close()
-	got, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	got, err := latestHops(ctx, r, ref, storage.QueryFilter{})
 	if err != nil {
 		t.Fatalf("latest hops: %v", err)
 	}
@@ -1731,7 +1731,7 @@ func TestIntegrationQueryLatestHopsIgnoresFutureRows(t *testing.T) {
 
 	r, _ := NewReader(ctx, cfg)
 	defer r.Close() //nolint:errcheck // test cleanup
-	pts, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	pts, err := latestHops(ctx, r, ref, storage.QueryFilter{})
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -1781,22 +1781,152 @@ func TestIntegrationHopReadRefusesPastTheRowCap(t *testing.T) {
 	hopRowCap = 2
 	t.Cleanup(func() { hopRowCap = orig })
 
-	if _, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
+	if _, err := latestHops(ctx, r, ref, storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
 		t.Fatalf("QueryLatestHops err = %v, want ErrHopsTruncated", err)
 	}
-	if _, err := r.QueryHopsTimeline(ctx, ref, start.Add(-time.Hour), start.Add(time.Hour), storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
+	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
 		t.Fatalf("QueryHopsTimeline raw err = %v, want ErrHopsTruncated", err)
 	}
-	if _, err := r.QueryHopsTimeline(ctx, ref, start.Add(-time.Hour), start.Add(time.Hour), storage.QueryFilter{Step: 15 * time.Minute}); !errors.Is(err, storage.ErrHopsTruncated) {
+	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), storage.QueryFilter{Step: 15 * time.Minute}); !errors.Is(err, storage.ErrHopsTruncated) {
 		t.Fatalf("QueryHopsTimeline bucketed err = %v, want ErrHopsTruncated", err)
 	}
 
 	hopRowCap = 3
-	hops, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	hops, err := latestHops(ctx, r, ref, storage.QueryFilter{})
 	if err != nil {
 		t.Fatalf("a result exactly at the cap was refused: %v", err)
 	}
 	if len(hops) != 3 {
 		t.Fatalf("got %d hops at the cap, want 3", len(hops))
 	}
+}
+
+// A route that lengthens across rounds marks the target at every TTL it
+// answered at, and each of those rows carries the losses of the rounds that
+// walked past it. Summing them reports 50% loss for three rounds that all
+// reached the target; the cycle's own counters say 3 sent, 0 lost. The hop
+// read has to carry those counters or the caller has nothing truthful to
+// render.
+func TestIntegrationHopReadCarriesCycleCounters(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ref := config.TargetRef{Target: config.Target{Name: "lengthening"}, Group: "g"}
+	ts := time.Now().UTC().Add(-time.Minute)
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: ts, Target: ref, Source: "master",
+		Sent: 3, LossCount: 0,
+		Summary: stats.Summary{Min: 1, Max: 4, Mean: 2, Median: 2},
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: []time.Duration{time.Millisecond}},
+			{Index: 2, IP: "192.0.2.9", Sent: 3, Lost: 2, TargetReply: true, RTTs: []time.Duration{2 * time.Millisecond}},
+			{Index: 3, IP: "192.0.2.9", Sent: 2, Lost: 1, TargetReply: true, RTTs: []time.Duration{3 * time.Millisecond}},
+			{Index: 4, IP: "192.0.2.9", Sent: 1, TargetReply: true, RTTs: []time.Duration{4 * time.Millisecond}},
+		},
+	})
+	// A second source pinned to its own timestamp, so the two keys span a
+	// range rather than naming one instant.
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: ts.Add(2 * time.Second), Target: ref, Source: "slave-a",
+		Sent: 5, LossCount: 1,
+		Summary: stats.Summary{Min: 1, Max: 2, Mean: 1, Median: 1},
+		Hops:    []probe.Hop{{Index: 1, IP: "192.0.2.9", Sent: 5, Lost: 1, TargetReply: true, RTTs: []time.Duration{time.Millisecond}}},
+	})
+	// A decoy inside that range: master's own cycle one second later, with no
+	// hop rows, so no hop read ever pins it. A counters query bounded only by
+	// the range would pick it up and report 99 sent.
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: ts.Add(time.Second), Target: ref, Source: "master", Sent: 99, LossCount: 99,
+	})
+	// A cycle that sent nothing writes hop rows but no probe_cycle row, so
+	// this source must come back with a path and no counters rather than a
+	// zeroed pair that renders as 0% loss.
+	silent := config.TargetRef{Target: config.Target{Name: "silent"}, Group: "g"}
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: ts, Target: silent, Source: "master", Sent: 0,
+		Hops: []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 1, Lost: 1}},
+	})
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	for name, read := range map[string]func() (storage.HopsResult, error){
+		"QueryLatestHops": func() (storage.HopsResult, error) {
+			return r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+		},
+		"QueryHopsAt": func() (storage.HopsResult, error) {
+			return r.QueryHopsAt(ctx, ref, ts, 30*time.Minute, storage.QueryFilter{})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := read()
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			var markedSent, markedLost int64
+			for _, h := range res.Hops {
+				if h.Source == "master" && h.TargetReply {
+					markedSent += h.Sent
+					markedLost += h.LossCount
+				}
+			}
+			if markedSent != 6 || markedLost != 3 {
+				t.Fatalf("fixture no longer reproduces the row-summed lie: sent=%d lost=%d", markedSent, markedLost)
+			}
+			got := map[string]storage.CycleCounters{}
+			for _, c := range res.Cycles {
+				got[c.Source] = c
+			}
+			if len(got) != 2 {
+				t.Fatalf("got %d cycle counters, want one per source: %+v", len(res.Cycles), res.Cycles)
+			}
+			if m := got["master"]; m.Sent != 3 || m.LossCount != 0 || m.LossPct != 0 || !m.Time.Equal(ts.Truncate(time.Millisecond)) {
+				t.Fatalf("master counters = %+v, want the pinned cycle: 3 sent, 0 lost at %s", m, ts)
+			}
+			if sl := got["slave-a"]; sl.Sent != 5 || sl.LossCount != 1 {
+				t.Fatalf("slave-a counters = %+v, want 5 sent 1 lost", sl)
+			}
+		})
+	}
+
+	res, err := r.QueryLatestHops(ctx, silent, storage.QueryFilter{})
+	if err != nil {
+		t.Fatalf("silent target: %v", err)
+	}
+	if len(res.Hops) == 0 {
+		t.Fatal("a cycle that sent nothing must still write its hop rows")
+	}
+	if len(res.Cycles) != 0 {
+		t.Fatalf("a cycle that recorded no measurement produced counters: %+v", res.Cycles)
+	}
+}
+
+// The hop-row assertions below predate HopsResult and only care about the
+// path rows, so these keep them reading as they did.
+func latestHops(ctx context.Context, r *Reader, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
+	res, err := r.QueryLatestHops(ctx, ref, f)
+	return res.Hops, err
+}
+
+func hopsAt(ctx context.Context, r *Reader, ref config.TargetRef, at time.Time, window time.Duration, f storage.QueryFilter) ([]storage.HopPoint, error) {
+	res, err := r.QueryHopsAt(ctx, ref, at, window, f)
+	return res.Hops, err
+}
+
+func hopsTimeline(ctx context.Context, r *Reader, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
+	res, err := r.QueryHopsTimeline(ctx, ref, from, to, f)
+	return res.Hops, err
 }
