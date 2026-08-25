@@ -210,8 +210,20 @@ Key points a reader can't derive from a single file:
   numbers identical to the pre-split shape, and a TTL nothing answered emits
   one `IP: ""` row. Rows the target itself answered carry `TargetReply` —
   the target's row is no longer guaranteed to be the deepest, so `/hops`
-  redaction, MTR's RTT mirror, and the UI's end-to-end loss all key on that
-  marker instead of on position.
+  redaction and MTR's RTT mirror key on that marker instead of on position.
+  End-to-end loss does **not**: it comes from the cycle's own round
+  counters, served as `target_loss` alongside `hops`, because summing
+  marked rows counts one round once per TTL the target ever answered at.
+
+- **`/hops` target loss:** `QueryLatestHops` and `QueryHopsAt` return
+  `storage.HopsResult{Hops, Cycles}` — the `probe_cycle` counters read at
+  exactly the `(source, timestamp)` pairs the hop rows pinned, so they are
+  cached, admitted and refused with the hops rather than as an uncached
+  point query on every cache hit. The wire field is `target_loss`, a
+  sibling array of `hops` named for the quantity rather than the row so it
+  cannot be read as a hop field. `/hops/timeline` carries none: a bucketed
+  row spans many cycles. Absent key or missing source renders as unknown,
+  never 0% — an old server pairs with a new UI during a rolling upgrade.
 
   **An echo reply counts as the target's only if its peer is the resolved
   destination.** `matchDatagram` is the read path's whole trust boundary —
