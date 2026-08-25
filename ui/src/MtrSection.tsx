@@ -141,6 +141,7 @@ function MultiSourceLayout({
   onCyclePick: (timeSec: number, source?: string) => void;
 }) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
+  const [cycleTime, setCycleTime] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const prevKey = useRef<string>("");
 
@@ -157,7 +158,13 @@ function MultiSourceLayout({
     if (changed) setHops(null);
     const controller = new AbortController();
     getHops(targetId, atSec ?? undefined, undefined, controller.signal)
-      .then((r) => setHops(r.hops ?? []))
+      .then((r) => {
+        const rows = r.hops ?? [];
+        setHops(rows);
+        // Label the header from the rows on screen: atSec is the requested
+        // time and the server returns the nearest cycle, not that instant.
+        setCycleTime(rows.length > 0 ? rows[0].Time : null);
+      })
       .catch((e) => {
         if (e?.name !== "AbortError") setErr(String(e));
       });
@@ -167,6 +174,12 @@ function MultiSourceLayout({
   const groups = useMemo(() => groupBySource(hops ?? []), [hops]);
 
   const { collapsed, toggle } = useCollapsedSources();
+  const headerLabel =
+    cycleTime != null
+      ? new Date(cycleTime).toLocaleString()
+      : atSec != null
+      ? new Date(atSec * 1000).toLocaleString()
+      : "";
 
   if (err) return <div className="error">{err}</div>;
   if (hops === null) return <div className="empty">Loading MTR data…</div>;
@@ -175,7 +188,7 @@ function MultiSourceLayout({
       <div className="chart-wrap">
         {atSec != null && (
           <div className="hops-header">
-            <span>Showing cycle at {new Date(atSec * 1000).toLocaleString()}</span>
+            <span>Showing cycle at {headerLabel}</span>
             <button className="hops-reset" onClick={onResetAt} title="Show latest">
               ← latest
             </button>
@@ -213,7 +226,7 @@ function MultiSourceLayout({
     <>
       {atSec != null && (
         <div className="hops-header">
-          <span>Showing cycle at {new Date(atSec * 1000).toLocaleString()}</span>
+          <span>Showing cycle at {headerLabel}</span>
           <button className="hops-reset" onClick={onResetAt} title="Show latest">
             ← latest
           </button>
