@@ -39,3 +39,9 @@ function nearestCycle(cycles: number[], sec: number): number {
   }
   return best;
 }
+
+// A partial-loss cycle whose Min is 0 had it poisoned by a fully-lost
+// sub-cycle, so the drawn floor is P5 (or the median) rather than 0ms.
+export function effectiveMin(p: CyclePoint): number {
+  return p.Min === 0 && p.LossPct > 0 ? p.P5 || p.Median : p.Min;
+}

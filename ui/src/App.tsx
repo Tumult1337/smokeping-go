@@ -12,7 +12,7 @@ import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
 import { MtrSection } from "./MtrSection";
 import { paletteForSorted, lossColor } from "./palette";
-import { windowLoss } from "./chartUtils";
+import { effectiveMin, windowLoss } from "./chartUtils";
 import { OverviewView, type SortKey, type SortDir } from "./OverviewView";
 import type { OverviewWindow } from "./api";
 
@@ -485,9 +485,8 @@ export default function App() {
     if (valid.length === 0) return { median: null, p95: null, min: null, max: null, loss, maxLoss };
     const median = valid.reduce((s, p) => s + p.Median, 0) / valid.length;
     const p95 = valid.reduce((s, p) => s + p.P95, 0) / valid.length;
-    // Skip Min=0 rollup artifacts (Flux min() poisoned by 100%-loss sub-cycles).
     const min = valid.reduce((m, p) => {
-      const floor = p.Min === 0 && p.LossPct > 0 ? (p.P5 > 0 ? p.P5 : p.Median) : p.Min;
+      const floor = effectiveMin(p);
       return floor > 0 && floor < m ? floor : m;
     }, Infinity);
     const max = valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity);

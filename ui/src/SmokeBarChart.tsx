@@ -3,7 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { windowLoss } from "./chartUtils";
+import { effectiveMin, windowLoss } from "./chartUtils";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
@@ -557,14 +557,10 @@ function buildSources(points: CyclePoint[]): Built {
     const medians = pts.map((p) => p.LossPct >= 100 ? NaN : p.Median);
     const losses = pts.map((p) => p.LossPct);
 
-    // Per-cycle percentile stack.
-    // - 100%-loss cycles: no bands (Median/Min/Max are all 0 artifacts).
-    // - Rollup cycles where Min=0 but Median>0: the Flux min() picked up a
-    //   zero from a 100%-loss sub-cycle. Use P5 as the outer band floor so
-    //   the bar doesn't falsely extend to 0ms.
+    // 100%-loss cycles get no bands: their Median/Min/Max are all 0 artifacts.
     const bands: Band[][] = pts.map((p) => {
       if (p.LossPct >= 100) return [];
-      const effMin = p.Min === 0 && p.LossPct > 0 ? (p.P5 || p.Median) : p.Min;
+      const effMin = effectiveMin(p);
       const all: Band[] = [
         { lo: effMin, hi: p.Max, alpha: 0.07 },
         { lo: p.P5, hi: p.P95, alpha: 0.09 },
@@ -582,8 +578,8 @@ function buildSources(points: CyclePoint[]): Built {
 
     for (const p of pts) {
       if (p.LossPct >= 100) continue;
-      // Skip Min=0 rollup artifacts when computing the y floor.
-      if (p.Min > 0 && p.Min < yLo) yLo = p.Min;
+      const lo = effectiveMin(p);
+      if (lo > 0 && lo < yLo) yLo = lo;
       if (p.Max > yHi) yHi = p.Max;
     }
 
@@ -591,7 +587,8 @@ function buildSources(points: CyclePoint[]): Built {
     let srcLo = Infinity, srcHi = -Infinity;
     for (const p of pts) {
       if (p.LossPct >= 100) continue;
-      if (p.Min > 0 && p.Min < srcLo) srcLo = p.Min;
+      const lo = effectiveMin(p);
+      if (lo > 0 && lo < srcLo) srcLo = lo;
       if (p.Max > srcHi) srcHi = p.Max;
     }
     if (isFinite(srcLo) && isFinite(srcHi)) {
@@ -639,7 +636,7 @@ function buildSources(points: CyclePoint[]): Built {
       const avg = (fn: (p: CyclePoint) => number) =>
         valid.reduce((s, p) => s + fn(p), 0) / valid.length;
       const mins = valid
-        .map((p) => (p.Min === 0 && p.LossPct > 0 ? (p.P5 > 0 ? p.P5 : p.Median) : p.Min))
+        .map((p) => effectiveMin(p))
         .filter((v) => v > 0);
       aggregates.push({
         min: mins.length > 0 ? Math.min(...mins) : null,

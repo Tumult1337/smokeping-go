@@ -3,6 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series, type Band } from "u
 import type { CyclePoint } from "./api";
 import { PALETTE } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
+import { effectiveMin } from "./chartUtils";
 
 interface Props {
   points: CyclePoint[];
@@ -488,14 +489,7 @@ function buildAligned(points: CyclePoint[]): Built {
       // bridges over them rather than drawing a false dip to 0ms.
       if (p.LossPct >= 100) continue;
       PCT_KEYS.forEach((k, c) => {
-        // When Min=0 from a rollup that included 100%-loss sub-cycles, the
-        // Flux min() was poisoned by those zeroes. Substitute P5 so the outer
-        // band doesn't extend all the way to 0ms.
-        if (k === "Min" && p.Min === 0 && p.LossPct > 0 && p.Median > 0) {
-          cols[c][i] = p.P5 > 0 ? p.P5 : p.Median;
-        } else {
-          cols[c][i] = p[k];
-        }
+        cols[c][i] = k === "Min" ? effectiveMin(p) : p[k];
       });
     }
     cols.forEach((c) => data.push(c));
@@ -514,7 +508,7 @@ function buildAligned(points: CyclePoint[]): Built {
       const avg = (fn: (p: CyclePoint) => number) =>
         valid.reduce((s, p) => s + fn(p), 0) / valid.length;
       const mins = valid
-        .map((p) => (p.Min === 0 && p.LossPct > 0 ? (p.P5 > 0 ? p.P5 : p.Median) : p.Min))
+        .map((p) => effectiveMin(p))
         .filter((v) => v > 0);
       aggregates.push({
         min: mins.length > 0 ? Math.min(...mins) : null,
@@ -533,7 +527,7 @@ function buildAligned(points: CyclePoint[]): Built {
     let srcLo = Infinity, srcHi = -Infinity;
     for (const p of sorted) {
       if (p.LossPct >= 100) continue;
-      const effMin = (p.Min === 0 && p.LossPct > 0 && p.Median > 0) ? (p.P5 > 0 ? p.P5 : p.Median) : p.Min;
+      const effMin = effectiveMin(p);
       if (effMin > 0 && effMin < srcLo) srcLo = effMin;
       if (p.Max > srcHi) srcHi = p.Max;
     }
