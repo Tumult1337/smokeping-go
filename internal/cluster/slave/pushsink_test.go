@@ -6,9 +6,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -288,5 +290,58 @@ func TestRetryable4xxMatchesTheRFC(t *testing.T) {
 		if retryable4xx(code) {
 			t.Errorf("%d is both specially handled and retryable", code)
 		}
+	}
+}
+
+// RFC 9110 15.5.20's remedy for 421 is retrying over a *different* connection.
+// Requeueing through the same pooled connection reproduces the misroute every
+// flush, and Requeue puts the batch back on the ring's head — so drop-oldest
+// discards live cycles behind a batch that can never succeed.
+func TestMisdirectedRequestRetriesOnANewConnection(t *testing.T) {
+	var mu sync.Mutex
+	var conns int
+	var statuses []int
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n := len(statuses)
+		code := http.StatusMisdirectedRequest
+		if n > 0 {
+			code = http.StatusOK
+		}
+		statuses = append(statuses, code)
+		mu.Unlock()
+		w.WriteHeader(code)
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			mu.Lock()
+			conns++
+			mu.Unlock()
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "tok", "tokyo-1", "v9", "")
+	batch := cluster.CycleBatch{Source: "tokyo-1", Cycles: []cluster.CyclePayload{{Time: time.Now()}}}
+
+	if err := c.PushCycles(context.Background(), batch); err == nil {
+		t.Fatal("421 returned no error")
+	} else if errors.Is(err, ErrRejected) {
+		t.Fatalf("421 classified as permanently rejected: %v", err)
+	}
+	if err := c.PushCycles(context.Background(), batch); err != nil {
+		t.Fatalf("retry after 421: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(statuses) != 2 {
+		t.Fatalf("server saw %d requests, want 2", len(statuses))
+	}
+	if conns != 2 {
+		t.Fatalf("retry reused the pooled connection (%d connections for 2 requests); "+
+			"RFC 9110 15.5.20 requires a different one", conns)
 	}
 }

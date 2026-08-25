@@ -200,6 +200,11 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 		return resp.StatusCode, httpResult{}, ErrNotFound
 	}
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotModified {
+		if resp.StatusCode == http.StatusMisdirectedRequest {
+			// RFC 9110 15.5.20's remedy is a *different* connection; retrying
+			// through the same pool reproduces the misroute every flush.
+			c.http.CloseIdleConnections()
+		}
 		err := fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(buf)))
 		if resp.StatusCode < 500 && !retryable4xx(resp.StatusCode) {
 			err = fmt.Errorf("%w: %w", ErrRejected, err)

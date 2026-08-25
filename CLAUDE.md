@@ -574,7 +574,13 @@ Key points a reader can't derive from a single file:
   "the client MAY retry the request over a different connection" — a reverse
   proxy's routing condition), 425 (RFC 8470 §5.2) and 429 (RFC 6585 §4).
   409 is deliberately *not* in the set: its "resubmit" is conditioned on the
-  user resolving the conflict, not on time passing.
+  user resolving the conflict, not on time passing. 421 additionally calls
+  `CloseIdleConnections`, because the RFC's remedy is a *different* connection
+  and retrying through the same pool reproduces the misroute on every flush.
+  407 is retried knowing it cannot succeed until an operator supplies proxy
+  credentials: a stuck retry loses the oldest cycles to drop-oldest, while
+  dropping loses the whole batch immediately, for a verdict the master never
+  issued.
   `TestRetryable4xxMatchesTheRFC` sweeps 400–499 so a status added without a
   citation reddens, and asserts none of 401/403/404 appear — those are
   classified before `retryable4xx` is consulted, so listing one there would
@@ -718,7 +724,10 @@ Key points a reader can't derive from a single file:
   so each `(source, reason)` is logged once per freshness window and carries
   the count it suppressed; the same window evicts the entry, and source names
   are already bounded by the master's registry. `reason` is `clock_skew` for
-  the freshness refusal and `duplicate_cycle` for the guard below. There is no
+  the freshness refusal and `duplicate_cycle` for the guard below. The line
+  carries `example_target`, never a bare `target`: the record is keyed by
+  source, so `suppressed` spans every target that source reports on and a
+  single target name would misdirect the investigation. There is no
   health-endpoint field: an API field needs a read site to be worth declaring,
   and the log is what an operator's alerting-on-alerting consumes.
 
@@ -726,9 +735,12 @@ Key points a reader can't derive from a single file:
   `lastCycle` hold whether and when a cycle was last accepted per source —
   two fields rather than one because `lastCycle`'s zero value would
   otherwise mean *admit*, and any producer stamping nothing would disable
-  the guard for its source forever. The timestamp is the same
-  `(target, source, timestamp)` identity storage treats as one measurement —
-  and a non-increasing cycle is skipped **before** any state mutation and
+  the guard for its source forever. The timestamp is the
+  `(target, source, timestamp)` tuple that *identifies* one measurement — it
+  does not deduplicate one: all four tables are plain `MergeTree`, so a
+  redelivered batch still writes duplicate rows that double-count in every
+  bucketed `sum(sent)`, and this guard covers alerting only.
+  A non-increasing cycle is skipped **before** any state mutation and
   before `lastSeen`. `PushSink.Requeue` resends a batch on any 5xx or network
   error, so a lost ack redelivers the same measurement: applied twice it
   incremented `consecHits` twice and fired a `sustained: 2` alert off one bad

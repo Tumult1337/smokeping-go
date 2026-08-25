@@ -2072,3 +2072,30 @@ func TestDuplicateIsCaughtWhenTheSlaveClockRunsAhead(t *testing.T) {
 		t.Fatalf("got %+v, want only PENDING — a redelivery from a fast-clocked slave is still one cycle", evs)
 	}
 }
+
+// The rate-limit key is (source, reason), so one line covers every target that
+// source reports on and `suppressed` counts across all of them. Naming a bare
+// `target` invites an operator to scope the investigation to that one target
+// when the whole fleet is affected.
+func TestExclusionWarningDoesNotClaimASingleTarget(t *testing.T) {
+	ev, cap, clk := newCapturingEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+	window := alertFreshness(time.Minute)
+
+	lagging := lossyCycle("tokyo-1", 100)
+	lagging.Time = clk.t.Add(-window - time.Second)
+	ev.OnCycle(ctx, lagging)
+
+	recs := cap.at(slog.LevelWarn, "alert.source_excluded")
+	if len(recs) != 1 {
+		t.Fatalf("got %d warnings, want 1", len(recs))
+	}
+	if got := attr(recs[0], "example_target"); got != "core/gw" {
+		t.Errorf("example_target = %q, want core/gw", got)
+	}
+	if got := attr(recs[0], "target"); got != "" {
+		t.Errorf("warning still carries a bare target=%q; the record spans every target for this source", got)
+	}
+}

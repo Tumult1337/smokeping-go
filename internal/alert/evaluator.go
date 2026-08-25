@@ -76,9 +76,10 @@ type alertState struct {
 	// indistinguishable, and the zero value would admit rather than deny.
 	seenCycle bool
 	// lastCycle is the timestamp of the last cycle accepted for this source,
-	// and the identity a replay is recognised by: storage already treats
-	// (target_group, target_id, source, timestamp) as one measurement, so the
-	// alert path reads the same tuple rather than inventing a second one. A
+	// and the identity a replay is recognised by: (target, source, timestamp)
+	// identifies one measurement in storage too, so the alert path reads the
+	// same tuple rather than inventing a second one — it does not dedupe the
+	// storage write, which still lands twice on a redelivery. A
 	// requeue after a lost ack redelivers the same measurement, which
 	// incremented consecHits twice and fired a sustained:2 alert off one bad
 	// cycle; an older healthy batch delivered late cleared a newer firing one.
@@ -436,7 +437,9 @@ func (e *Evaluator) warnExcluded(now time.Time, reason string, cy scheduler.Cycl
 
 	e.log.Warn("alert.source_excluded",
 		append([]any{
-			"source", cy.Source, "target", cy.Target.ID(), "reason", reason,
+			// example_target, not target: the record is keyed by source, so
+			// suppressed counts across every target that source reports on.
+			"source", cy.Source, "example_target", cy.Target.ID(), "reason", reason,
 			"suppressed", suppressed, "window", window,
 		}, detail...)...)
 }
