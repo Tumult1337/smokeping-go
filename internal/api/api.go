@@ -648,13 +648,13 @@ type hopTimelineDTO struct {
 // nothing else can be established about it.
 //
 // A blanked row loses Unreach with its address — an unreachable reason that
-// outlives its address describes the slave's transit. TargetReply survives:
-// it is what ui/src/MtrSection.tsx selects end-to-end loss on, and clearing it
-// dropped the UI back to the deepest-ttl fallback this marker exists to
-// remove, rendering a target reached at ttl 2 as 100% loss. It also discloses
-// nothing this response does not already: intermediates keep their real
-// addresses, and a blanked row that answered keeps its RTTs and sub-100% loss,
-// so the answering ttl is readable from the rows regardless.
+// outlives its address describes the slave's transit. TargetReply survives: it
+// is the only thing left naming which row the trace ended at once the address
+// is gone, and it discloses nothing this response does not already carry —
+// intermediates keep their real addresses, and a blanked row that answered
+// keeps its RTTs and sub-100% loss, so the answering ttl is readable from the
+// rows regardless. Target loss is not read from it; that comes from
+// target_loss, which no hop row can reconstruct.
 //
 // On a trace that never reached the slave the furthest hop is an intermediate,
 // so this over-redacts by one row. That is the fail-closed direction.

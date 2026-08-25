@@ -184,7 +184,7 @@ AND/OR — to combine criteria, attach multiple alerts to the target.
 
 | Field | Unit | Notes |
 |-------|------|-------|
-| `loss_pct` | percent | Target-level loss. MTR mirrors the final hop (target) or reports full loss when unreachable; intermediate hop drops are ignored. |
+| `loss_pct` | percent | Target-level loss. For MTR this is the share of trace rounds that never reached the target, so an unreachable target is full loss; intermediate hop drops are ignored. |
 | `rtt_min`, `rtt_max`, `rtt_mean`, `rtt_median`, `rtt_stddev` | ms | Per-cycle summary across the cycle's RTT samples. |
 | `rtt_p5`, `rtt_p95` | ms | Other percentiles (`p10`..`p90`) are computed and stored, but not currently accepted as alert fields. |
 
@@ -271,7 +271,10 @@ raw tier (2h). The bucketed `/cycles` path has no window cap — the ladder
 already bounds its result to roughly 500–1000 points however wide the range.
 Since the binary ships no authentication, these are what stop an anonymous
 request from turning a full-retention scan into a response; keep a rate limit
-in front of the origin regardless.
+in front of the origin regardless. A hop read past its row cap is refused with
+`400` as well: hop rows come back oldest-first, so serving the prefix would
+hand back a path history missing its newest data with no sign of it. Narrow the
+window or add `source=` and the same view fits.
 
 All endpoints accept `source=<name>` to filter by probe origin in master/slave
 deployments. `/cycles` and `/hops/timeline` echo the resolved `from`/`to` in
@@ -279,6 +282,13 @@ the response so the UI can pin its x-axis exactly to what the server returned.
 `/hops/timeline` also echoes `step_sec`, the bucket width it picked (0 on the
 raw tier), so a client can size one bucket without inferring it from row
 spacing — which is unmeasurable when a window contains a single bucket.
+
+`/hops` returns `target_loss` alongside `hops`: one `{Source, Time, Sent,
+LossCount, LossPct}` per source, taken from the cycle those hop rows came from.
+Target loss is not derivable from the rows — a per-round walk marks the target
+at every TTL it ever answered at, so summing the marked rows counts one round
+once per marked TTL. A source whose cycle sent nothing recorded no measurement
+and has no entry; treat a missing one as unknown, never as 0%.
 
 ## Deployment
 

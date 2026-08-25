@@ -268,9 +268,11 @@ Key points a reader can't derive from a single file:
   quorum denominator instead of voting healthy on no data. The cost is that
   a target which only ever sends nothing is silent rather than alerting,
   since there is no `no_data` condition; `clickhouse.writer.no_measurement`
-  is the only signal. A validated config cannot reach that state
-  persistently, because the per-ping budget floor guarantees every ping at
-  least `minPingBudget`.
+  is the only signal. The per-ping budget floor does not close that gap:
+  `HasICMPProbe` gates it on a config defining an `icmp` probe, so an
+  MTR-only schedule is never checked against it, and MTR's `Sent` is the
+  rounds that actually sent — zero when `traceHops`' resolve, which takes
+  no context, spends the cycle deadline before the first probe goes out.
 
 - **Address-family pinning:** `Target.Family` is `""` / `"v4"` / `"v6"` and
   every probe routes it through the shared `familyNetwork(base, family)`
@@ -439,15 +441,32 @@ Key points a reader can't derive from a single file:
   outage delivers cycles far younger — while a row past the shortest
   default retention (14d) is written already expired.
 
-  `clickhouse.maxHopRows` (300k) is on every hop read. `hop_addr` is
+  `clickhouse.maxHopRows` (485,280) is on every hop read. `hop_addr` is
   slave-supplied text that widens `queryHopsBucketed`'s `GROUP BY` per
   distinct value, and each read buffers its whole result into a
-  `[]storage.HopPoint` for an unauthenticated GET. The widest legitimate
-  read — 7d timeline, 15m buckets, 672 × 30 TTLs × 6 sources × 2
-  addresses through a flap — is ~242k rows, so the cap truncates only
-  under the abuse it exists to bound. It is appended from one
-  `hopRowLimit` var so a new hop read cannot inherit the unbounded shape
-  by omission.
+  `[]storage.HopPoint` for an unauthenticated GET. The value is
+  674 buckets × 30 TTLs × 6 sources × 4 addresses: the 7d window cap at
+  the 15m tier plus a partial bucket each end, the TTL walk's own
+  ceiling, the deployed fleet, and the most distinct addresses one
+  (bucket, source, ttl) held over 7d there — four, not the two this cap
+  was first sized against, which put it at 300k, under a shape the probe
+  produces by itself. A real 7d read of one target on that fleet is
+  41,017 rows.
+
+  It is a memory ceiling, not a legitimacy one: a wider fleet or a busier
+  fabric exceeds it, and no memory-safe number does not. That is why
+  reaching it is reported. Hop reads order oldest-first, so the prefix a
+  silent truncation left was missing the newest history and rendered as a
+  probe that had stopped — served as 200 on the endpoint an operator
+  opens during an incident. Every hop query asks for `maxHopRows + 1` via
+  `hopRowLimit()` — one var so a new hop read cannot inherit the
+  unbounded shape by omission — and `hopRowsWithinCap` refuses the whole
+  result with `storage.ErrHopsTruncated`, which the API maps to 400 with
+  the remedy rather than the 502 that blames the backend or the 503 that
+  invites an identical retry. A flag on a 200 was rejected: `CachingReader`
+  would cache and re-serve the partial set, and an error is the
+  fail-closed default for a consumer that has not heard of the flag.
+  `maxCycleCounterKeys` (1024) bounds the same read's counters lookup.
 
 - **Slave push buffer + auth:** `slave.PushSink` is a fixed 600-cycle
   ring with drop-oldest on overflow; a failed push `Requeue`s on 5xx /

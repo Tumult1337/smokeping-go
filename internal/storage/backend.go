@@ -192,8 +192,9 @@ type HopPoint struct {
 	Index  int64
 	IP     string
 	// TargetReply marks the row(s) whose responder was the target itself.
-	// Redaction and the UI's end-to-end loss key on it because a per-round
-	// walk does not guarantee the target row is the deepest.
+	// /hops redaction and MTR's RTT selection key on it because a per-round
+	// walk does not guarantee the target row is the deepest. Target loss does
+	// not: it comes from Cycles, which no hop row can reconstruct.
 	TargetReply bool
 	// Unreach is the closed-set label of the ICMP unreachable that ended the
 	// trace at this hop; empty for ordinary hops and rows predating the

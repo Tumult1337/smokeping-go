@@ -10,8 +10,9 @@ import (
 )
 
 // Result is a per-cycle outcome: every RTT collected plus counters. For MTR
-// cycles, Hops contains per-hop stats; the top-level RTTs/Sent/LossCount
-// mirror the final hop so the standard cycle pipeline still sees target stats.
+// cycles, Hops contains per-hop stats; the top-level RTTs come from the rows
+// the target itself answered and Sent/LossCount count trace rounds, so the
+// standard cycle pipeline still sees target stats.
 type Result struct {
 	RTTs      []time.Duration
 	Sent      int
@@ -39,8 +40,8 @@ type Hop struct {
 	IP    string
 	// TargetReply marks a row whose responder answered as the target itself
 	// (an echo reply): under a per-round walk the target's row is not
-	// guaranteed to be the deepest, so redaction and the MTR mirror key on
-	// this rather than on position.
+	// guaranteed to be the deepest, so redaction and the MTR RTT mirror key
+	// on this rather than on position.
 	TargetReply bool
 	// Unreach carries the label of the ICMP unreachable that ended the walk
 	// at this hop, from the closed set in unreachLabels; empty for ordinary

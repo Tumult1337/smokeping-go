@@ -1462,14 +1462,12 @@ func earlyEchoHealthRows() []storage.HopPoint {
 	}
 }
 
-// /hops keeps the marker on the rows it blanks. ui/src/MtrSection.tsx selects
-// the marked rows for end-to-end loss and falls back to the deepest ttl when
-// it finds none — the positional assumption the marker exists to remove — so
-// clearing it rendered a health target reached at ttl 2 as 100% loss. It
-// discloses nothing the same response does not already carry: the
-// intermediates keep their real addresses, and a blanked row that answered
-// keeps its RTTs and sub-100% loss, so the answering ttl is readable either
-// way.
+// /hops keeps the marker on the rows it blanks: once the address is gone it
+// is the only thing naming which row the trace ended at, and a per-round walk
+// does not put that row at the deepest ttl. It discloses nothing the same
+// response does not already carry — the intermediates keep their real
+// addresses, and a blanked row that answered keeps its RTTs and sub-100% loss,
+// so the answering ttl is readable either way.
 func TestRedactTerminalHopKeepsTargetReplyMarker(t *testing.T) {
 	got := redactTerminalHops(earlyEchoHealthRows())
 	for _, h := range got {
