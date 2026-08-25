@@ -1,6 +1,7 @@
 package clickhouse
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -34,5 +35,17 @@ func TestSchemaOnClusterRewrite(t *testing.T) {
 	}
 	if !strings.Contains(ddl, "ReplicatedMergeTree") {
 		t.Error("cluster mode: engine not rewritten to ReplicatedMergeTree")
+	}
+}
+
+// Whitespace-insensitive: the DDL aligns its column types.
+func TestSchemaHopAnnotationColumns(t *testing.T) {
+	for _, col := range []string{
+		`unreach\s+LowCardinality\(String\),`,
+		`target_reply\s+UInt8`,
+	} {
+		if !regexp.MustCompile(`(?m)^\s+` + col).MatchString(ddlProbeHop) {
+			t.Errorf("probe_hop DDL missing column matching %q", col)
+		}
 	}
 }

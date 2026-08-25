@@ -46,6 +46,21 @@ type Writer struct {
 // it's one line per N drops so a saturating channel doesn't flood the log.
 const dropLogEvery = 10000
 
+// The flushes name their columns explicitly so a table that gained a column
+// still accepts a batch built before it — a listless INSERT is positional and
+// breaks the moment the two disagree.
+const (
+	insertProbeCycle = `INSERT INTO probe_cycle (timestamp, target_id, target_group, source, probe_type,
+  sent, lost, loss_pct,
+  rtt_min_us, rtt_max_us, rtt_mean_us, rtt_median_us, rtt_stddev_us,
+  p5_us, p10_us, p15_us, p20_us, p25_us, p30_us, p35_us, p40_us, p45_us, p55_us,
+  p60_us, p65_us, p70_us, p75_us, p80_us, p85_us, p90_us, p95_us)`
+	insertProbeRTT = `INSERT INTO probe_rtt (timestamp, target_id, target_group, source, seq, rtt_ms)`
+	insertProbeHop = `INSERT INTO probe_hop (timestamp, target_id, target_group, source, ttl, hop_addr, unreach, target_reply,
+  sent, lost, loss_pct, rtt_min_us, rtt_max_us, rtt_mean_us, rtt_median_us)`
+	insertProbeHTTP = `INSERT INTO probe_http (timestamp, target_id, target_group, source, seq, rtt_ms, status, error)`
+)
+
 // flushRetainFactor bounds the backlog a table buffer keeps across failed
 // flushes. On a flush error the batch is retained for retry rather than
 // dropped, but a prolonged ClickHouse outage must not grow `pending` without
@@ -281,7 +296,7 @@ func tableName(t int) string {
 }
 
 func (w *Writer) flushCycles(ctx context.Context, rows []any) error {
-	batch, err := w.conn.PrepareBatch(ctx, "INSERT INTO probe_cycle")
+	batch, err := w.conn.PrepareBatch(ctx, insertProbeCycle)
 	if err != nil {
 		return err
 	}
@@ -315,6 +330,13 @@ func (w *Writer) flushCycles(ctx context.Context, rows []any) error {
 	return batch.Send()
 }
 
+func boolToUint8(b bool) uint8 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // durUS converts a duration to microseconds for the UInt32 latency columns
 // in probe_cycle / probe_hop. Zero/negative maps to 0 (matching the all-zero
 // Summary a 100%-loss cycle produces) and the value is clamped to the UInt32
@@ -331,7 +353,7 @@ func durUS(d time.Duration) uint32 {
 }
 
 func (w *Writer) flushRTTs(ctx context.Context, rows []any) error {
-	batch, err := w.conn.PrepareBatch(ctx, "INSERT INTO probe_rtt")
+	batch, err := w.conn.PrepareBatch(ctx, insertProbeRTT)
 	if err != nil {
 		return err
 	}
@@ -345,7 +367,7 @@ func (w *Writer) flushRTTs(ctx context.Context, rows []any) error {
 }
 
 func (w *Writer) flushHops(ctx context.Context, rows []any) error {
-	batch, err := w.conn.PrepareBatch(ctx, "INSERT INTO probe_hop")
+	batch, err := w.conn.PrepareBatch(ctx, insertProbeHop)
 	if err != nil {
 		return err
 	}
@@ -367,6 +389,8 @@ func (w *Writer) flushHops(ctx context.Context, rows []any) error {
 			r.cycle.Source,
 			uint8(r.hop.Index),
 			r.hop.IP,
+			r.hop.Unreach,
+			boolToUint8(r.hop.TargetReply),
 			uint16(r.hop.Sent),
 			uint16(r.hop.Lost),
 			lossPct,
@@ -380,7 +404,7 @@ func (w *Writer) flushHops(ctx context.Context, rows []any) error {
 }
 
 func (w *Writer) flushHTTP(ctx context.Context, rows []any) error {
-	batch, err := w.conn.PrepareBatch(ctx, "INSERT INTO probe_http")
+	batch, err := w.conn.PrepareBatch(ctx, insertProbeHTTP)
 	if err != nil {
 		return err
 	}

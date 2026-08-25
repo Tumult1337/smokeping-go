@@ -220,8 +220,14 @@ Key points a reader can't derive from a single file:
 
 - **Schema versioning:** `internal/storage/clickhouse/bootstrap.go` issues
   `CREATE TABLE IF NOT EXISTS` at startup, so adding new tables is safe
-  and idempotent. Column additions require `ALTER TABLE … ADD COLUMN` — the
-  bootstrap does not currently do this automatically. TTL changes are applied
+  and idempotent. Column additions ride `addColumnStatements` in
+  `internal/storage/clickhouse/bootstrap.go` — `ALTER TABLE … ADD COLUMN IF
+  NOT EXISTS` (with `ON CLUSTER` handling) runs on every start, as it did for
+  `target_group`, `unreach`, and `target_reply`. The flush inserts name their
+  columns explicitly, so a binary older than the newest column keeps writing
+  after a rollback from the *next* migration onward; rolling back across the
+  `unreach`/`target_reply` migration itself still breaks hop inserts, because
+  pre-migration binaries used positional inserts. TTL changes are applied
   on every start via `ALTER TABLE … MODIFY TTL`, so they take effect on the
   next restart.
 

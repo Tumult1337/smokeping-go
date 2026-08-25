@@ -57,22 +57,9 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 		}
 	}
 
-	// CREATE TABLE IF NOT EXISTS never reconciles an existing table, so the
-	// three detail tables that predate target_group need it added explicitly.
-	// Metadata-only: no historical part is rewritten, and old rows read as ""
-	// — which is why the reader requires a non-empty group rather than
-	// treating "" as a wildcard. Must run before the writer opens, since its
-	// batches are positional and would not match a table missing the column.
-	for _, table := range []string{"probe_rtt", "probe_hop", "probe_http"} {
-		stmt := fmt.Sprintf(
-			"ALTER TABLE %s ADD COLUMN IF NOT EXISTS target_group LowCardinality(String) AFTER target_id", table)
-		if cfg.Cluster != "" {
-			stmt = fmt.Sprintf(
-				"ALTER TABLE %s ON CLUSTER %s ADD COLUMN IF NOT EXISTS target_group LowCardinality(String) AFTER target_id",
-				table, cfg.Cluster)
-		}
+	for _, stmt := range addColumnStatements(cfg.Cluster) {
 		if err := conn.Exec(ctx, stmt); err != nil {
-			return fmt.Errorf("add target_group to %s: %w", table, err)
+			return fmt.Errorf("add column: %w (stmt: %s)", err, stmt)
 		}
 	}
 
@@ -106,4 +93,31 @@ func tlsConfig(enabled bool) *tls.Config {
 		return nil
 	}
 	return &tls.Config{MinVersion: tls.VersionTLS12}
+}
+
+// addColumnStatements upgrades tables that predate a column. CREATE TABLE IF
+// NOT EXISTS never reconciles an existing table, and the flush inserts name
+// their columns, so a missing column fails writes until this runs — it must
+// stay ahead of NewWriter in openStorage. Metadata-only: no historical part is
+// rewritten, and old rows read as "" / 0, which is why the reader requires a
+// non-empty group rather than treating "" as a wildcard. Order matters:
+// unreach must exist before target_reply's AFTER clause names it.
+func addColumnStatements(cluster string) []string {
+	cols := []struct{ table, column, typ, after string }{
+		{"probe_rtt", "target_group", "LowCardinality(String)", "target_id"},
+		{"probe_hop", "target_group", "LowCardinality(String)", "target_id"},
+		{"probe_http", "target_group", "LowCardinality(String)", "target_id"},
+		{"probe_hop", "unreach", "LowCardinality(String)", "hop_addr"},
+		{"probe_hop", "target_reply", "UInt8", "unreach"},
+	}
+	out := make([]string, 0, len(cols))
+	for _, c := range cols {
+		on := ""
+		if cluster != "" {
+			on = " ON CLUSTER " + cluster
+		}
+		out = append(out, fmt.Sprintf("ALTER TABLE %s%s ADD COLUMN IF NOT EXISTS %s %s AFTER %s",
+			c.table, on, c.column, c.typ, c.after))
+	}
+	return out
 }

@@ -115,6 +115,8 @@ const ddlProbeHop = `CREATE TABLE IF NOT EXISTS probe_hop (
   source        LowCardinality(String),
   ttl           UInt8,
   hop_addr      LowCardinality(String),
+  unreach       LowCardinality(String),
+  target_reply  UInt8                  CODEC(T64, ZSTD(1)),
   sent          UInt16                 CODEC(T64, ZSTD(1)),
   lost          UInt16                 CODEC(T64, ZSTD(1)),
   loss_pct      Float32                CODEC(Gorilla, ZSTD(1)),
