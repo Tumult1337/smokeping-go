@@ -1271,8 +1271,8 @@ func TestRedactTerminalHopKeysOnTargetReply(t *testing.T) {
 		if h.IP == "10.44.0.2" {
 			t.Fatalf("marked target row survived at index %d", h.Index)
 		}
-		if h.Index == 2 && h.TargetReply {
-			t.Fatalf("TargetReply survived on a blanked row: %+v", h)
+		if h.Index == 2 && !h.TargetReply {
+			t.Fatalf("TargetReply cleared on a blanked row: %+v", h)
 		}
 	}
 	if got[0].IP != "198.51.100.1" {
@@ -1363,7 +1363,7 @@ func TestGetHopsRedactsAnnotationsWithAddress(t *testing.T) {
 	}
 	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops", &body)
 	for _, h := range body.Hops {
-		if h.Index == 2 && (h.IP != "" || h.Unreach != "" || h.TargetReply) {
+		if h.Index == 2 && (h.IP != "" || h.Unreach != "") {
 			t.Fatalf("target row leaked: %+v", h)
 		}
 		if h.Index == 1 && h.Unreach != "no-route" {
@@ -1443,5 +1443,74 @@ func TestHealthOmitsWriterDropsWithoutWriter(t *testing.T) {
 	doJSON(t, srv, "GET", "/api/v1/health", &body)
 	if _, ok := body["writer_drops"]; ok {
 		t.Fatal("writer_drops present with no writer wired")
+	}
+}
+
+// earlyEchoHealthRows is the walk output TestWalkRoundsMarksEarlyEchoRow
+// produces: the target answered at ttl 2 and later rounds stayed silent to
+// maxTTL. The two endpoints treat the marker on these rows differently, and
+// this pair is what pins each choice.
+func earlyEchoHealthRows() []storage.HopPoint {
+	now := time.Unix(1_700_000_000, 0)
+	return []storage.HopPoint{
+		{Source: "tokyo-1", Time: now, Index: 1, IP: "198.51.100.1", Mean: 3, Sent: 3},
+		{Source: "tokyo-1", Time: now, Index: 2, IP: "10.44.0.2", TargetReply: true, Mean: 5, Sent: 3, LossCount: 1, LossPct: 33},
+		{Source: "tokyo-1", Time: now, Index: 30, IP: "", Sent: 2, LossCount: 2, LossPct: 100},
+	}
+}
+
+// /hops keeps the marker on the rows it blanks. ui/src/MtrSection.tsx selects
+// the marked rows for end-to-end loss and falls back to the deepest ttl when
+// it finds none — the positional assumption the marker exists to remove — so
+// clearing it rendered a health target reached at ttl 2 as 100% loss. It
+// discloses nothing the same response does not already carry: the
+// intermediates keep their real addresses, and a blanked row that answered
+// keeps its RTTs and sub-100% loss, so the answering ttl is readable either
+// way.
+func TestRedactTerminalHopKeepsTargetReplyMarker(t *testing.T) {
+	got := redactTerminalHops(earlyEchoHealthRows())
+	for _, h := range got {
+		if h.IP == "10.44.0.2" {
+			t.Fatalf("target address survived at index %d", h.Index)
+		}
+	}
+	if marked := got[1]; !marked.TargetReply {
+		t.Fatalf("marker cleared on the blanked target row: %+v", marked)
+	}
+	if got[0].IP != "198.51.100.1" || got[0].TargetReply {
+		t.Fatalf("intermediate row altered: %+v", got[0])
+	}
+}
+
+// /hops/timeline is the asymmetric case: every address becomes the sentinel,
+// so no row's stats set it apart, and the marker would be the one thing
+// naming the ttl the slave answered at. It is cleared there — and the DTO
+// carries no counterpart either, per
+// TestGetHopsCarriesAnnotationsForOrdinaryTarget.
+func TestRedactAllHopAddressesClearsTargetReplyMarker(t *testing.T) {
+	got := redactAllHopAddresses(earlyEchoHealthRows())
+	for _, h := range got {
+		if h.TargetReply {
+			t.Fatalf("marker survived bucketed redaction at index %d: %+v", h.Index, h)
+		}
+	}
+}
+
+// The endpoint counterpart: a health target's /hops response must reach the
+// client with the marker on it, or the redaction unit test above is asserting
+// against a field the handler never serves.
+func TestGetHopsServesMarkerForRedactedHealthTarget(t *testing.T) {
+	r := &stubReader{hops: earlyEchoHealthRows()}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []storage.HopPoint `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops", &body)
+	if len(body.Hops) != 3 {
+		t.Fatalf("got %d hops, want 3", len(body.Hops))
+	}
+	if !body.Hops[1].TargetReply || body.Hops[1].IP != "" {
+		t.Fatalf("marked row must be served blanked but still marked: %+v", body.Hops[1])
 	}
 }

@@ -20,8 +20,8 @@ export interface HopPoint {
   // Closed-set label of the ICMP unreachable that ended the trace at this
   // hop; empty or absent on ordinary hops and on rows predating the column.
   Unreach?: string;
-  // True on the row(s) whose responder echoed as the target itself; never
-  // sent on /hops/timeline rows, and cleared on redacted health rows.
+  // True on the row(s) whose responder echoed as the target itself; survives
+  // health redaction on /hops, and is never sent on /hops/timeline rows.
   TargetReply?: boolean;
   Min: number;
   Max: number;

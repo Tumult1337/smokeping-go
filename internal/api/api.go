@@ -594,8 +594,14 @@ type hopTimelineDTO struct {
 // themselves, never against a configured address, so the Probe/Public split
 // still holds.
 //
-// Every blanked row loses Unreach and TargetReply with its address — an
-// annotation that outlives its address is a side channel.
+// A blanked row loses Unreach with its address — an unreachable reason that
+// outlives its address describes the slave's transit. TargetReply survives:
+// it is what ui/src/MtrSection.tsx selects end-to-end loss on, and clearing it
+// dropped the UI back to the deepest-ttl fallback this marker exists to
+// remove, rendering a target reached at ttl 2 as 100% loss. It also discloses
+// nothing this response does not already: intermediates keep their real
+// addresses, and a blanked row that answered keeps its RTTs and sub-100% loss,
+// so the answering ttl is readable from the rows regardless.
 //
 // On a trace that never reached the slave the furthest hop is an intermediate,
 // so this over-redacts by one row. That is the fail-closed direction.
@@ -648,7 +654,6 @@ func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 			(out[i].IP != "" && targetIPs[key][out[i].IP]) {
 			out[i].IP = ""
 			out[i].Unreach = ""
-			out[i].TargetReply = false
 		}
 	}
 	return out
@@ -684,7 +689,11 @@ const hopAddrSentinel = "redacted"
 //
 // Genuinely empty addresses (a hop that never replied) are left empty —
 // see hopAddrSentinel for why that bit must survive unmolested. Annotations
-// follow their address: every row loses Unreach and TargetReply here.
+// follow their address: every row loses Unreach and TargetReply here. The
+// marker is cleared where redactTerminalHops keeps it because every address
+// here is the same sentinel, so no row's stats set the target's apart and the
+// marker alone would name the ttl the slave answered at; hopTimelineDTO has
+// no field for it either way.
 func redactAllHopAddresses(hops []storage.HopPoint) []storage.HopPoint {
 	out := make([]storage.HopPoint, len(hops))
 	copy(out, hops)

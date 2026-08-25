@@ -373,10 +373,17 @@ Key points a reader can't derive from a single file:
   and would serve the slave's address whenever a round echoed above a
   deeper silent one. `PushSink` decides per cycle from the last
   advertisement — fail-closed until the first pull answers — and ordinary
-  targets keep their hops either way. On both endpoints a redacted row loses `Unreach`
-  and `TargetReply` with its address — an annotation that outlives its
-  address is a side channel. Because health targets live outside the
-  stored config,
+  targets keep their hops either way. A redacted row loses `Unreach` with its
+  address on both endpoints — an unreachable reason that outlives its
+  address describes the slave's transit. `TargetReply` instead survives on
+  `/hops` and is cleared on the timeline: `/hops` keeps every intermediate
+  address and every row's RTTs, so the answering TTL is already readable and
+  the marker is what `MtrSection` takes end-to-end loss from — clearing it
+  dropped the UI back to the deepest-TTL fallback and rendered a slave
+  reached at TTL 2 as 100% loss. On the timeline every address is the same
+  sentinel, so nothing else would name that TTL.
+
+  Because health targets live outside the stored config,
   `scheduler.LifecycleOptions.ExtraFingerprint` carries mesh membership
   into the rebuild decision (`Fingerprint(cfg)` alone can't see it), and
   registry changes share the debounced SIGHUP signal path so a fleet
