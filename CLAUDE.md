@@ -434,11 +434,18 @@ Key points a reader can't derive from a single file:
   **Every config `Config.Validate` accepts is ingestable**, which is a
   property to preserve rather than assume: it held for `MaxLabelLen` and not
   for latency, because a cycle runs under a context whose deadline is the
-  interval and config bounded no interval. `config.MaxProbeInterval` (1h) is
-  now refused above, leaving 11m34.967295s under `MaxSampleRTT` for a
-  measurement to overshoot its own deadline. Both constants live in `config`
-  for the same reason `MaxFutureSkew` does — the producer is a schedule this
-  package validates and the consumer is cluster's ingest bound.
+  interval and config bounded no interval. `config.MaxProbeInterval` is now
+  refused above, and it is `MaxSampleRTT` *exactly* rather than a round number
+  under it: a ceiling picked below the real one refuses working schedules,
+  which is the same defect one layer up. The only schedules it refuses are the
+  ones whose own latencies `durUS` could not store as themselves. Both
+  constants live in `config` for the same reason `MaxFutureSkew` does — the
+  producer is a schedule this package validates and the consumer is cluster's
+  ingest bound. Residual: a probe that overshoots its own context deadline by
+  more than zero at the very top of the range yields an RTT one tick past the
+  bound, which ingest refuses. Nothing measurable protects against that
+  without reintroducing a picked number, and the value is unstorable either
+  way.
   Two values are **overridden** rather than bounded, because the master
   already holds the authoritative one: `ingestBatch` stamps `Source` from
   the authenticated identity and `ProbeName` from the resolved target's

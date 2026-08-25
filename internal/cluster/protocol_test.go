@@ -570,7 +570,7 @@ func TestOversizedHTTPErrIsTruncatedNotRejected(t *testing.T) {
 // The RTT bound is the storage column's, and the config ceiling sits under it,
 // so no schedule Config.Validate accepts can produce a latency ingest refuses.
 func TestMaxSampleRTTCoversEveryConfigurableInterval(t *testing.T) {
-	if config.MaxProbeInterval >= config.MaxSampleRTT {
+	if config.MaxProbeInterval > config.MaxSampleRTT {
 		t.Fatalf("an interval of %s is configurable but an rtt of %s is not ingestable",
 			config.MaxProbeInterval, config.MaxSampleRTT)
 	}

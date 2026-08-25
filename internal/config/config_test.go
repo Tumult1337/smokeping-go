@@ -571,9 +571,6 @@ func TestValidateBoundsLabelLengths(t *testing.T) {
 // and its own ingest bound then refuses, dropping the batch. The ceiling is
 // the storage column, and the config ceiling sits under it.
 func TestValidateRefusesAnIntervalPastTheStorableRTT(t *testing.T) {
-	if MaxProbeInterval >= MaxSampleRTT {
-		t.Fatalf("MaxProbeInterval %s leaves no headroom under MaxSampleRTT %s", MaxProbeInterval, MaxSampleRTT)
-	}
 	base := func(d time.Duration) *Config {
 		return &Config{
 			Interval: d,
@@ -584,6 +581,15 @@ func TestValidateRefusesAnIntervalPastTheStorableRTT(t *testing.T) {
 				{Name: "t", Probe: "icmp", Host: "1.1.1.1"},
 			}}},
 		}
+	}
+	// Derived, not picked: the ceiling is the storage column's, so the only
+	// schedules refused are the ones whose latencies cannot be stored as
+	// themselves. A round number below it would refuse working configs.
+	if MaxProbeInterval != MaxSampleRTT {
+		t.Fatalf("MaxProbeInterval %s is not the storable-rtt ceiling %s", MaxProbeInterval, MaxSampleRTT)
+	}
+	if err := base(65 * time.Minute).Validate(); err != nil {
+		t.Fatalf("a storable interval was refused: %v", err)
 	}
 	if err := base(MaxProbeInterval).Validate(); err != nil {
 		t.Fatalf("the largest schedulable interval was refused: %v", err)

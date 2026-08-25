@@ -521,12 +521,12 @@ const (
 	// value as itself — MaxUint32 microseconds, 71m34.967295s.
 	MaxSampleRTT = math.MaxUint32 * time.Microsecond
 	// MaxProbeInterval is the longest schedule Validate accepts. A cycle runs
-	// under a context whose deadline is the interval, so it is also the
-	// largest RTT a probe can measure; capping it here is what keeps every
-	// config the master accepts ingestable from a slave. An hour is the
-	// largest round duration under MaxSampleRTT, leaving 11m34.967295s for
-	// the measurement to overshoot its own deadline under scheduling delay.
-	MaxProbeInterval = time.Hour
+	// under a context whose deadline is the interval, so the interval is also
+	// the largest RTT a probe can measure; capping it here is what keeps every
+	// config the master accepts ingestable from a slave. It is MaxSampleRTT
+	// exactly rather than a round number under it, so the only schedules
+	// refused are the ones whose own latencies cannot be stored as themselves.
+	MaxProbeInterval = MaxSampleRTT
 )
 
 // Cycle timestamp bounds. They live here rather than in cluster because both

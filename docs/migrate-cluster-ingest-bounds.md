@@ -84,16 +84,20 @@ Rows written before this release are not rewritten. If you suspect one was
 planted, `probe_hop` rows outlive only their TTL, so either wait it out or
 delete by `length(hop_addr) > 302` in ClickHouse.
 
-## An interval above one hour is now refused at load
+## An interval above 71m34.967295s is now refused at load
 
-`interval` is capped at `config.MaxProbeInterval` (1h). A cycle runs under a
-context whose deadline is the interval, so the interval is also the largest RTT
-a probe can measure — and `probe_rtt` stores microseconds in a `UInt32`, which
-stops representing a value as itself at 71m34.967295s. An interval above the
-cap therefore produced latencies the master's own ingest refused, dropping the
-batch. Nothing else changes for the 5s–5m range every documented deployment
-uses; an install running a longer interval must lower it before upgrading,
-because `config.Load` fails rather than starting on a schedule it cannot store.
+`interval` is capped at `config.MaxProbeInterval`, which is exactly
+71m34.967295s. A cycle runs under a context whose deadline is the interval, so
+the interval is also the largest RTT a probe can measure — and `probe_rtt`
+stores microseconds in a `UInt32`, which stops representing a value as itself
+at that point. An interval above it therefore produced latencies the master's
+own ingest refused, dropping the batch, and stored the rest saturated.
+
+The cap is the storage limit itself rather than a round number below it, so no
+schedule that was working is refused. Nothing changes for the 5s–5m range every
+documented deployment uses. An install running an interval above 71 minutes
+must lower it before upgrading: `config.Load` fails rather than starting on a
+schedule it cannot store.
 
 ## A long http error no longer rejects a batch
 
