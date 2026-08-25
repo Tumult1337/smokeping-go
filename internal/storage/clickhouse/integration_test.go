@@ -1440,3 +1440,244 @@ func TestReaderSourceFilter(t *testing.T) {
 		t.Errorf("filtered: source = %q, want slave-eu", one[0].Source)
 	}
 }
+
+// Bootstrap DDL vs the writer's column lists, Append order vs table order, and
+// each hop read path's own select/scan arity are invisible to the faked driver
+// the unit suite uses, so only a live round trip proves them.
+func TestIntegrationHopAnnotationsRoundTrip(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	// The only live check that NewWriter routes through newWriterChans — the
+	// unit suite cannot construct a real Writer.
+	if got := cap(w.chans[tableProbeHop]); got != 131072 {
+		t.Fatalf("hop chan cap = %d, want 131072", got)
+	}
+	if got := cap(w.chans[tableProbeRTT]); got != 40960 {
+		t.Fatalf("rtt chan cap = %d, want 40960 for pings=10", got)
+	}
+
+	ref := config.TargetRef{Group: "g", Target: config.Target{Name: "unrt"}}
+	at := time.Now().UTC().Truncate(time.Second)
+	cy := scheduler.Cycle{
+		Time:   at,
+		Target: ref,
+		Source: "master",
+		Sent:   3,
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.0.0.1", RTTs: []time.Duration{time.Millisecond}, Sent: 3},
+			{Index: 2, IP: "10.0.0.2", RTTs: []time.Duration{time.Millisecond}, Sent: 2},
+			{Index: 2, IP: "10.0.9.9", RTTs: []time.Duration{2 * time.Millisecond}, Sent: 1},
+			{Index: 3, IP: "10.0.0.3", RTTs: []time.Duration{time.Millisecond}, Sent: 3, Unreach: "admin-prohibited"},
+		},
+	}
+	w.OnCycle(ctx, cy)
+	// Second, older cycle so QueryHopsAt has a distinct nearest pick and the
+	// marker round-trips: its terminal row is a target echo.
+	cy2 := cy
+	cy2.Time = at.Add(-2 * time.Minute)
+	cy2.Hops = []probe.Hop{
+		{Index: 1, IP: "10.0.0.1", RTTs: []time.Duration{time.Millisecond}, Sent: 3},
+		{Index: 2, IP: "192.0.2.9", RTTs: []time.Duration{time.Millisecond}, Sent: 3, TargetReply: true},
+	}
+	w.OnCycle(ctx, cy2)
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	// Path 1: QueryLatestHops.
+	got, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d hop rows, want 4 (per (ttl,addr)): %+v", len(got), got)
+	}
+	byAddr := map[string]storage.HopPoint{}
+	for _, h := range got {
+		byAddr[h.IP] = h
+	}
+	if h := byAddr["10.0.0.3"]; h.Unreach != "admin-prohibited" {
+		t.Fatalf("unreach did not survive the round trip: %+v", h)
+	}
+	if h := byAddr["10.0.9.9"]; h.Index != 2 || h.Sent != 1 {
+		t.Fatalf("second responder row wrong: %+v", h)
+	}
+	if h := byAddr["10.0.0.1"]; h.Unreach != "" || h.TargetReply {
+		t.Fatalf("annotations invented on a clean hop: %+v", h)
+	}
+
+	// Path 2: QueryHopsAt — its select list and scan are separate code.
+	atHops, err := r.QueryHopsAt(ctx, ref, cy2.Time, 30*time.Minute, storage.QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var marked bool
+	for _, h := range atHops {
+		if h.IP == "192.0.2.9" && h.TargetReply {
+			marked = true
+		}
+		if h.IP == "10.0.0.1" && h.TargetReply {
+			t.Fatalf("QueryHopsAt marked an unmarked row: %+v", h)
+		}
+	}
+	if !marked {
+		t.Fatalf("QueryHopsAt lost the target-reply marker: %+v", atHops)
+	}
+
+	// Path 3: raw timeline (step 0) — third select list, shared scan.
+	rawTL, err := r.QueryHopsTimeline(ctx, ref, at.Add(-time.Hour), at.Add(time.Hour), storage.QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rawFound, rawMarked bool
+	for _, h := range rawTL {
+		if h.IP == "10.0.0.3" && h.Unreach == "admin-prohibited" {
+			rawFound = true
+		}
+		if h.IP == "192.0.2.9" && h.TargetReply {
+			rawMarked = true
+		}
+	}
+	if !rawFound {
+		t.Fatalf("raw timeline lost the annotation: %+v", rawTL)
+	}
+	if !rawMarked {
+		t.Fatalf("raw timeline lost the target-reply marker: %+v", rawTL)
+	}
+
+	// Path 4: bucketed timeline — its own select and scan, max(unreach).
+	tl, err := r.QueryHopsTimeline(ctx, ref, at.Add(-time.Hour), at.Add(time.Hour),
+		storage.QueryFilter{Step: 5 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, h := range tl {
+		if h.IP == "10.0.0.3" && h.Unreach == "admin-prohibited" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("bucketed timeline lost the annotation: %+v", tl)
+	}
+}
+
+// A freshly bootstrapped database gets the annotation columns from CREATE
+// TABLE, so only a table that predates them proves Bootstrap still runs
+// addColumnStatements — the shape every already-deployed instance upgrades from.
+func TestIntegrationBootstrapUpgradesLegacyTables(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{cfg.Addr},
+		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+
+	columnType := func(table, column string) string {
+		var types []string
+		err := conn.QueryRow(ctx,
+			"SELECT groupArray(type) FROM system.columns WHERE database = ? AND table = ? AND name = ?",
+			cfg.Database, table, column,
+		).Scan(&types)
+		if err != nil {
+			t.Fatalf("system.columns %s.%s: %v", table, column, err)
+		}
+		if len(types) == 0 {
+			return ""
+		}
+		return types[0]
+	}
+
+	added := []struct{ table, column, typ string }{
+		{"probe_rtt", "target_group", "LowCardinality(String)"},
+		{"probe_hop", "target_group", "LowCardinality(String)"},
+		{"probe_http", "target_group", "LowCardinality(String)"},
+		{"probe_hop", "unreach", "LowCardinality(String)"},
+		{"probe_hop", "target_reply", "UInt8"},
+	}
+	for _, c := range added {
+		stmt := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", c.table, c.column)
+		if err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+		if got := columnType(c.table, c.column); got != "" {
+			t.Fatalf("%s.%s still present after drop: %s", c.table, c.column, got)
+		}
+	}
+
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("re-bootstrap: %v", err)
+	}
+	for _, c := range added {
+		if got := columnType(c.table, c.column); got != c.typ {
+			t.Fatalf("%s.%s after upgrade = %q, want %q", c.table, c.column, got, c.typ)
+		}
+	}
+
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ref := config.TargetRef{Group: "ug", Target: config.Target{Name: "upgraded"}}
+	at := time.Now().UTC().Truncate(time.Second)
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time:   at,
+		Target: ref,
+		Source: "master",
+		Sent:   3,
+		RTTs:   []time.Duration{time.Millisecond},
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.1.0.1", RTTs: []time.Duration{time.Millisecond}, Sent: 3},
+			{Index: 2, IP: "10.1.0.2", RTTs: []time.Duration{time.Millisecond}, Sent: 3, Unreach: "host-unreachable", TargetReply: true},
+		},
+		HTTPSamples: []probe.HTTPSample{{Time: at, RTT: time.Millisecond, Status: 200}},
+	})
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	got, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	if err != nil {
+		t.Fatalf("latest hops: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d hop rows from the upgraded table, want 2: %+v", len(got), got)
+	}
+	var annotated bool
+	for _, h := range got {
+		if h.IP == "10.1.0.2" && h.Unreach == "host-unreachable" && h.TargetReply {
+			annotated = true
+		}
+	}
+	if !annotated {
+		t.Fatalf("annotations did not survive the upgraded table: %+v", got)
+	}
+}
