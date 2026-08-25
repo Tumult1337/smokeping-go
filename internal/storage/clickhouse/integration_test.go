@@ -2343,7 +2343,9 @@ FROM numbers(%d)`, from.Unix(), int(interval/time.Millisecond), cycles)
 	if len(pts) == 0 {
 		t.Fatalf("no rows for %d seeded cycles", cycles)
 	}
-	if slots := int(window/step) + 1; len(pts) > slots {
+	// ceil, not floor: 11s does not divide 2h, so an off-grid window spans one
+	// more slot than the quotient.
+	if slots := int((window+step-1)/step) + 1; len(pts) > slots {
 		t.Fatalf("got %d rows, over the %d slots the grid holds", len(pts), slots)
 	}
 }
