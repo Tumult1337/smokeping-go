@@ -193,6 +193,14 @@ func (e *Evaluator) pruneStaleAggregates(oldEnabled map[string]bool) {
 }
 
 func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
+	// A cycle that sent nothing measured nothing: every condition field reads
+	// zero on it, which is indistinguishable from a perfect cycle and would
+	// clear a sustained counter and resolve a live alert on a gap. Returning
+	// before lastSeen is touched also lets the source age out of the quorum
+	// denominator, which is what a source reporting no data should do.
+	if cy.Sent == 0 {
+		return
+	}
 	cfg := e.store.Current()
 	alerts := cy.Target.Target.Alerts
 	if len(alerts) == 0 {

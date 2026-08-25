@@ -1409,3 +1409,86 @@ func TestHTTPFailureCategory(t *testing.T) {
 		})
 	}
 }
+
+// transitions renders a dispatch sequence compactly; the raw Events embed a
+// whole Cycle each and drown a failure message.
+func transitions(events []Event) string {
+	var parts []string
+	for _, e := range events {
+		parts = append(parts, fmt.Sprintf("%s>%s", e.Prev, e.Next))
+	}
+	return strings.Join(parts, " ")
+}
+
+// noMeasurementCfg is the shared fixture for the Sent == 0 tests: a
+// sustained-loss alert, which is exactly what a fabricated 0% loss silences.
+func noMeasurementCfg(t *testing.T, sustained int) (*config.Config, *config.Store) {
+	t.Helper()
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    10,
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Probes:   map[string]config.Probe{"mtr": {Type: "mtr", Timeout: time.Second}},
+		Alerts: map[string]config.Alert{
+			"loss": {Condition: "loss_pct >= 50", Sustained: sustained, Actions: []string{"log"}},
+		},
+		Actions: map[string]config.Action{"log": {Type: "log"}},
+		Targets: []config.Group{{
+			Group:   "g",
+			Targets: []config.Target{{Name: "a", Host: "1.1.1.1", Probe: "mtr", Alerts: []string{"loss"}}},
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("invalid config: %v", err)
+	}
+	return cfg, config.NewStore("/dev/null", cfg)
+}
+
+// A cycle that sent nothing measured nothing, so it must not clear the
+// sustained counter a real loss cycle built up — every condition field reads
+// zero on it, which is indistinguishable from a perfect cycle.
+func TestNoMeasurementCycleDoesNotResetSustained(t *testing.T) {
+	cfg, store := noMeasurementCfg(t, 2)
+	disp := &fakeDispatcher{}
+	e, err := NewEvaluator(slog.New(slog.NewTextHandler(io.Discard, nil)), store, disp)
+	if err != nil {
+		t.Fatalf("new evaluator: %v", err)
+	}
+	ref := cfg.AllTargets()[0]
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	lost := func(at time.Time) scheduler.Cycle {
+		return scheduler.Cycle{Time: at, Target: ref, ProbeName: "mtr", Sent: 10, LossCount: 10}
+	}
+	none := func(at time.Time) scheduler.Cycle {
+		return scheduler.Cycle{Time: at, Target: ref, ProbeName: "mtr"}
+	}
+
+	ctx := context.Background()
+	e.OnCycle(ctx, lost(base))                    // OK → PENDING
+	e.OnCycle(ctx, none(base.Add(time.Minute)))   // no measurement: ignored
+	e.OnCycle(ctx, lost(base.Add(2*time.Minute))) // PENDING → FIRING
+
+	if got := transitions(disp.snapshot()); got != "ok>pending pending>firing" {
+		t.Fatalf("transitions = %q, want %q", got, "ok>pending pending>firing")
+	}
+}
+
+// A gap must not resolve a live alert either: the outage is still there, it
+// just wasn't measured this cycle.
+func TestNoMeasurementCycleDoesNotResolveFiring(t *testing.T) {
+	cfg, store := noMeasurementCfg(t, 1)
+	disp := &fakeDispatcher{}
+	e, err := NewEvaluator(slog.New(slog.NewTextHandler(io.Discard, nil)), store, disp)
+	if err != nil {
+		t.Fatalf("new evaluator: %v", err)
+	}
+	ref := cfg.AllTargets()[0]
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	e.OnCycle(ctx, scheduler.Cycle{Time: base, Target: ref, ProbeName: "mtr", Sent: 10, LossCount: 10})
+	e.OnCycle(ctx, scheduler.Cycle{Time: base.Add(time.Minute), Target: ref, ProbeName: "mtr"})
+
+	if got := transitions(disp.snapshot()); got != "ok>firing" {
+		t.Fatalf("transitions = %q, want %q", got, "ok>firing")
+	}
+}

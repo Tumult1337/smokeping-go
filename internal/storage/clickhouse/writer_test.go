@@ -98,11 +98,15 @@ func newTestWriter(_ *testing.T, bufSize int) *Writer {
 	return w
 }
 
+// Sent is non-zero because OnCycle drops a no-measurement cycle: a fixture
+// without it would make every offer/drop assertion vacuously pass.
 func testCycle(at time.Time) scheduler.Cycle {
 	return scheduler.Cycle{
-		Time:   at,
-		Target: config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}},
-		Source: "master",
+		Time:      at,
+		Target:    config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}},
+		Source:    "master",
+		Sent:      10,
+		LossCount: 1,
 	}
 }
 
@@ -348,7 +352,6 @@ func TestHopRTTsNotRacedBetweenFlushAndAlertDispatch(t *testing.T) {
 
 	for i := 0; i < 200; i++ {
 		cy := testCycle(time.Now())
-		cy.Sent, cy.LossCount = 3, 3
 		cy.Hops = []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: []time.Duration{
 			30 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond}}}
 		w.OnCycle(ctx, cy)
@@ -360,4 +363,31 @@ func TestHopRTTsNotRacedBetweenFlushAndAlertDispatch(t *testing.T) {
 	}
 	cancel()
 	w.wg.Wait()
+}
+
+// Sent == 0 is no measurement, and flushCycles would store it as loss_pct 0 —
+// a fabricated healthy point over a gap. The hop rows are real measurements
+// with their own per-hop counters, so they still go.
+func TestOnCycleSkipsNoMeasurementCycle(t *testing.T) {
+	w := newTestWriter(t, 4)
+	cy := testCycle(time.Now())
+	cy.Sent, cy.LossCount = 0, 0
+	cy.Hops = []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 3}}
+	w.OnCycle(context.Background(), cy)
+
+	if n := len(w.chans[tableProbeCycle]); n != 0 {
+		t.Fatalf("queued %d cycle rows for a Sent==0 cycle, want 0", n)
+	}
+	if n := len(w.chans[tableProbeHop]); n != 1 {
+		t.Fatalf("queued %d hop rows, want 1", n)
+	}
+	if got := w.Dropped()["probe_cycle"]; got != 0 {
+		t.Fatalf("no-measurement cycle counted as %d buffer drops, want 0", got)
+	}
+
+	cy.Sent, cy.LossCount = 3, 3
+	w.OnCycle(context.Background(), cy)
+	if n := len(w.chans[tableProbeCycle]); n != 1 {
+		t.Fatalf("queued %d cycle rows for a measured cycle, want 1", n)
+	}
 }

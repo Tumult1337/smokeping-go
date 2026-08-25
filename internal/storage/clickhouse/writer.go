@@ -151,9 +151,17 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pin
 	return w, nil
 }
 
-// OnCycle decomposes a Cycle into rows for each relevant table.
+// OnCycle decomposes a Cycle into rows for each relevant table. A cycle that
+// sent nothing is left out of probe_cycle entirely: loss_pct has no defined
+// value there, and storing the 0 it computes renders a healthy point over a
+// gap the probe never filled. Hop rows still go — the TTL walk's own counters
+// are real measurements.
 func (w *Writer) OnCycle(ctx context.Context, c scheduler.Cycle) {
-	w.offer(tableProbeCycle, c)
+	if c.Sent > 0 {
+		w.offer(tableProbeCycle, c)
+	} else {
+		w.logNoMeasurement(c)
+	}
 	for i, rtt := range c.RTTs {
 		w.offer(tableProbeRTT, rttRow{
 			ts: c.Time, target: c.Target.Target.Name, group: c.Target.Group, source: c.Source,
@@ -173,6 +181,16 @@ func (w *Writer) OnCycle(ctx context.Context, c scheduler.Cycle) {
 			status: uint16(s.Status), err: s.Err,
 		})
 	}
+}
+
+// logNoMeasurement surfaces the skipped cycle, so the resulting chart gap and
+// silent alert have a reason in the log rather than looking like a lost write.
+func (w *Writer) logNoMeasurement(c scheduler.Cycle) {
+	if w.log == nil {
+		return
+	}
+	w.log.Warn("clickhouse.writer.no_measurement",
+		"target", c.Target.ID(), "probe", c.ProbeName, "source", c.Source)
 }
 
 type rttRow struct {
