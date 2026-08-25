@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"syscall"
 	"testing"
@@ -484,38 +485,98 @@ func embeddedEcho(isV6 bool, id, seq int) []byte {
 
 // classifyReply is the parser boundary for bytes any host on the network can
 // put on a raw socket: it must match strictly on id+seq, classify only
-// matched replies, and discriminate on reply.Type — an Echo REQUEST parses
-// to the same *icmp.Echo body as a Reply, and treating a spoofed request as
-// "reached" both falsely terminates the round and falsely marks the row.
+// matched replies, discriminate on reply.Type — an Echo REQUEST parses to the
+// same *icmp.Echo body as a Reply, and treating a spoofed request as
+// "reached" both falsely terminates the round and falsely marks the row —
+// and require an echo reply to come from the destination itself.
 func TestClassifyReply(t *testing.T) {
 	const id, seq = 0x1234, 7
-	tests := []struct {
+	v4dst := netip.MustParseAddr("192.0.2.9")
+	v6dst := netip.MustParseAddr("2001:db8::1")
+	router := netip.MustParseAddr("10.0.0.1")
+
+	type testCase struct {
 		name        string
 		msg         *icmp.Message
 		isV6        bool
+		peer, dst   netip.Addr
 		wantMatch   bool
 		wantKind    replyKind
 		wantUnreach string
-	}{
-		{"echo reply match", &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq}}, false, true, replyEcho, ""},
-		{"echo REQUEST is not the target", &icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: id, Seq: seq}}, false, false, replyNone, ""},
-		{"v6 echo REQUEST is not the target", &icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq}}, true, false, replyNone, ""},
-		{"echo wrong id", &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id + 1, Seq: seq}}, false, false, replyNone, ""},
-		{"echo wrong seq", &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq + 1}}, false, false, replyNone, ""},
-		{"time exceeded match", &icmp.Message{Type: ipv4.ICMPTypeTimeExceeded, Body: &icmp.TimeExceeded{Data: embeddedEcho(false, id, seq)}}, false, true, replyTimeExceeded, ""},
-		{"unreach v4 host", &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(false, id, seq)}}, false, true, replyUnreachable, "host-unreachable"},
-		{"unreach v6 admin", &icmp.Message{Type: ipv6.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(true, id, seq)}}, true, true, replyUnreachable, "admin-prohibited"},
-		{"unreach wrong embedded id", &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(false, id+1, seq)}}, false, false, replyNone, ""},
-		{"unreach truncated data", &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: []byte{0x45, 0}}}, false, false, replyNone, ""},
+	}
+	tests := []testCase{
+		{name: "echo reply match", msg: &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq}},
+			peer: v4dst, dst: v4dst, wantMatch: true, wantKind: replyEcho},
+		{name: "echo REQUEST is not the target", msg: &icmp.Message{Type: ipv4.ICMPTypeEcho, Body: &icmp.Echo{ID: id, Seq: seq}},
+			peer: v4dst, dst: v4dst},
+		{name: "v6 echo REQUEST is not the target", msg: &icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq}},
+			isV6: true, peer: v6dst, dst: v6dst},
+		{name: "echo wrong id", msg: &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id + 1, Seq: seq}},
+			peer: v4dst, dst: v4dst},
+		{name: "echo wrong seq", msg: &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq + 1}},
+			peer: v4dst, dst: v4dst},
+
+		// An on-path router that can see our id and seq can answer from its
+		// own address. Nothing in type, id or seq tells it apart from the
+		// target's own reply, so the walk marked that router TargetReply,
+		// stopped the round, and reported the target as reached.
+		{name: "echo reply from a peer that is not the destination",
+			msg:  &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq}},
+			peer: router, dst: v4dst},
+		{name: "v6 echo reply from a peer that is not the destination",
+			msg:  &icmp.Message{Type: ipv6.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq}},
+			isV6: true, peer: netip.MustParseAddr("2001:db8::99"), dst: v6dst},
+		{name: "echo reply with no resolvable peer",
+			msg:  &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq}},
+			peer: netip.Addr{}, dst: v4dst},
+		// The v4-mapped spelling of the destination is the destination.
+		{name: "echo reply from the v4-mapped destination",
+			msg:  &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq}},
+			peer: netip.MustParseAddr("::ffff:192.0.2.9").Unmap(), dst: v4dst,
+			wantMatch: true, wantKind: replyEcho},
+
+		// Errors legitimately come from routers along the path, so the
+		// destination check must not reach them.
+		{name: "time exceeded match", msg: &icmp.Message{Type: ipv4.ICMPTypeTimeExceeded, Body: &icmp.TimeExceeded{Data: embeddedEcho(false, id, seq)}},
+			peer: router, dst: v4dst, wantMatch: true, wantKind: replyTimeExceeded},
+		{name: "unreach v4 host", msg: &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(false, id, seq)}},
+			peer: router, dst: v4dst, wantMatch: true, wantKind: replyUnreachable, wantUnreach: "host-unreachable"},
+		{name: "unreach v6 admin", msg: &icmp.Message{Type: ipv6.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(true, id, seq)}},
+			isV6: true, peer: netip.MustParseAddr("2001:db8::99"), dst: v6dst, wantMatch: true, wantKind: replyUnreachable, wantUnreach: "admin-prohibited"},
+		{name: "unreach wrong embedded id", msg: &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: embeddedEcho(false, id+1, seq)}},
+			peer: router, dst: v4dst},
+		{name: "unreach truncated data", msg: &icmp.Message{Type: ipv4.ICMPTypeDestinationUnreachable, Code: 1, Body: &icmp.DstUnreach{Data: []byte{0x45, 0}}},
+			peer: router, dst: v4dst},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			matched, kind, unreach := classifyReply(tc.msg, tc.isV6, id, seq)
+			matched, kind, unreach := classifyReply(tc.msg, tc.isV6, id, seq, tc.peer, tc.dst)
 			if matched != tc.wantMatch || kind != tc.wantKind || unreach != tc.wantUnreach {
 				t.Fatalf("got (%v, %d, %q), want (%v, %d, %q)",
 					matched, kind, unreach, tc.wantMatch, tc.wantKind, tc.wantUnreach)
 			}
 		})
+	}
+}
+
+// The peer address arrives as *net.UDPAddr on an unprivileged ping socket
+// (the kernel rewrites the ICMP id to the source port) and as *net.IPAddr on
+// a raw one. Both must reduce to the same comparable value, or the
+// destination check holds on one socket type and not the other.
+func TestPeerAddrHandlesBothSocketTypes(t *testing.T) {
+	want := netip.MustParseAddr("192.0.2.9")
+	cases := map[string]net.Addr{
+		"udp ping socket": &net.UDPAddr{IP: net.ParseIP("192.0.2.9")},
+		"raw socket":      &net.IPAddr{IP: net.ParseIP("192.0.2.9")},
+		"raw 4-byte":      &net.IPAddr{IP: net.IPv4(192, 0, 2, 9).To4()},
+	}
+	for name, a := range cases {
+		if got := peerAddr(a); got != want {
+			t.Errorf("%s: peerAddr = %v, want %v", name, got, want)
+		}
+	}
+	if got := peerAddr(&net.TCPAddr{IP: net.ParseIP("192.0.2.9")}); got.IsValid() {
+		t.Errorf("unexpected address type resolved to %v, want the invalid zero Addr", got)
 	}
 }
 
@@ -540,5 +601,76 @@ func TestWalkRoundsCountsRoundsNotEchoRows(t *testing.T) {
 	}
 	if rowSent <= stats.reached {
 		t.Fatalf("fixture no longer reproduces row-summed inflation: rowSent=%d", rowSent)
+	}
+}
+
+// matchDatagram is the whole read path's trust boundary: bytes and source
+// address both come off the wire. classifyReply's own table cannot reach the
+// wiring here — passing the destination in place of the peer, or resolving an
+// unknown address shape to something valid, leaves that table green.
+func TestMatchDatagramRequiresEchoFromDestination(t *testing.T) {
+	const id, seq = 0x1234, 7
+	dst := netip.MustParseAddr("192.0.2.9")
+	echoReply, err := (&icmp.Message{
+		Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq, Data: []byte("x")},
+	}).Marshal(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeExceeded, err := (&icmp.Message{
+		Type: ipv4.ICMPTypeTimeExceeded, Body: &icmp.TimeExceeded{Data: embeddedEcho(false, id, seq)},
+	}).Marshal(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		datagram []byte
+		peer     net.Addr
+		wantOK   bool
+		wantAddr string
+		wantKind replyKind
+	}{
+		{"echo from the destination on a raw socket", echoReply,
+			&net.IPAddr{IP: net.ParseIP("192.0.2.9")}, true, "192.0.2.9", replyEcho},
+		{"echo from the destination on a ping socket", echoReply,
+			&net.UDPAddr{IP: net.ParseIP("192.0.2.9")}, true, "192.0.2.9", replyEcho},
+		{"echo forged by an on-path router", echoReply,
+			&net.IPAddr{IP: net.ParseIP("10.0.0.1")}, false, "", replyNone},
+		{"echo forged by an on-path router on a ping socket", echoReply,
+			&net.UDPAddr{IP: net.ParseIP("10.0.0.1")}, false, "", replyNone},
+		{"echo from an unresolvable source", echoReply,
+			&net.TCPAddr{IP: net.ParseIP("192.0.2.9")}, false, "", replyNone},
+		{"time exceeded from a router still answers", timeExceeded,
+			&net.IPAddr{IP: net.ParseIP("10.0.0.1")}, true, "10.0.0.1", replyTimeExceeded},
+		// The destination check does not cover errors, so only the peer guard
+		// keeps an unresolvable source from being written as a hop address.
+		{"time exceeded from an unresolvable source", timeExceeded,
+			&net.TCPAddr{IP: net.ParseIP("10.0.0.1")}, false, "", replyNone},
+		{"unparseable bytes", []byte{0xff}, &net.IPAddr{IP: net.ParseIP("192.0.2.9")}, false, "", replyNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := matchDatagram(tc.datagram, 1, tc.peer, false, id, seq, dst)
+			if ok != tc.wantOK {
+				t.Fatalf("matched = %v, want %v (%+v)", ok, tc.wantOK, got)
+			}
+			if got.addr != tc.wantAddr || got.kind != tc.wantKind {
+				t.Fatalf("got addr %q kind %d, want %q %d", got.addr, got.kind, tc.wantAddr, tc.wantKind)
+			}
+		})
+	}
+}
+
+// dst is always resolved before the walk starts today, so peer != dst carries
+// the check on its own. It stops carrying it the moment both sides are the
+// invalid zero Addr, which is what an unresolved destination reaching here
+// would look like — the guard denies that rather than matching everything.
+func TestClassifyReplyDeniesAnInvalidDestination(t *testing.T) {
+	const id, seq = 0x1234, 7
+	msg := &icmp.Message{Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq}}
+	if matched, kind, _ := classifyReply(msg, false, id, seq, netip.Addr{}, netip.Addr{}); matched {
+		t.Fatalf("an unresolved destination matched an echo reply as %d", kind)
 	}
 }

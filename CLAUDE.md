@@ -213,6 +213,23 @@ Key points a reader can't derive from a single file:
   redaction, MTR's RTT mirror, and the UI's end-to-end loss all key on that
   marker instead of on position.
 
+  **An echo reply counts as the target's only if its peer is the resolved
+  destination.** `matchDatagram` is the read path's whole trust boundary —
+  bytes and source address both come off the wire — and it sits apart from
+  `sendTTL`'s read loop precisely so hostile input can drive it without a
+  socket. Type, id and seq are all visible to any router on the path, so one
+  could answer from its own address; the round stopped there, the row was
+  marked `TargetReply`, and MTR reported a target that never replied. That
+  marker is persisted and drives `/hops` redaction, so it is a disclosure
+  input, not only a display one. `TimeExceeded` and unreachable are exempt —
+  they legitimately come from routers along the path. Addresses compare as
+  unmapped `netip.Addr` via `peerAddr`, which is what reconciles the socket
+  asymmetry: an unprivileged ping socket reports `*net.UDPAddr` (and the
+  kernel has rewritten the ICMP id), a raw one `*net.IPAddr`. Any other shape
+  resolves to the invalid zero `Addr` and matches nothing — without that,
+  `Addr.String()` would write the literal `"invalid IP"` into `probe_hop` as
+  an error's hop address.
+
 - **ICMP cycle budget:** the echo batch and the TTL walk run concurrently
   and share one context whose deadline is `cfg.Interval`. Each echo's
   deadline is `min(probe timeout, (remaining cycle − spacing still owed) /

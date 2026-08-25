@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -266,19 +267,50 @@ func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV
 	return hops, stats, nil
 }
 
+// peerAddr reduces the source address of a received datagram to a comparable
+// value. The socket type decides which shape arrives: an unprivileged ping
+// socket reports *net.UDPAddr, a raw one *net.IPAddr. An address of any other
+// shape resolves to the invalid zero Addr, which matches no destination.
+func peerAddr(a net.Addr) netip.Addr {
+	switch pa := a.(type) {
+	case *net.UDPAddr:
+		return addrFromIP(pa.IP)
+	case *net.IPAddr:
+		return addrFromIP(pa.IP)
+	}
+	return netip.Addr{}
+}
+
+func addrFromIP(ip net.IP) netip.Addr {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.Addr{}
+	}
+	return addr.Unmap()
+}
+
 // classifyReply reports whether a reply is an answer to our own probe at
 // (id, seq) and what kind it is. A raw ICMP socket receives every reply on the
 // host, including anything an off-path attacker can spoof, so nothing is
 // classified before id and seq match: concurrent traces reuse the short seq
 // range, and an Echo Request parses to the same body as an Echo Reply, which
 // would otherwise read as reaching the target.
-func classifyReply(reply *icmp.Message, isV6 bool, id, seq int) (bool, replyKind, string) {
+//
+// An echo reply must additionally come from dst. Type, id and seq are all
+// visible to any router on the path, so one of them can answer from its own
+// address; the round then stopped there, the row was marked TargetReply, and
+// MTR reported a target that never replied. Errors are exempt: TimeExceeded
+// and unreachable legitimately come from routers along the path.
+func classifyReply(reply *icmp.Message, isV6 bool, id, seq int, peer, dst netip.Addr) (bool, replyKind, string) {
 	switch body := reply.Body.(type) {
 	case *icmp.Echo:
 		if reply.Type != ipv4.ICMPTypeEchoReply && reply.Type != ipv6.ICMPTypeEchoReply {
 			return false, replyNone, ""
 		}
 		if body.ID != id || body.Seq != seq {
+			return false, replyNone, ""
+		}
+		if !dst.IsValid() || peer != dst {
 			return false, replyNone, ""
 		}
 		return true, replyEcho, ""
@@ -328,6 +360,7 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		return ttlReply{err: err}
 	}
 
+	dstAddr := addrFromIP(dst.IP)
 	start := time.Now()
 	if _, err := conn.WriteTo(wire, dst); err != nil {
 		return ttlReply{err: err}
@@ -345,24 +378,34 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		if err != nil {
 			return ttlReply{err: err}
 		}
-		reply, perr := icmp.ParseMessage(proto, buf[:n])
-		if perr != nil {
-			continue
-		}
 		elapsed := time.Since(start)
-
-		var peerIP string
-		switch pa := peer.(type) {
-		case *net.UDPAddr:
-			peerIP = pa.IP.String()
-		case *net.IPAddr:
-			peerIP = pa.IP.String()
-		}
-
-		if matched, kind, unreach := classifyReply(reply, isV6, id, seq); matched {
-			return ttlReply{addr: peerIP, rtt: elapsed, kind: kind, unreach: unreach}
+		if r, ok := matchDatagram(buf[:n], proto, peer, isV6, id, seq, dstAddr); ok {
+			r.rtt = elapsed
+			return r
 		}
 	}
+}
+
+// matchDatagram decides whether one received datagram answers our probe at
+// (id, seq) from dst. Every byte and the source address are attacker-supplied
+// on a raw socket, so this is the trust boundary of the whole walk — it lives
+// apart from sendTTL's read loop so it can be driven with hostile input.
+func matchDatagram(datagram []byte, proto int, peer net.Addr, isV6 bool, id, seq int, dst netip.Addr) (ttlReply, bool) {
+	reply, err := icmp.ParseMessage(proto, datagram)
+	if err != nil {
+		return ttlReply{}, false
+	}
+	// A datagram whose source we cannot resolve names no hop and matches no
+	// destination, so it is not our answer.
+	peerIP := peerAddr(peer)
+	if !peerIP.IsValid() {
+		return ttlReply{}, false
+	}
+	matched, kind, unreach := classifyReply(reply, isV6, id, seq, peerIP, dst)
+	if !matched {
+		return ttlReply{}, false
+	}
+	return ttlReply{addr: peerIP.String(), kind: kind, unreach: unreach}, true
 }
 
 // embeddedIDSeq extracts the ICMP id and sequence of the original echo request
