@@ -39,6 +39,7 @@ export function HttpChart({
   const plotRef = useRef<uPlot | null>(null);
   const [points, setPoints] = useState<HttpPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   // Left/right gutter of the plot area in CSS px, tracked from u.bbox so the
   // StatusStrip canvas lines up pixel-for-pixel under the chart.
   const [plotOffsets, setPlotOffsets] = useState({ left: 34, right: 0 });
@@ -90,9 +91,18 @@ export function HttpChart({
     return { uptime: (success / points.length) * 100, total: points.length, dist, p50: pct(50), p95: pct(95) };
   }, [points]);
 
+  const fetchKeyRef = useRef<string>("");
   useEffect(() => {
+    // Blank only when the requested series changes; a refresh tick keeps the
+    // current bars until the new ones land so the chart doesn't flash empty.
+    const key = `${targetId}|${range}|${source ?? ""}|${fromArg ?? ""}|${toArg ?? ""}`;
+    if (fetchKeyRef.current !== key) {
+      fetchKeyRef.current = key;
+      setPoints([]);
+    }
     let cancelled = false;
     setError(null);
+    setLoading(true);
     getHttpSamples(targetId, fromArg ?? range, toArg, source)
       .then((r) => {
         if (!cancelled) setPoints(r.points ?? []);
@@ -102,6 +112,9 @@ export function HttpChart({
           setError(String(e));
           setPoints([]);
         }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
@@ -287,7 +300,12 @@ export function HttpChart({
     <div>
       <div className="chart-host" style={{ minHeight: height, position: "relative" }}>
         <div ref={divRef} style={{ width: "100%" }} />
-        {points.length === 0 && <div className="chart-empty">No HTTP samples in range</div>}
+        {points.length === 0 &&
+          (loading ? (
+            <div className="chart-skeleton" role="status" aria-label="Loading…" />
+          ) : (
+            <div className="chart-empty">No HTTP samples in range</div>
+          ))}
         {hovered && (
           <div
             style={{
