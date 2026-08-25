@@ -1914,6 +1914,101 @@ func TestIntegrationHopReadCarriesCycleCounters(t *testing.T) {
 	}
 }
 
+// Ingestion is at-least-once: a slave requeues a batch whose response it never
+// saw, and probe_cycle is an ordinary MergeTree that collapses nothing. A
+// counters read that takes raw rows under a LIMIT sized by its key count spends
+// that budget on one source's duplicates and drops the other source entirely.
+func TestIntegrationCycleCountersSurviveADuplicatePush(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ref := config.TargetRef{Target: config.Target{Name: "retried"}, Group: "g"}
+	ts := time.Now().UTC().Add(-time.Minute)
+	// "master" sorts ahead of "slave-a" in probe_cycle's ORDER BY, so its
+	// duplicates are the rows a raw LIMIT reaches first.
+	retried := scheduler.Cycle{
+		Time: ts, Target: ref, Source: "master", Sent: 4, LossCount: 1,
+		Summary: stats.Summary{Min: 1, Max: 4, Mean: 2, Median: 2},
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.0.0.1", Sent: 4, Lost: 1, TargetReply: true, RTTs: []time.Duration{time.Millisecond}},
+		},
+	}
+	w.OnCycle(ctx, retried)
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: ts, Target: ref, Source: "slave-a", Sent: 7, LossCount: 2,
+		Summary: stats.Summary{Min: 1, Max: 2, Mean: 1, Median: 1},
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.0.0.1", Sent: 7, Lost: 2, TargetReply: true, RTTs: []time.Duration{time.Millisecond}},
+		},
+	})
+	w.OnCycle(ctx, retried)
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	// Attack the fixture: if the write path ever collapses the retry, this
+	// test stops exercising the defect and must say so rather than pass.
+	rows, err := r.conn.Query(ctx,
+		"SELECT count() FROM probe_cycle WHERE target_id = ? AND target_group = ? AND source = 'master'",
+		ref.Target.Name, ref.Group)
+	if err != nil {
+		t.Fatalf("count duplicates: %v", err)
+	}
+	var stored uint64
+	if !rows.Next() {
+		t.Fatal("count returned no row")
+	}
+	if err := rows.Scan(&stored); err != nil {
+		t.Fatalf("scan count: %v", err)
+	}
+	_ = rows.Close()
+	if stored != 2 {
+		t.Fatalf("probe_cycle holds %d master rows, want the 2 a retried push leaves", stored)
+	}
+
+	for name, read := range map[string]func() (storage.HopsResult, error){
+		"QueryLatestHops": func() (storage.HopsResult, error) {
+			return r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+		},
+		"QueryHopsAt": func() (storage.HopsResult, error) {
+			return r.QueryHopsAt(ctx, ref, ts, 30*time.Minute, storage.QueryFilter{})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := read()
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			got := map[string]storage.CycleCounters{}
+			for _, c := range res.Cycles {
+				if _, dup := got[c.Source]; dup {
+					t.Fatalf("source %q returned twice: %+v", c.Source, res.Cycles)
+				}
+				got[c.Source] = c
+			}
+			if m := got["master"]; m.Sent != 4 || m.LossCount != 1 {
+				t.Fatalf("master counters = %+v, want 4 sent 1 lost", m)
+			}
+			if sl := got["slave-a"]; sl.Sent != 7 || sl.LossCount != 2 {
+				t.Fatalf("slave-a counters = %+v, want 7 sent 2 lost — the duplicate ate its row", sl)
+			}
+		})
+	}
+}
+
 // The hop-row assertions below predate HopsResult and only care about the
 // path rows, so these keep them reading as they did.
 func latestHops(ctx context.Context, r *Reader, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {

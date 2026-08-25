@@ -533,18 +533,19 @@ func TestQuorumDispatchesOnMajority(t *testing.T) {
 
 // The aggregate must resolve exactly once, not once per recovering source.
 func TestQuorumResolvesOnce(t *testing.T) {
-	ev, disp := newTestEvaluator(t, config.Alert{
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
 		Quorum: config.Quorum{Majority: true},
 	})
 
 	ctx := context.Background()
-	ev.OnCycle(ctx, lossyCycle("master", 100))
-	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
 	disp.reset()
 
-	ev.OnCycle(ctx, healthyCycle("master"))
-	ev.OnCycle(ctx, healthyCycle("tokyo-1"))
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
 
 	evs := disp.events()
 	if len(evs) != 1 {
@@ -720,13 +721,13 @@ func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	pinClock(ev, testBase)
+	clk := pinClock(ev, testBase)
 
 	ctx := context.Background()
 
 	// Quorum on: both sources go lossy, majority-of-2 fires.
-	ev.OnCycle(ctx, lossyCycle("master", 100))
-	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
 	evs := disp.events()
 	if len(evs) != 1 || evs[0].Next != StateFiring {
 		t.Fatalf("setup: got %+v, want a single FIRING event", evs)
@@ -744,8 +745,9 @@ func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
 
 	// Both sources recover under per-source dispatch — each gets its own
 	// resolve event, independent of the (now-inactive) aggregate.
-	ev.OnCycle(ctx, healthyCycle("master"))
-	ev.OnCycle(ctx, healthyCycle("tokyo-1"))
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
 	evs = disp.events()
 	if len(evs) != 2 {
 		t.Fatalf("got %d per-source resolve events, want 2: %+v", len(evs), evs)
@@ -1064,17 +1066,18 @@ func TestQuorumEventNamesAllFiringSources(t *testing.T) {
 // hasn't fully cleared. Echoing the recovering source instead (Cycle.Source)
 // would say the opposite.
 func TestQuorumResolveNamesStillFiringSources(t *testing.T) {
-	ev, disp := newTestEvaluator(t, config.Alert{
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
 		Quorum: config.Quorum{Majority: true},
 	})
 
 	ctx := context.Background()
-	ev.OnCycle(ctx, lossyCycle("master", 100))
-	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100))
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
 	disp.reset()
-	ev.OnCycle(ctx, healthyCycle("master")) // 1 of 2 firing → aggregate resolves
-	ev.OnCycle(ctx, healthyCycle("tokyo-1"))
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0)) // 1 of 2 firing → aggregate resolves
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
 
 	evs := disp.events()
 	if len(evs) != 1 || evs[0].Next != StateOK {
@@ -1660,5 +1663,96 @@ func TestQuorumWarmupCannotBeSkippedByBackdating(t *testing.T) {
 
 	if evs := disp.events(); len(evs) != 0 {
 		t.Fatalf("got %d events, want 0 — warm-up must not be satisfied by a back-dated first cycle: %+v", len(evs), evs)
+	}
+}
+
+// A slave requeues on any 5xx or network error, so the master ingests the same
+// measurement twice whenever an ack is lost. Applying it twice incremented
+// consecHits twice and fired a sustained:2 alert off one bad cycle.
+func TestDuplicateCycleCannotFireASustainedAlert(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 2, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	bad := cycleAt(clk, "tokyo-1", 100)
+	ev.OnCycle(ctx, bad)
+	ev.OnCycle(ctx, bad)
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StatePending {
+		t.Fatalf("got %+v, want only PENDING — one cycle delivered twice is one bad cycle", evs)
+	}
+	disp.reset()
+
+	// The positive counterpart: a genuinely later cycle is the second hit and
+	// does fire, so the assertion above is not passing because nothing fires.
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+	evs = disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("got %+v, want one FIRING from the second distinct cycle", evs)
+	}
+}
+
+// The reverse ordering failure: a requeued healthy batch delivered after a
+// newer lossy one rolled a live alert back to OK off replayed data.
+func TestStaleReplayCannotResolveAFiringAlert(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	older := cycleAt(clk, "tokyo-1", 0)
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+	if evs := disp.events(); len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("got %+v, want one FIRING", evs)
+	}
+	disp.reset()
+
+	ev.OnCycle(ctx, older)
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %+v, want no dispatch — an older cycle must not resolve a newer state", evs)
+	}
+
+	// The positive counterpart: the next genuinely newer healthy cycle does
+	// resolve it.
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateOK {
+		t.Fatalf("got %+v, want one RESOLVED from a newer healthy cycle", evs)
+	}
+}
+
+// A duplicate must not refresh liveness either: a slave that has stopped
+// probing but is still replaying its ring would otherwise sit in the quorum
+// denominator forever and hold a real outage below the threshold.
+func TestDuplicateCycleDoesNotRefreshLiveness(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+	healthy := cycleAt(clk, "frankfurt-1", 0)
+	ev.OnCycle(ctx, healthy)
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %+v, want no dispatch — one of two sources is not a majority", evs)
+	}
+
+	// frankfurt-1 goes silent past the liveness window and replays its last
+	// cycle instead of producing a new one.
+	clk.advance(stalenessWindow(time.Minute) + time.Second)
+	ev.OnCycle(ctx, healthy)
+
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("got %+v, want one FIRING — a replaying source must age out of the denominator", evs)
+	}
+	if evs[0].Live != 1 {
+		t.Fatalf("got %d live sources, want 1", evs[0].Live)
 	}
 }
