@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "icon": "node scripts/make-icon.mjs",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node -e \"fs.closeSync(fs.openSync('../internal/ui/dist/.gitkeep','a'))\"",
     "preview": "vite preview"
   },
   "dependencies": {
