@@ -2,13 +2,17 @@ package clickhouse
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/tumult/gosmokeping/internal/alert"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -289,4 +293,71 @@ func TestOnCycleProjectsHopIdentity(t *testing.T) {
 	default:
 		t.Fatal("no hop row queued")
 	}
+}
+
+// The hop flush must leave its caller's RTT slice as it found it: OnCycle
+// queues a shallow probe.Hop, so the queued row's RTTs alias the scheduler
+// Cycle that Fanout hands to every other sink.
+func TestFlushHopsPreservesCallerRTTOrder(t *testing.T) {
+	rtts := []time.Duration{30 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond}
+	want := slices.Clone(rtts)
+	conn := &prepConn{batch: &recordBatch{}}
+	w := &Writer{conn: conn}
+	row := hopRow{ts: time.Now(), target: "gw", group: "core", source: "master",
+		hop: probe.Hop{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: rtts}}
+	if err := w.flushHops(context.Background(), []any{row}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(rtts, want) {
+		t.Fatalf("flushHops reordered the caller's slice: %v, want %v", rtts, want)
+	}
+	cols := insertColumns(t, conn.query)
+	byCol := map[string]any{}
+	for i, c := range cols {
+		byCol[c] = conn.batch.appended[0][i]
+	}
+	if byCol["rtt_min_us"] != uint32(10000) || byCol["rtt_max_us"] != uint32(30000) ||
+		byCol["rtt_median_us"] != uint32(20000) || byCol["rtt_mean_us"] != uint32(20000) {
+		t.Fatalf("hop stats wrong: min=%v max=%v median=%v mean=%v",
+			byCol["rtt_min_us"], byCol["rtt_max_us"], byCol["rtt_median_us"], byCol["rtt_mean_us"])
+	}
+}
+
+// The order guard above is deterministic; this one is the -race evidence for
+// the same sharing. A real OnCycle queues the aliasing row, the real hop
+// consumer goroutine flushes it, and the real Discord formatter walks the same
+// cycle's hops — the two accesses have no happens-before edge between them.
+func TestHopRTTsNotRacedBetweenFlushAndAlertDispatch(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := config.NewStore("", &config.Config{
+		Alerts: map[string]config.Alert{"down": {Condition: "loss_pct > 0", Actions: []string{"dc"}}},
+		// Port 1 refuses immediately: the embed (and formatHops with it) is
+		// built before the POST, which is the read under test.
+		Actions: map[string]config.Action{"dc": {Type: "discord", URL: "http://127.0.0.1:1/"}},
+	})
+	dispatcher := alert.NewDispatcher(discard, store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := &Writer{log: discard, conn: &prepConn{batch: &recordBatch{}}}
+	for i := range w.chans {
+		w.chans[i] = make(chan any, 64)
+	}
+	w.wg.Add(1)
+	go w.runTable(ctx, tableProbeHop, 1, time.Millisecond)
+
+	for i := 0; i < 200; i++ {
+		cy := testCycle(time.Now())
+		cy.Sent, cy.LossCount = 3, 3
+		cy.Hops = []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: []time.Duration{
+			30 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond}}}
+		w.OnCycle(ctx, cy)
+		dispatcher.Dispatch(ctx, alert.Event{
+			Time: cy.Time, Target: cy.Target, AlertName: "down",
+			Alert: store.Current().Alerts["down"],
+			Prev:  alert.StateOK, Next: alert.StateFiring, Cycle: cy,
+		})
+	}
+	cancel()
+	w.wg.Wait()
 }

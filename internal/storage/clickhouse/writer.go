@@ -413,13 +413,15 @@ func (w *Writer) flushHops(ctx context.Context, rows []any) error {
 	if err != nil {
 		return err
 	}
+	// MinMaxMeanMedian sorts in place and OnCycle queues a shallow probe.Hop,
+	// so r.hop.RTTs still aliases the Cycle every other sink holds: sort a
+	// copy in a buffer reused across the batch, which keeps the hot probe path
+	// allocation-free rather than cloning per hop at queue time.
+	var sorted []time.Duration
 	for _, raw := range rows {
 		r := raw.(hopRow)
-		// MinMaxMeanMedian sorts r.hop.RTTs in place. Safe here because
-		// the writer owns this hopRow exclusively (it was queued by us
-		// via offer() and no other consumer holds the slice). Avoids the
-		// 17 wasted percentile computations + Clone of stats.Compute.
-		hMin, hMax, hMean, hMedian := stats.MinMaxMeanMedian(r.hop.RTTs)
+		sorted = append(sorted[:0], r.hop.RTTs...)
+		hMin, hMax, hMean, hMedian := stats.MinMaxMeanMedian(sorted)
 		lossPct := float32(0)
 		if r.hop.Sent > 0 {
 			lossPct = float32(100 * float64(r.hop.Lost) / float64(r.hop.Sent))
