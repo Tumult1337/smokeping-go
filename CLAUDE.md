@@ -304,6 +304,27 @@ Key points a reader can't derive from a single file:
   slaves probing the same host transition independently. UI filtering
   uses the `source=` query param on cycles/rtts/hops endpoints.
 
+  **A pushed source must already be in the registry.** `/cycles` takes
+  the identity from `X-Slave-Name`, falling back to `batch.Source` for
+  slaves predating that header, and refuses it with 403 unless
+  `Registry.Has` already holds the name — checked *before* `Touch`,
+  which would otherwise create the entry it is being asked about. Every
+  minted label costs a permanent ClickHouse `LowCardinality` dictionary
+  entry, a `QueryLatestHops` row forever, and a source on the
+  unauthenticated API naming no real node. `Registry.Touch` returns
+  whether it accepted, and refuses *new* names past
+  `master.maxRegisteredSlaves` (512, per master process, entries leaving
+  only via the hourly 24h `Sweep`) — the registry is the list of legal
+  labels, so its size is the cardinality bound. Refusing at the ceiling
+  never evicts a registered slave, and `/register` answers 503 there.
+  This is a cardinality and data-integrity bound, **not** authentication:
+  the cluster token is shared, so any registered slave can still claim
+  any other registered slave's name. That is accepted, not overlooked.
+  A slave that gets 403 re-registers and requeues the batch rather than
+  dropping it — registration is otherwise attempted only at boot, so
+  under `cluster.pull_every` `"0"` a master restart would otherwise
+  refuse that slave for the life of its process.
+
 - **Slave push buffer + auth:** `slave.PushSink` is a fixed 600-cycle
   ring with drop-oldest on overflow; a failed push `Requeue`s on 5xx /
   network errors and drops on 404 (master lost state; next /register

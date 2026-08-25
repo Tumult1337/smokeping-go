@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +110,64 @@ func TestRunnerAppliesHopMarkerAdvertisement(t *testing.T) {
 	r.sink.OnCycle(context.Background(), cycleWithHops(slavehealth.Group, "frankfurt-1"))
 	if batch := r.sink.Drain(10); len(batch) != 1 || len(batch[0].Hops) != 2 {
 		t.Fatalf("marker-aware advertisement not applied: %+v", batch)
+	}
+}
+
+// The master identifies a pushing slave from X-Slave-Name, falling back to
+// batch.Source. Sending the header on /cycles makes the two agree instead of
+// leaving the master to trust a body field alone.
+func TestPushCyclesSendsSlaveIdentityHeaders(t *testing.T) {
+	var gotName, gotVersion string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotName = r.Header.Get("X-Slave-Name")
+		gotVersion = r.Header.Get("X-Slave-Version")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "tok", "tokyo-1", "v9", "")
+	if err := c.PushCycles(context.Background(), cluster.CycleBatch{Source: "tokyo-1"}); err != nil {
+		t.Fatalf("PushCycles: %v", err)
+	}
+	if gotName != "tokyo-1" {
+		t.Errorf("X-Slave-Name = %q, want %q", gotName, "tokyo-1")
+	}
+	if gotVersion != "v9" {
+		t.Errorf("X-Slave-Version = %q, want %q", gotVersion, "v9")
+	}
+}
+
+// A master that no longer knows this slave — restarted, or swept — refuses
+// the push with 403. Dropping the batch would lose data and, with
+// cluster.pull_every "0", the slave would never re-register and would stay
+// refused for the life of the process. It re-registers and keeps the batch.
+func TestFlushOnceReregistersAndRequeuesWhenUnregistered(t *testing.T) {
+	var registers int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/register") {
+			registers++
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ack":true}`))
+			return
+		}
+		http.Error(w, "unregistered slave: POST /register first", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	r := NewRunner(slog.New(slog.DiscardHandler), &config.Config{
+		Cluster: &config.Cluster{MasterURL: srv.URL, Token: "tok", Name: "tokyo-1"},
+	}, "v9")
+	r.sink.OnCycle(context.Background(), scheduler.Cycle{
+		Target: config.TargetRef{Group: "g", Target: config.Target{Name: "t"}},
+	})
+
+	if err := r.flushOnce(context.Background()); err != nil {
+		t.Fatalf("flushOnce: %v", err)
+	}
+	if registers != 1 {
+		t.Errorf("register attempts = %d, want 1", registers)
+	}
+	if got := r.sink.Len(); got != 1 {
+		t.Errorf("buffered cycles = %d, want the batch requeued (1)", got)
 	}
 }

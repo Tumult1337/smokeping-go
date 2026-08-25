@@ -79,13 +79,14 @@ func TestHandleCyclesRejectsReservedName(t *testing.T) {
 	}
 }
 
-func TestHandleCyclesAcceptsValidName(t *testing.T) {
+func TestHandleCyclesAcceptsRegisteredName(t *testing.T) {
 	srv := newTestServer()
+	srv.registry.Touch("edge-1", "", "", "")
 	if code := postCycles(t, srv, "edge-1", ""); code != http.StatusOK {
-		t.Fatalf("valid slave: got %d, want 200", code)
+		t.Fatalf("registered slave: got %d, want 200", code)
 	}
 	if !srv.registry.Has("edge-1") {
-		t.Error("valid slave not registered")
+		t.Error("registered slave dropped from the registry")
 	}
 }
 
@@ -109,6 +110,7 @@ func TestIngestResolvesHealthTargets(t *testing.T) {
 	}, nil)
 	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink,
 		func() *slavehealth.Set { return hs })
+	srv.registry.Touch("frankfurt-1", "", "", "")
 
 	body := `{"source":"frankfurt-1","cycles":[{"group":"` + slavehealth.Group +
 		`","name":"tokyo-1","probe":"` + slavehealth.ProbeName + `","sent":5,"loss_count":0}]}`
@@ -149,6 +151,7 @@ func TestIngestBatchOverridesForgedPerCycleSource(t *testing.T) {
 	})
 	sink := &captureSink{}
 	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, nil)
+	srv.registry.Touch("frankfurt-1", "", "", "")
 
 	body := `{"source":"frankfurt-1","cycles":[` +
 		`{"group":"g","name":"t","probe":"icmp","source":"master","sent":5,"loss_count":0},` +
@@ -287,5 +290,116 @@ func TestClusterNilBlockDeniesEveryone(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("nil cluster block: got %d, want 401", rec.Code)
+	}
+}
+
+// A slave holding the shared token can put any string in batch.Source, and
+// the master stamped it onto every cycle: it became a ClickHouse
+// LowCardinality dictionary entry, a permanent row in QueryLatestHops, and a
+// source label on the unauthenticated API naming no real node. Only names the
+// registry already knows are accepted.
+func TestHandleCyclesRejectsUnregisteredSource(t *testing.T) {
+	srv := newTestServer()
+
+	if code := postCycles(t, srv, "", "10.44.0.2"); code != http.StatusForbidden {
+		t.Errorf("unregistered batch.Source: got %d, want 403", code)
+	}
+	if code := postCycles(t, srv, "evil-1", ""); code != http.StatusForbidden {
+		t.Errorf("unregistered X-Slave-Name: got %d, want 403", code)
+	}
+	if srv.registry.Has("10.44.0.2") || srv.registry.Has("evil-1") {
+		t.Error("rejected name leaked into the registry")
+	}
+}
+
+// An unidentified batch is refused rather than ingested under the empty
+// source label.
+func TestHandleCyclesRejectsEmptySource(t *testing.T) {
+	srv := newTestServer()
+	if code := postCycles(t, srv, "", ""); code != http.StatusBadRequest {
+		t.Errorf("no name anywhere: got %d, want 400", code)
+	}
+}
+
+// Rolling upgrade: a slave that predates the X-Slave-Name header on /cycles
+// registered at boot, so its batch.Source names a registered slave and its
+// cycles keep flowing.
+func TestHandleCyclesAcceptsLegacySlaveWithoutHeader(t *testing.T) {
+	srv := newTestServer()
+	srv.registry.Touch("edge-1", "v0", "10.0.0.5:5000", "")
+
+	if code := postCycles(t, srv, "", "edge-1"); code != http.StatusOK {
+		t.Fatalf("registered legacy slave: got %d, want 200", code)
+	}
+}
+
+// The header wins over the body when both are present and both are
+// registered, so the identity the master stamps is the one it also used for
+// the registry heartbeat.
+func TestHandleCyclesPrefersHeaderOverBatchSource(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := config.NewStore("", &config.Config{Cluster: &config.Cluster{Token: "tok"},
+		Targets: []config.Group{{Group: "core", Targets: []config.Target{{Name: "gw", Host: "example.test"}}}}})
+	sink := &captureSink{}
+	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, nil)
+	srv.registry.Touch("a", "", "", "")
+	srv.registry.Touch("b", "", "", "")
+
+	body := `{"source":"b","cycles":[{"group":"core","name":"gw","probe":"icmp","source":"b","sent":5}]}`
+	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("X-Slave-Name", "a")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(sink.got) != 1 {
+		t.Fatalf("got %d cycles, want 1", len(sink.got))
+	}
+	if sink.got[0].Source != "a" {
+		t.Fatalf("cycle stamped %q, want the header identity %q", sink.got[0].Source, "a")
+	}
+}
+
+// The registry is the master's only list of legitimate source labels, so its
+// size is the bound on how many distinct labels a token holder can mint. New
+// names past the cap are refused; names already in it keep heartbeating.
+func TestRegistryCapsDistinctNames(t *testing.T) {
+	reg := NewRegistry(slog.New(slog.DiscardHandler))
+	for i := range maxRegisteredSlaves {
+		if !reg.Touch("slave-"+strconv.Itoa(i), "", "", "") {
+			t.Fatalf("slave-%d refused below the cap", i)
+		}
+	}
+	if reg.Touch("one-too-many", "", "", "") {
+		t.Fatal("registry accepted a name past the cap")
+	}
+	if reg.Has("one-too-many") {
+		t.Fatal("refused name stored anyway")
+	}
+	if !reg.Touch("slave-0", "v2", "", "") {
+		t.Fatal("an already-registered slave was refused at the cap")
+	}
+}
+
+// A full registry must not turn into an ingest outage for the slaves already
+// in it, and must not admit the new name by the back door of /register.
+func TestRegisterRefusedAtCap(t *testing.T) {
+	srv := newTestServer()
+	for i := range maxRegisteredSlaves {
+		srv.registry.Touch("slave-"+strconv.Itoa(i), "", "", "")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/register",
+		bytes.NewReader([]byte(`{"name":"overflow"}`)))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("register past cap: got %d, want 503", rec.Code)
+	}
+	if code := postCycles(t, srv, "", "slave-0"); code != http.StatusOK {
+		t.Fatalf("registered slave refused while the registry is full: got %d, want 200", code)
 	}
 }

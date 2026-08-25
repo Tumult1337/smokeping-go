@@ -49,6 +49,9 @@ type Registry struct {
 	// mesh onto one bogus destination.
 	byAddr map[netip.Addr]string
 	pins   map[string]netip.Addr
+	// fullWarned dedups the registry-full warning. A refused name is refused
+	// on every retry, and the retry rate is the attacker's to choose.
+	fullWarned bool
 
 	onChange func()
 }
@@ -80,18 +83,41 @@ func (r *Registry) SetPins(pins map[string]netip.Addr) {
 	r.pins = pins
 }
 
-// Touch records that a slave just checked in. Safe to call on every request
-// that carries a valid slave identity, not just /register. advertise is the
-// raw slave-reported health address; an empty or rejected value simply leaves
-// the slave out of the health mesh without blocking registration.
-func (r *Registry) Touch(name, version, addr, advertise string) {
+// maxRegisteredSlaves bounds how many distinct names can be live in the
+// registry of one master process at once. Entries leave only via Sweep (24h
+// idle, swept hourly), so without a ceiling a token holder can mint a fresh
+// name per request for a day; every name that then pushes a cycle becomes a
+// permanent ClickHouse LowCardinality dictionary entry and a row
+// QueryLatestHops must consider forever. The deployed reference fleet runs 6
+// sources, so 512 is ~85× the real shape and far below anything that
+// pressures the map. Refusing a *new* name at the ceiling never evicts a
+// registered one: an established fleet keeps working while an attacker's
+// names are the ones refused.
+const maxRegisteredSlaves = 512
+
+// Touch records that a slave just checked in and reports whether the registry
+// accepted the name. Safe to call on every request that carries a valid slave
+// identity, not just /register. advertise is the raw slave-reported health
+// address; an empty or rejected value simply leaves the slave out of the
+// health mesh without blocking registration.
+func (r *Registry) Touch(name, version, addr, advertise string) bool {
 	if name == "" {
-		return
+		return false
 	}
 
 	r.mu.Lock()
 	info, ok := r.slaves[name]
 	if !ok {
+		if len(r.slaves) >= maxRegisteredSlaves {
+			warn := !r.fullWarned
+			r.fullWarned = true
+			r.mu.Unlock()
+			if warn {
+				r.log.Warn("slave registry full, refusing new names",
+					"registered", maxRegisteredSlaves)
+			}
+			return false
+		}
 		info = &SlaveInfo{Name: name}
 		r.slaves[name] = info
 	}
@@ -117,6 +143,7 @@ func (r *Registry) Touch(name, version, addr, advertise string) {
 	if changed && onChange != nil {
 		onChange()
 	}
+	return true
 }
 
 // Outcome kinds for resolveAdvertise's log dedup key. Each is combined with
@@ -260,6 +287,9 @@ func (r *Registry) Sweep(age time.Duration) {
 			changed = true
 		}
 		delete(r.slaves, name)
+	}
+	if len(r.slaves) < maxRegisteredSlaves {
+		r.fullWarned = false
 	}
 	onChange := r.onChange
 	r.mu.Unlock()

@@ -275,6 +275,11 @@ func (r *Runner) pushLoop(ctx context.Context) error {
 //   - ErrAuth: returned up so Run exits non-zero (token rotation required)
 //   - ErrNotFound: master lost our state; drop the batch (next /register
 //     re-establishes us)
+//   - ErrUnregistered: master's registry has no entry for us; re-register and
+//     requeue. Registration is otherwise only attempted at boot, so with
+//     cluster.pull_every "0" (no /config refresh to heartbeat through) a
+//     master restart would leave the slave refused for the life of the
+//     process.
 //   - anything else (5xx, network, timeout): requeue for the next tick
 //   - ctx cancellation during shutdown: returns nil so finalFlush can run
 func (r *Runner) flushOnce(ctx context.Context) error {
@@ -296,6 +301,18 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 	}
 	if errors.Is(err, ErrNotFound) {
 		r.log.Warn("master returned 404, dropping batch", "count", len(batch))
+		return nil
+	}
+	if errors.Is(err, ErrUnregistered) {
+		r.log.Warn("master does not know this slave, re-registering", "count", len(batch))
+		if rerr := r.client.Register(ctx); rerr != nil {
+			if errors.Is(rerr, ErrAuth) {
+				r.sink.Requeue(batch)
+				return rerr
+			}
+			r.log.Warn("re-register failed", "err", rerr)
+		}
+		r.sink.Requeue(batch)
 		return nil
 	}
 	r.log.Warn("push failed, requeueing", "count", len(batch), "err", err)

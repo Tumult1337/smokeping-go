@@ -29,6 +29,12 @@ import (
 // which the operator notices via metrics rather than a crash loop.
 var ErrAuth = errors.New("cluster: 401 unauthorized")
 
+// ErrUnregistered signals a 403: the master will not accept cycles under a
+// name its registry does not hold. Recoverable by re-registering, so callers
+// keep the batch. A WAF 403 lands here too and costs one extra /register
+// attempt, which is the same retry the previous generic-error path made.
+var ErrUnregistered = errors.New("cluster: 403 slave not registered")
+
 // ErrNotModified signals that a GET /config returned 304 — caller keeps its
 // current config.
 var ErrNotModified = errors.New("cluster: 304 not modified")
@@ -99,7 +105,11 @@ func (c *Client) PullConfig(ctx context.Context, etag string) (cluster.ClusterCo
 // the batch for retry; on 404 the master has lost us and the caller should
 // drop the batch.
 func (c *Client) PushCycles(ctx context.Context, batch cluster.CycleBatch) error {
-	_, _, err := c.do(ctx, http.MethodPost, "/api/v1/cluster/cycles", nil, batch)
+	headers := map[string]string{
+		"X-Slave-Name":    c.name,
+		"X-Slave-Version": c.version,
+	}
+	_, _, err := c.do(ctx, http.MethodPost, "/api/v1/cluster/cycles", headers, batch)
 	return err
 }
 
@@ -143,6 +153,9 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return resp.StatusCode, httpResult{}, ErrAuth
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return resp.StatusCode, httpResult{}, ErrUnregistered
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return resp.StatusCode, httpResult{}, ErrNotFound

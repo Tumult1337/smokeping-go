@@ -122,7 +122,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `name required: ≤128 bytes, not "master", no control chars`, http.StatusBadRequest)
 		return
 	}
-	s.registry.Touch(req.Name, req.Version, r.RemoteAddr, req.Advertise)
+	if !s.registry.Touch(req.Name, req.Version, r.RemoteAddr, req.Advertise) {
+		http.Error(w, "slave registry full", http.StatusServiceUnavailable)
+		return
+	}
 	s.log.Info("slave registered", "name", req.Name, "version", req.Version, "addr", r.RemoteAddr)
 	writeJSON(w, http.StatusOK, cluster.RegisterResp{Ack: true})
 }
@@ -139,7 +142,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid slave name", http.StatusBadRequest)
 			return
 		}
-		s.registry.Touch(slaveName, r.Header.Get("X-Slave-Version"), r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
+		_ = s.registry.Touch(slaveName, r.Header.Get("X-Slave-Version"), r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
 	}
 
 	resp := BuildClusterConfig(cfg, slaveName, s.healthSet())
@@ -162,24 +165,29 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	// Prefer the authenticated X-Slave-Name header over the wire-provided
-	// batch.Source — a valid token does not bind a slave identity, so any
-	// slave could otherwise forge another's source label and corrupt alert
-	// state or registry entries. Fall back to batch.Source for older slaves
-	// that don't send the header.
+	// The claimed identity comes from X-Slave-Name, falling back to
+	// batch.Source for slaves that predate the header — both are wire values
+	// the shared token does not bind, so the registry, not the request, is
+	// what decides the name exists.
 	name, version := r.Header.Get("X-Slave-Name"), r.Header.Get("X-Slave-Version")
 	if name == "" {
-		// Legacy slaves omit the header; fall back to the wire-provided source.
 		name, version = batch.Source, ""
 	}
-	if name != "" {
-		if !validSlaveName(name) {
-			http.Error(w, "invalid slave name", http.StatusBadRequest)
-			return
-		}
-		s.registry.Touch(name, version, r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
-		batch.Source = name
+	if !validSlaveName(name) {
+		http.Error(w, `name required: ≤128 bytes, not "master", no control chars`, http.StatusBadRequest)
+		return
 	}
+	// Checked before Touch, which would otherwise create the very entry it is
+	// being asked about. An unregistered name is refused rather than minted:
+	// the source label reaches ClickHouse as a LowCardinality dictionary
+	// entry, becomes a row QueryLatestHops carries forever, and surfaces on
+	// the unauthenticated API as an origin that never existed.
+	if !s.registry.Has(name) {
+		http.Error(w, "unregistered slave: POST /register first", http.StatusForbidden)
+		return
+	}
+	_ = s.registry.Touch(name, version, r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
+	batch.Source = name
 	n := s.ingestBatch(r, batch)
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": n})
 }
