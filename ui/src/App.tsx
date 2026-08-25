@@ -111,6 +111,12 @@ const RANGES: { label: string; value: Range }[] = [
   { label: "1y", value: "-365d" },
 ];
 
+// JSON encodes every field the sidebar, the search index and the toolbar read,
+// and no separator can appear unescaped inside one of them.
+function targetsFingerprint(targets: Target[]): string {
+  return JSON.stringify(targets);
+}
+
 // Backend caps HTTP sample queries at 7d (raw-bucket retention).
 const HTTP_RANGES: Range[] = ["-1h", "-6h", "-24h", "-7d"];
 
@@ -259,28 +265,58 @@ export default function App() {
     });
   }, []);
 
+  const targetsRef = useRef<Target[]>([]);
+  targetsRef.current = targets;
+  const targetsFpRef = useRef<string>("");
+  const sourcesFpRef = useRef<string>("");
+
   useEffect(() => {
+    let cancelled = false;
     listTargets()
       .then((t) => {
-        setTargets(t);
+        if (cancelled) return;
+        // Skip the setState when nothing moved: a new array every 30s rebuilds
+        // the Fuse index and re-renders the whole sidebar for no reason.
+        const fp = targetsFingerprint(t);
+        if (fp !== targetsFpRef.current) {
+          targetsFpRef.current = fp;
+          setTargets(t);
+        }
         // Honor URL target if it exists; otherwise leave selectedId null so
         // the main pane lands on the overview. Stale bookmarks (target=
         // pointing at a removed config entry) also fall through to overview
         // rather than silently switching to an unrelated target.
-        setSelectedId((cur) => {
-          if (cur && t.some((x) => x.id === cur)) return cur;
-          return null;
-        });
+        setSelectedId((cur) => (cur && t.some((x) => x.id === cur) ? cur : null));
       })
-      .catch((e) => setError(String(e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      .catch((e) => {
+        // A failed refresh keeps the last good list; only a cold start with
+        // nothing to show is worth an error banner.
+        if (!cancelled && targetsRef.current.length === 0) setError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshTick]);
 
   useEffect(() => {
+    let cancelled = false;
     listSources()
-      .then((r) => setSources(r.sources))
-      .catch(() => setSources([]));
-  }, []);
+      .then((r) => {
+        if (cancelled) return;
+        const fp = r.sources.join("\u0000");
+        if (fp !== sourcesFpRef.current) {
+          sourcesFpRef.current = fp;
+          setSources(r.sources);
+        }
+      })
+      .catch(() => {
+        // A failed refresh keeps the previous source list rather than hiding
+        // the By-slave section for the rest of the session.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshTick]);
 
   const fromArg = zoom ? String(zoom.from) : range;
   const toArg = zoom ? String(zoom.to) : undefined;
