@@ -649,12 +649,18 @@ Key points a reader can't derive from a single file:
   targets keep their hops either way. A redacted row loses `Unreach` with its
   address on both endpoints — an unreachable reason that outlives its
   address describes the slave's transit. `TargetReply` instead survives on
-  `/hops` and is cleared on the timeline: `/hops` keeps every intermediate
-  address and every row's RTTs, so the answering TTL is already readable and
-  the marker is what `MtrSection` takes end-to-end loss from — clearing it
-  dropped the UI back to the deepest-TTL fallback and rendered a slave
-  reached at TTL 2 as 100% loss. On the timeline every address is the same
-  sentinel, so nothing else would name that TTL.
+  `/hops`: it is the only thing left naming which row the trace ended at
+  once the address is gone, and it discloses nothing that response does not
+  already carry — intermediates keep their real addresses and a blanked row
+  that answered keeps its RTTs and sub-100% loss, so the answering TTL is
+  readable from the rows regardless. End-to-end loss is **not** read from
+  it — that is `target_loss`, the cycle's own counters, which no hop row can
+  reconstruct. The timeline neither selects nor serves the marker: every
+  address there is the same sentinel, so it would be the one thing naming
+  that TTL. `redactAllHopAddresses` clears it anyway, on a field
+  `queryHopsGrid` already leaves false, because the cost of a redundant
+  clear on a disclosure path is nothing and the cost of a later select
+  adding it back is the leak.
 
   Because health targets live outside the stored config,
   `scheduler.LifecycleOptions.ExtraFingerprint` carries mesh membership
