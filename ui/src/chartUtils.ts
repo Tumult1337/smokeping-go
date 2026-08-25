@@ -45,3 +45,10 @@ function nearestCycle(cycles: number[], sec: number): number {
 export function effectiveMin(p: CyclePoint): number {
   return p.Min === 0 && p.LossPct > 0 ? p.P5 || p.Median : p.Min;
 }
+
+// Length-prefixed so no delimiter can appear inside a name: joining on "|"
+// alone makes ["a|b","c"] and ["a","b|c"] the same key, and a chart that
+// skips its rebuild keeps a solo filter matching none of its series.
+export function sourcesKey(sources: string[]): string {
+  return sources.map((s) => `${s.length}:${s}`).join("|");
+}

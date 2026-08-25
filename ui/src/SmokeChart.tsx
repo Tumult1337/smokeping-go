@@ -3,7 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series, type Band } from "u
 import type { CyclePoint } from "./api";
 import { PALETTE } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf } from "./chartUtils";
 
 interface Props {
   points: CyclePoint[];
@@ -59,16 +59,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
 
   const built = useMemo(() => buildAligned(points), [points]);
   builtRef.current = built;
-  // Stable signature of the source set. Only when this changes do we have to
-  // tear down uPlot — series/bands topology depends on the source count, but
-  // in-place setData handles value updates.
-  //
-  // Prefix with count so the zero-source initial state ("0|") doesn't collide
-  // with a single-source-named-"" steady state ("1|"). Without the prefix
-  // both join to "" and the rebuild effect skips when a target whose Source
-  // field is empty replaces the initial empty data — same trap that the
-  // bars chart hit and 319a399 fixed there.
-  const sourcesKey = `${built.sources.length}|${built.sources.join("|")}`;
+  // Stable signature of the source set: only a change here forces a uPlot
+  // teardown, since series and band topology depend on the source count.
+  const sourcesKey = sourcesKeyOf(built.sources);
 
   // Cursor idx drives hover readouts in the legend. null = cursor off chart.
   const [cursorIdx, setCursorIdx] = useState<number | null>(null);

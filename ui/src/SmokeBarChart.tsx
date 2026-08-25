@@ -3,7 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, windowLoss } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, windowLoss } from "./chartUtils";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
@@ -86,11 +86,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
   // Left/right gutter of the uPlot plot area in CSS px, tracked from u.bbox
   // so the LossStripCanvas canvas covers exactly the same x range as the chart.
   const [plotOffsets, setPlotOffsets] = useState({ left: 34, right: 0 });
-  // Prefix with count so the zero-source initial state ("0|") doesn't collide
-  // with a single-source-named-"" steady state ("1|"). Without the prefix both
-  // join to "" and the rebuild effect skips when a target whose Source field
-  // is empty replaces empty initial data — uPlot stays at 1 series.
-  const sourcesKey = `${built.sources.length}|${built.sources.join("|")}`;
+  // Stable signature of the source set; a change forces a uPlot rebuild
+  // because series topology depends on the source count.
+  const sourcesKey = sourcesKeyOf(built.sources);
 
   const [cursorIdx, setCursorIdx] = useState<number | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
