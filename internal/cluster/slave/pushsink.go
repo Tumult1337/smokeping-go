@@ -4,9 +4,11 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
 // PushSink is the only scheduler.Sink the slave's scheduler runs against. It
@@ -23,6 +25,12 @@ type PushSink struct {
 	size    int
 	cap     int
 	dropped int
+
+	// hopMarkers mirrors the master's advertisement, read on every cycle
+	// rather than captured, so a master downgrade takes effect at the next
+	// config pull. Zero value false is the fail-closed state a slave holds
+	// before its first pull.
+	hopMarkers atomic.Bool
 }
 
 // NewPushSink constructs a ring-buffered sink. capacity is typically 600
@@ -38,9 +46,21 @@ func NewPushSink(log *slog.Logger, capacity int) *PushSink {
 	}
 }
 
+// SetHopMarkers records whether the master understands the TargetReply hop
+// marker, from its /config advertisement.
+func (p *PushSink) SetHopMarkers(ok bool) { p.hopMarkers.Store(ok) }
+
 // OnCycle implements scheduler.Sink. Serializes the cycle via FromCycle so the
 // drain path just ships a batch without touching domain types.
+//
+// A health target's hops are withheld from a master that redacts by position:
+// this walk stops each round at its own terminal, so the slave's own echo can
+// sit at ttl 2 under a silent ttl 30, and a positional rule would blank the
+// silent row and serve the address.
 func (p *PushSink) OnCycle(_ context.Context, c scheduler.Cycle) {
+	if slavehealth.IsHealthGroup(c.Target.Group) && !p.hopMarkers.Load() {
+		c.Hops = nil
+	}
 	payload := cluster.FromCycle(c)
 	p.mu.Lock()
 	defer p.mu.Unlock()

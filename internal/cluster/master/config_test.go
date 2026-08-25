@@ -1,8 +1,10 @@
 package master
 
 import (
+	"encoding/json"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -280,5 +282,22 @@ func TestLocalTargetsKeepsHealthAlerts(t *testing.T) {
 		if len(tgt.Alerts) != 1 || tgt.Alerts[0] != "slave-unreachable" {
 			t.Fatalf("health target %q alerts = %v, want [slave-unreachable]", tgt.Name, tgt.Alerts)
 		}
+	}
+}
+
+// The advertisement is what a slave keys its health-hop decision on, and it
+// must reach the wire: a JSON round trip proves the field is serialized, not
+// just set on the struct.
+func TestBuildClusterConfigAdvertisesHopMarkers(t *testing.T) {
+	resp := BuildClusterConfig(baseConfig(), "s1", nil)
+	if !resp.HopMarkers {
+		t.Fatal("master did not advertise marker-keyed redaction")
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"hop_markers":true`) {
+		t.Fatalf("advertisement missing from the wire: %s", raw)
 	}
 }

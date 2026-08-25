@@ -108,8 +108,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}()
 
-	initial := buildShim(resp, r.local.Cluster)
-	r.currentShim.Store(initial)
+	initial := r.applyConfig(resp)
 
 	refreshDone := make(chan struct{})
 	go func() {
@@ -137,6 +136,15 @@ func (r *Runner) Run(ctx context.Context) error {
 		return cause
 	}
 	return nil
+}
+
+// applyConfig fans a freshly pulled master config out to everything that
+// consumes it, so a pull site cannot update one consumer and forget another.
+func (r *Runner) applyConfig(resp cluster.ClusterConfigResp) *config.Config {
+	r.sink.SetHopMarkers(resp.HopMarkers)
+	shim := buildShim(resp, r.local.Cluster)
+	r.currentShim.Store(shim)
+	return shim
 }
 
 // refreshLoop pulls config from the master every r.pullEvery. On a successful
@@ -174,10 +182,9 @@ func (r *Runner) refreshLoop(ctx context.Context, cancelRun context.CancelCauseF
 				continue
 			}
 			etag = newEtag
-			shim := buildShim(newResp, r.local.Cluster)
-			// Store the new shim before signalling so the lifecycle's
-			// Current() call always sees the latest config.
-			r.currentShim.Store(shim)
+			// applyConfig stores the shim before we signal, so the
+			// lifecycle's Current() call always sees the latest config.
+			r.applyConfig(newResp)
 			select {
 			case reloads <- struct{}{}:
 			case <-ctx.Done():

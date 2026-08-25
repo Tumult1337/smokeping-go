@@ -68,10 +68,11 @@ func BuildClusterConfig(cfg *config.Config, slaveName string, health *slavehealt
 	}
 
 	return cluster.ClusterConfigResp{
-		Interval: cfg.Interval,
-		Pings:    cfg.Pings,
-		Probes:   probes,
-		Targets:  groups,
+		Interval:   cfg.Interval,
+		Pings:      cfg.Pings,
+		Probes:     probes,
+		Targets:    groups,
+		HopMarkers: true,
 	}
 }
 

@@ -367,7 +367,13 @@ Key points a reader can't derive from a single file:
   `"redacted"` instead — not `""`, because the heatmap reads `IP` as a
   did-this-hop-reply flag; its DTO does not carry `target_reply` at all,
   since a field with no consumer on an unauthenticated endpoint is pure
-  disclosure surface. On both endpoints a redacted row loses `Unreach`
+  disclosure surface. That redaction only works where the marker exists, so
+  a slave withholds a health target's hops entirely from a master whose
+  `/config` omits `hop_markers`: an old master blanks the deepest row alone
+  and would serve the slave's address whenever a round echoed above a
+  deeper silent one. `PushSink` decides per cycle from the last
+  advertisement — fail-closed until the first pull answers — and ordinary
+  targets keep their hops either way. On both endpoints a redacted row loses `Unreach`
   and `TargetReply` with its address — an annotation that outlives its
   address is a side channel. Because health targets live outside the
   stored config,

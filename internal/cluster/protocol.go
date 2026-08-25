@@ -43,6 +43,12 @@ type ClusterConfigResp struct {
 	Pings    int                 `json:"pings"`
 	Probes   map[string]ProbeDTO `json:"probes"`
 	Targets  []config.Group      `json:"targets"`
+
+	// HopMarkers advertises that this master redacts health-target hops by
+	// the TargetReply marker rather than by position. A master predating the
+	// marker omits the field, and the slave reads that absence as "cannot
+	// redact a per-round walk" and withholds its health hops.
+	HopMarkers bool `json:"hop_markers,omitempty"`
 }
 
 // ProbeDTO mirrors config.Probe on the wire. Duplicated here so the cluster
