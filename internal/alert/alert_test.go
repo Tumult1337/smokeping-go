@@ -123,27 +123,27 @@ func TestEvaluatorLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
-	pinClock(e, time.Time{})
+	clk := pinClock(e, testBase)
 
 	ref := cfg.AllTargets()[0]
-	highCycle := scheduler.Cycle{
-		Target:    ref,
-		ProbeName: "icmp",
-		Sent:      10,
-		Summary:   stats.Summary{Median: 100 * time.Millisecond},
-	}
-	okCycle := scheduler.Cycle{
-		Target:    ref,
-		ProbeName: "icmp",
-		Sent:      10,
-		Summary:   stats.Summary{Median: 10 * time.Millisecond},
+	// Each call advances the clock and stamps the cycle with it: one
+	// (target, source) stream never emits two cycles at one instant.
+	at := func(median time.Duration) scheduler.Cycle {
+		clk.advance(time.Minute)
+		return scheduler.Cycle{
+			Time:      clk.t,
+			Target:    ref,
+			ProbeName: "icmp",
+			Sent:      10,
+			Summary:   stats.Summary{Median: median},
+		}
 	}
 
 	ctx := context.Background()
-	e.OnCycle(ctx, highCycle) // OK → PENDING
-	e.OnCycle(ctx, highCycle) // PENDING → FIRING (sustained=2)
-	e.OnCycle(ctx, highCycle) // FIRING → FIRING (no event)
-	e.OnCycle(ctx, okCycle)   // FIRING → OK
+	e.OnCycle(ctx, at(100*time.Millisecond)) // OK → PENDING
+	e.OnCycle(ctx, at(100*time.Millisecond)) // PENDING → FIRING (sustained=2)
+	e.OnCycle(ctx, at(100*time.Millisecond)) // FIRING → FIRING (no event)
+	e.OnCycle(ctx, at(10*time.Millisecond))  // FIRING → OK
 
 	events := disp.snapshot()
 	if len(events) != 3 {
@@ -184,11 +184,13 @@ func TestEvaluatorPerSourceState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
-	pinClock(e, time.Time{})
+	clk := pinClock(e, testBase)
 
 	ref := cfg.AllTargets()[0]
 	high := func(src string) scheduler.Cycle {
+		clk.advance(time.Minute)
 		return scheduler.Cycle{
+			Time:      clk.t,
 			Target:    ref,
 			ProbeName: "icmp",
 			Source:    src,
@@ -1971,5 +1973,26 @@ func TestConcurrentOnCycleIsRaceFree(t *testing.T) {
 	wg.Wait()
 	if len(cap.at(slog.LevelWarn, "alert.source_excluded")) == 0 {
 		t.Fatal("no exclusion was reported, so the concurrent path was never reached")
+	}
+}
+
+// "No cycle accepted yet" must not be spelled as "the last one was at the zero
+// time", or a producer that stamps nothing disables the guard for its source
+// permanently — the zero value has to deny, not admit.
+func TestGuardHoldsForAZeroStampedCycle(t *testing.T) {
+	ev, disp, _ := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 2, Actions: []string{"log"},
+	})
+	pinClock(ev, time.Time{})
+	ctx := context.Background()
+
+	bad := lossyCycle("tokyo-1", 100)
+	bad.Time = time.Time{}
+	ev.OnCycle(ctx, bad)
+	ev.OnCycle(ctx, bad)
+
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StatePending {
+		t.Fatalf("got %+v, want only PENDING — the second zero-stamped cycle is the same cycle", evs)
 	}
 }

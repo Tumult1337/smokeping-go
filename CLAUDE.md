@@ -675,8 +675,11 @@ Key points a reader can't derive from a single file:
   health-endpoint field: an API field needs a read site to be worth declaring,
   and the log is what an operator's alerting-on-alerting consumes.
 
-  **A cycle is evaluated once, in order.** `alertState.lastCycle` holds the
-  timestamp of the last accepted cycle per source — the same
+  **A cycle is evaluated once, in order.** `alertState.seenCycle` /
+  `lastCycle` hold whether and when a cycle was last accepted per source —
+  two fields rather than one because `lastCycle`'s zero value would
+  otherwise mean *admit*, and any producer stamping nothing would disable
+  the guard for its source forever. The timestamp is the same
   `(target, source, timestamp)` identity storage treats as one measurement —
   and a non-increasing cycle is skipped **before** any state mutation and
   before `lastSeen`. `PushSink.Requeue` resends a batch on any 5xx or network

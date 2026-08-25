@@ -71,6 +71,10 @@ type alertState struct {
 	// config.MaxFutureSkew ahead, which was enough for one hostile slave to
 	// age every honest source out of tally and become a majority of itself.
 	lastSeen time.Time
+	// seenCycle spells "a cycle has been accepted" explicitly rather than
+	// letting lastCycle's zero value mean it: the two states are otherwise
+	// indistinguishable, and the zero value would admit rather than deny.
+	seenCycle bool
 	// lastCycle is the timestamp of the last cycle accepted for this source,
 	// and the identity a replay is recognised by: storage already treats
 	// (target_group, target_id, source, timestamp) as one measurement, so the
@@ -287,11 +291,11 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		}
 		// Before any mutation, and before lastSeen: a source that only ever
 		// replays must age out of the quorum denominator rather than vote.
-		if !st.lastCycle.IsZero() && !cy.Time.After(st.lastCycle) {
+		if st.seenCycle && !cy.Time.After(st.lastCycle) {
 			skipped = append(skipped, st.lastCycle.Sub(cy.Time))
 			continue
 		}
-		st.lastCycle = cy.Time
+		st.seenCycle, st.lastCycle = true, cy.Time
 		st.lastSeen = now
 
 		triggered := cond.Eval(cy)
