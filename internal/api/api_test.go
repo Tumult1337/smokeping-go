@@ -1606,3 +1606,27 @@ func TestGetHopsFailsClosedOnAmbiguousHealthPath(t *testing.T) {
 		}
 	}
 }
+
+// A hop read that reached its row cap is refused by storage rather than
+// truncated, and the handler must say so: mapping it to the generic 502 tells
+// the operator the backend is broken, and a 503 tells them to retry a query
+// that will fail identically every time.
+func TestTruncatedHopReadIsARequestError(t *testing.T) {
+	paths := []string{
+		"/api/v1/targets/core/gw/hops",
+		"/api/v1/targets/core/gw/hops?at=1774000000",
+		"/api/v1/targets/core/gw/hops/timeline?from=-24h",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			h := newTestServer(t, withReader(&stubReader{err: storage.ErrHopsTruncated}))
+			code, body := do(t, h, http.MethodGet, path)
+			if code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", code, body)
+			}
+			if !strings.Contains(string(body), "narrow the range") {
+				t.Fatalf("body does not tell the operator what to do: %s", body)
+			}
+		})
+	}
+}

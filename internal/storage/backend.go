@@ -153,6 +153,11 @@ type HTTPPoint struct {
 	Err    string
 }
 
+// ErrHopsTruncated is returned instead of a short result when a hop read
+// reaches its row cap: hop reads order oldest-first, so the prefix is missing
+// the newest history and reads as a probe that stopped.
+var ErrHopsTruncated = errors.New("storage: hop result exceeds the row cap")
+
 // HopPoint is the most recent stats for one hop on an MTR path. Source
 // identifies the probe origin (master / slave name), matching CyclePoint;
 // empty for pre-cluster rows. The heatmap and HopsTable rely on it to

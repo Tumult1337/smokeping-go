@@ -908,6 +908,11 @@ func (s *Server) writeQueryErr(w http.ResponseWriter, what string, err error) {
 		writeErr(w, http.StatusServiceUnavailable, "server busy, retry shortly")
 		return
 	}
+	if errors.Is(err, storage.ErrHopsTruncated) {
+		s.log.Warn("query refused", "query", what, "err", err)
+		writeErr(w, http.StatusBadRequest, "too many hop rows for this window: narrow the range or filter by source")
+		return
+	}
 	s.log.Warn(what, "err", err)
 	writeErr(w, http.StatusBadGateway, "query failed")
 }

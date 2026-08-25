@@ -2,6 +2,8 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -188,7 +190,8 @@ func TestReaderQueriesOrderForTheirConsumer(t *testing.T) {
 // Every hop read buffers its whole result set into a []storage.HopPoint on an
 // unauthenticated endpoint, and hop_addr is a slave-supplied string that
 // widens queryHopsBucketed's GROUP BY without bound. Each path carries a
-// LIMIT so the row set a single GET can force is finite.
+// LIMIT one past the cap, so the row set a single GET can force is finite and
+// reaching the cap is still distinguishable from ending on it.
 func TestHopQueriesCarryRowLimit(t *testing.T) {
 	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
@@ -212,7 +215,7 @@ func TestHopQueriesCarryRowLimit(t *testing.T) {
 			return err
 		},
 	}
-	want := "LIMIT " + strconv.Itoa(maxHopRows)
+	want := "LIMIT " + strconv.Itoa(maxHopRows+1)
 	for name, call := range calls {
 		conn := &recordConn{}
 		if err := call(&Reader{conn: conn}); err != nil {
@@ -235,5 +238,105 @@ func TestQueryLatestHopsBoundsFutureRows(t *testing.T) {
 	}
 	if !strings.Contains(conn.query, "timestamp <= now() + INTERVAL") {
 		t.Errorf("no future ceiling in the latest-hops CTE:\n%s", conn.query)
+	}
+}
+
+// The cap was first sized against two responder addresses per
+// (bucket, source, ttl). A 7d/15m timeline read off the deployed six-source
+// fleet holds four, so a 30-TTL path fits in 485k rows and the old 300k sat
+// under a shape the probe produces on its own.
+func TestMaxHopRowsClearsTheWidestLegitimateTimeline(t *testing.T) {
+	const (
+		buckets    = 7*24*4 + 2 // 7d, the endpoint's window cap, at the 15m tier plus a partial bucket each end
+		ttls       = 30         // the TTL walk's own ceiling
+		sources    = 6          // the deployed reference fleet
+		responders = 4          // most distinct addresses one (bucket, source, ttl) held over 7d
+	)
+	if want := buckets * ttls * sources * responders; maxHopRows < want {
+		t.Fatalf("maxHopRows = %d, under the %d rows a legitimate 7d timeline holds", maxHopRows, want)
+	}
+}
+
+// countRows yields n rows of zero values so a hop read can be driven past its
+// cap without materialising the real one.
+type countRows struct {
+	driver.Rows
+	left int
+}
+
+func (r *countRows) Next() bool {
+	if r.left == 0 {
+		return false
+	}
+	r.left--
+	return true
+}
+
+func (*countRows) Scan(...any) error { return nil }
+func (*countRows) Err() error        { return nil }
+func (*countRows) Close() error      { return nil }
+
+type countConn struct {
+	driver.Conn
+	rows  int
+	query string
+}
+
+func (c *countConn) Query(_ context.Context, query string, _ ...any) (driver.Rows, error) {
+	c.query = query
+	return &countRows{left: c.rows}, nil
+}
+
+// Hop reads order oldest-first, so serving the cap's prefix hands back a path
+// history with its newest rows missing — which renders as a probe that
+// stopped. Every hop read must refuse instead, and must ask for one row past
+// the cap so reaching it is distinguishable from ending on it.
+func TestHopReadsRefuseATruncatedResult(t *testing.T) {
+	const cap = 4
+	orig := hopRowCap
+	hopRowCap = cap
+	t.Cleanup(func() { hopRowCap = orig })
+
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+
+	calls := map[string]func(*Reader) ([]storage.HopPoint, error){
+		"QueryLatestHops": func(r *Reader) ([]storage.HopPoint, error) {
+			return r.QueryLatestHops(context.Background(), ref, storage.QueryFilter{})
+		},
+		"QueryHopsAt": func(r *Reader) ([]storage.HopPoint, error) {
+			return r.QueryHopsAt(context.Background(), ref, from, 30*time.Minute, storage.QueryFilter{})
+		},
+		"QueryHopsTimeline raw": func(r *Reader) ([]storage.HopPoint, error) {
+			return r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{})
+		},
+		"QueryHopsTimeline bucketed": func(r *Reader) ([]storage.HopPoint, error) {
+			return r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{Step: 15 * time.Minute})
+		},
+	}
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			atCap := &countConn{rows: cap}
+			got, err := call(&Reader{conn: atCap})
+			if err != nil {
+				t.Fatalf("a result exactly at the cap was refused: %v", err)
+			}
+			if len(got) != cap {
+				t.Fatalf("got %d rows at the cap, want %d", len(got), cap)
+			}
+			if want := fmt.Sprintf("LIMIT %d", cap+1); !strings.Contains(atCap.query, want) {
+				t.Fatalf("query does not ask for a row past the cap (%s):%s", want, atCap.query)
+			}
+
+			over := &countConn{rows: cap + 1}
+			got, err = call(&Reader{conn: over})
+			if !errors.Is(err, storage.ErrHopsTruncated) {
+				t.Fatalf("err = %v, want ErrHopsTruncated", err)
+			}
+			if got != nil {
+				t.Fatalf("a refused read still returned %d rows", len(got))
+			}
+		})
 	}
 }

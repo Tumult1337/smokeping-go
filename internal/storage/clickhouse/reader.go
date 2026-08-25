@@ -305,19 +305,35 @@ ORDER BY timestamp, seq`
 	return out, rows.Err()
 }
 
-// maxHopRows caps the rows any one hop read buffers into a
-// []storage.HopPoint. hop_addr is slave-supplied text and widens
-// queryHopsBucketed's GROUP BY per distinct value, so a source minting a
-// fresh address per cycle grows the result set without bound on endpoints
-// that carry no auth. The widest legitimate read is a 7d timeline at 15m
-// buckets: 672 buckets x 30 ttls x 6 sources x 2 addresses through a route
-// flap is ~242k rows, so 300k clears the real ceiling and truncates only
-// under the abuse it exists to bound.
-const maxHopRows = 300_000
+// maxHopRows bounds the rows one hop read buffers into a []storage.HopPoint;
+// hop_addr is slave-supplied text that widens queryHopsBucketed's GROUP BY per
+// distinct value, so an unauthenticated GET has no other ceiling.
+const maxHopRows = 485_280
+
+// hopRowCap is maxHopRows, lowered by tests so the refusal below can be driven
+// without materialising half a million rows.
+var hopRowCap = maxHopRows
 
 // hopRowLimit is appended to every hop query rather than declared per query,
-// so a new hop read cannot inherit the unbounded shape by omission.
-var hopRowLimit = fmt.Sprintf("\nLIMIT %d", maxHopRows)
+// so a new hop read cannot inherit the unbounded shape by omission. It asks
+// for one row past the cap so reaching it is distinguishable from ending on it.
+func hopRowLimit() string {
+	return fmt.Sprintf("\nLIMIT %d", hopRowCap+1)
+}
+
+// hopRowsWithinCap refuses a result that reached the cap instead of returning
+// its prefix. Hop reads order oldest-first, so a truncated path history is
+// missing its newest rows and reads as a probe that stopped — an
+// incident-shaped lie on the endpoint an operator opens during an incident.
+func hopRowsWithinCap(out []storage.HopPoint, err error) ([]storage.HopPoint, error) {
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > hopRowCap {
+		return nil, storage.ErrHopsTruncated
+	}
+	return out, nil
+}
 
 // maxFutureSkewSeconds mirrors the ingest ceiling on the read side. Rows a
 // slave wrote ahead of the master's clock before that bound existed are still
@@ -359,7 +375,7 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM latest)
-ORDER BY source, ttl` + hopRowLimit
+ORDER BY source, ttl` + hopRowLimit()
 	// args layout: CTE filter (target id+group, opt source, opt freshness), outer filter (target id+group, opt source).
 	args := []any{ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
@@ -403,7 +419,7 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM nearest)
-ORDER BY source, ttl` + hopRowLimit
+ORDER BY source, ttl` + hopRowLimit()
 	// args layout: CTE — `at` (the centre), target id+group, optional source, from, to;
 	//              outer — target id+group, optional source.
 	args := []any{at, ref.Target.Name, ref.Group}
@@ -453,7 +469,7 @@ func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 		p.Sent = int64(sent)
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	return hopRowsWithinCap(out, rows.Err())
 }
 
 func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.HopPoint, error) {
@@ -474,7 +490,7 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?
   AND timestamp >= ? AND timestamp < ?` + srcClause + `
-ORDER BY timestamp, ttl` + hopRowLimit
+ORDER BY timestamp, ttl` + hopRowLimit()
 	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
@@ -518,7 +534,7 @@ WHERE target_id = ?
   AND target_group = ?
   AND timestamp >= ? AND timestamp < ?%s
 GROUP BY bucket_ts, source, ttl, hop_addr
-ORDER BY bucket_ts, source, ttl%s`, int(step.Seconds()), srcClause, hopRowLimit)
+ORDER BY bucket_ts, source, ttl%s`, int(step.Seconds()), srcClause, hopRowLimit())
 	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
@@ -544,5 +560,5 @@ ORDER BY bucket_ts, source, ttl%s`, int(step.Seconds()), srcClause, hopRowLimit)
 		p.WorstTime = worstTs
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	return hopRowsWithinCap(out, rows.Err())
 }

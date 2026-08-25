@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -1739,5 +1740,63 @@ func TestIntegrationQueryLatestHopsIgnoresFutureRows(t *testing.T) {
 	}
 	if pts[0].IP != "honest" {
 		t.Fatalf("latest hop is %q, want the honest row — the future one is still served", pts[0].IP)
+	}
+}
+
+// The LIMIT that carries the cap is only ever exercised against a real server,
+// and the refusal has to fire on rows ClickHouse actually returned rather than
+// on a fake cursor. Cap lowered to 2 so the shape stays cheap.
+func TestIntegrationHopReadRefusesPastTheRowCap(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ref := config.TargetRef{Target: config.Target{Name: "cap"}, Group: "g"}
+	start := time.Now().UTC().Add(-time.Hour)
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: start, Target: ref, Source: "master", Sent: 1,
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.0.0.1", Sent: 1, RTTs: []time.Duration{time.Millisecond}},
+			{Index: 2, IP: "10.0.0.2", Sent: 1, RTTs: []time.Duration{time.Millisecond}},
+			{Index: 3, IP: "10.0.0.3", Sent: 1, RTTs: []time.Duration{time.Millisecond}},
+		},
+	})
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	orig := hopRowCap
+	hopRowCap = 2
+	t.Cleanup(func() { hopRowCap = orig })
+
+	if _, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
+		t.Fatalf("QueryLatestHops err = %v, want ErrHopsTruncated", err)
+	}
+	if _, err := r.QueryHopsTimeline(ctx, ref, start.Add(-time.Hour), start.Add(time.Hour), storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
+		t.Fatalf("QueryHopsTimeline raw err = %v, want ErrHopsTruncated", err)
+	}
+	if _, err := r.QueryHopsTimeline(ctx, ref, start.Add(-time.Hour), start.Add(time.Hour), storage.QueryFilter{Step: 15 * time.Minute}); !errors.Is(err, storage.ErrHopsTruncated) {
+		t.Fatalf("QueryHopsTimeline bucketed err = %v, want ErrHopsTruncated", err)
+	}
+
+	hopRowCap = 3
+	hops, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	if err != nil {
+		t.Fatalf("a result exactly at the cap was refused: %v", err)
+	}
+	if len(hops) != 3 {
+		t.Fatalf("got %d hops at the cap, want 3", len(hops))
 	}
 }
