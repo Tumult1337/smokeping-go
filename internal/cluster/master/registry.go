@@ -54,6 +54,7 @@ type Registry struct {
 	fullWarned bool
 
 	onChange func()
+	onRemove func(name string)
 }
 
 func NewRegistry(log *slog.Logger) *Registry {
@@ -73,6 +74,16 @@ func (r *Registry) SetOnChange(fn func()) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onChange = fn
+}
+
+// SetOnRemove registers a callback fired once per name Sweep drops, so state
+// keyed on a slave name elsewhere in the master is released with the entry
+// that authorised it rather than outliving it. Called with the registry lock
+// released, like SetOnChange's.
+func (r *Registry) SetOnRemove(fn func(name string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onRemove = fn
 }
 
 // SetPins installs the optional name→address allowlist. A pinned slave that
@@ -286,6 +297,7 @@ func (r *Registry) Sweep(age time.Duration) {
 	cutoff := time.Now().Add(-age)
 	r.mu.Lock()
 	changed := false
+	var removed []string
 	for name, info := range r.slaves {
 		if !info.LastSeen.Before(cutoff) {
 			continue
@@ -297,13 +309,19 @@ func (r *Registry) Sweep(age time.Duration) {
 			changed = true
 		}
 		delete(r.slaves, name)
+		removed = append(removed, name)
 	}
 	if len(r.slaves) < maxRegisteredSlaves {
 		r.fullWarned = false
 	}
-	onChange := r.onChange
+	onChange, onRemove := r.onChange, r.onRemove
 	r.mu.Unlock()
 
+	if onRemove != nil {
+		for _, name := range removed {
+			onRemove(name)
+		}
+	}
 	if changed && onChange != nil {
 		onChange()
 	}

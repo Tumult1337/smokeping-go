@@ -369,3 +369,137 @@ func TestForgetOnAMissingWindowIsANoop(t *testing.T) {
 		t.Error("identity was refused after a forget that recorded nothing")
 	}
 }
+
+// A window whose source the registry has swept is dead state: ingest refuses a
+// name the registry does not hold, so nothing will ever consult it again, and
+// leaving it in place lets it hold a slot a live source needs.
+func TestSweepDropsTheDedupWindowWithTheRegistryEntry(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	store := config.NewStore("", &config.Config{
+		Cluster: &config.Cluster{Token: "tok"},
+		Targets: []config.Group{{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}}},
+	})
+	reg := NewRegistry(log)
+	srv := NewServer(log, store, reg, &recordingSink{}, nil)
+	reg.Touch("edge-1", "", "", "")
+
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{{
+		Time: time.Now().UTC(), Group: "g", Name: "t", Sent: 5,
+	}}}
+	if n, _ := srv.ingestBatch(nil, batch); n != 1 {
+		t.Fatalf("first ingest accepted %d, want 1", n)
+	}
+	if _, ok := srv.dedup.bySource["edge-1"]; !ok {
+		t.Fatal("no window for the ingesting source")
+	}
+
+	reg.Sweep(0)
+	if reg.Has("edge-1") {
+		t.Fatal("registry kept the swept entry")
+	}
+	if _, ok := srv.dedup.bySource["edge-1"]; ok {
+		t.Error("dedup window outlived the registry entry it belongs to")
+	}
+}
+
+// Eviction at capacity picks by last ingest, so a live source that is merely
+// between pushes was a legal victim while a swept, permanently dead one kept
+// its slot. The dead window has no reader left; the live one is still holding
+// off a double-write.
+func TestEvictionPrefersASourceTheRegistryNoLongerHolds(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	reg := NewRegistry(log)
+	store := config.NewStore("", &config.Config{Cluster: &config.Cluster{Token: "tok"}})
+	d := NewServer(log, store, reg, &recordingSink{}, nil).dedup
+
+	for i := range dedupMaxSources - 1 {
+		name := fmt.Sprintf("edge-%d", i)
+		reg.Touch(name, "", "", "")
+		d.admit(name, "g/t", 1)
+	}
+	// Most recently used of them all, and no longer in the registry.
+	d.admit("swept", "g/t", 1)
+	if len(d.bySource) != dedupMaxSources {
+		t.Fatalf("seeded %d windows, want %d", len(d.bySource), dedupMaxSources)
+	}
+
+	reg.Touch("newcomer", "", "", "")
+	d.admit("newcomer", "g/t", 1)
+
+	if _, ok := d.bySource["swept"]; ok {
+		t.Error("kept the window of a source the registry does not hold")
+	}
+	if _, ok := d.bySource["edge-0"]; !ok {
+		t.Error("evicted a registered source ahead of an unregistered one")
+	}
+}
+
+// With every window's source registered there is no dead candidate, and the
+// admission must still make room rather than refuse the newcomer.
+func TestEvictionFallsBackToLRUWhenEverySourceIsLive(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	reg := NewRegistry(log)
+	store := config.NewStore("", &config.Config{Cluster: &config.Cluster{Token: "tok"}})
+	d := NewServer(log, store, reg, &recordingSink{}, nil).dedup
+
+	for i := range dedupMaxSources {
+		name := fmt.Sprintf("edge-%d", i)
+		reg.Touch(name, "", "", "")
+		d.admit(name, "g/t", 1)
+	}
+	reg.Touch("newcomer", "", "", "")
+	if !d.admit("newcomer", "g/t", 1) {
+		t.Fatal("newcomer was refused a window")
+	}
+	if len(d.bySource) != dedupMaxSources {
+		t.Errorf("holding %d windows, want the %d cap", len(d.bySource), dedupMaxSources)
+	}
+	if _, ok := d.bySource["edge-0"]; ok {
+		t.Error("kept the least recently used window instead of evicting it")
+	}
+	if _, ok := d.bySource["newcomer"]; !ok {
+		t.Error("newcomer got no window")
+	}
+}
+
+// Sweep takes the registry lock and then the dedup's; admit takes the dedup's
+// and then the registry's. The two must not be able to meet in the middle.
+func TestSweepAndIngestDoNotDeadlock(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	store := config.NewStore("", &config.Config{
+		Cluster: &config.Cluster{Token: "tok"},
+		Targets: []config.Group{{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}}},
+	})
+	reg := NewRegistry(log)
+	srv := NewServer(log, store, reg, &recordingSink{}, nil)
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := fmt.Sprintf("edge-%d", i)
+			for n := range 200 {
+				reg.Touch(name, "", "", "")
+				srv.ingestBatch(nil, cluster.CycleBatch{Source: name, Cycles: []cluster.CyclePayload{{
+					Time: time.Unix(0, int64(n)).UTC(), Group: "g", Name: "t", Sent: 5,
+				}}})
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			reg.Sweep(0)
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("sweep and ingest deadlocked")
+	}
+}

@@ -59,13 +59,19 @@ func (s *Server) currentToken() string {
 // slaves register, but the Server is constructed once at startup. Pass nil
 // for standalone tests and deployments with no health mesh wired.
 func NewServer(log *slog.Logger, store *config.Store, registry *Registry, sink scheduler.Sink, health func() *slavehealth.Set) *Server {
+	dedup := newCycleDedup()
+	// The registry is the list of names ingest will accept, so it is also the
+	// lifecycle a dedup window follows: swept names lose theirs, and eviction
+	// spends a dead window before a live one's.
+	dedup.registered = registry.Has
+	registry.SetOnRemove(dedup.forgetSource)
 	return &Server{
 		log:      log,
 		store:    store,
 		registry: registry,
 		sink:     sink,
 		health:   health,
-		dedup:    newCycleDedup(),
+		dedup:    dedup,
 	}
 }
 

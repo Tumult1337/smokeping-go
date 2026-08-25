@@ -624,6 +624,18 @@ Key points a reader can't derive from a single file:
   that cost scale with distinct targets rather than with cycle rate; without
   it the one-target case measured 341.4 MB.
 
+  **A window's lifecycle is its registry entry's.** `Registry.Sweep` releases
+  the name and, through `SetOnRemove`, the window with it: ingest refuses a
+  name the registry does not hold, so the window has no reader left and only
+  holds a slot. Eviction reads the same coupling in the other direction —
+  `evictLRU` spends a window whose source the registry no longer holds before
+  any live one's, because last-ingest order alone made a source that was
+  merely between pushes a legal victim while a swept, permanently dead one
+  kept its slot. With no dead candidate it falls back to plain LRU; it never
+  refuses the newcomer. `admit` calls `Registry.Has` under the dedup lock and
+  `Sweep` calls `forgetSource` with the registry lock already released, which
+  is the order that keeps the two from meeting in the middle.
+
   **Both eviction paths fail open.** Past the window, and past
   `dedupMaxSources` where the least recently used window is dropped, the
   affected source degrades to the pre-guard double-write — never to silence.

@@ -79,6 +79,11 @@ type cycleDedup struct {
 	mu       sync.Mutex
 	clock    uint64
 	bySource map[string]*sourceWindow
+	// registered reports whether a source is still one the registry holds, so
+	// eviction spends a window whose source is gone before one that is merely
+	// between pushes. Nil in unit tests, where no registry is coupled and
+	// eviction is plain LRU.
+	registered func(string) bool
 }
 
 func newCycleDedup() *cycleDedup {
@@ -116,18 +121,33 @@ func (d *cycleDedup) forget(source, target string, nano int64) {
 	delete(w.seen, cycleID{target: target, nano: nano})
 }
 
-// evictLRU drops the least recently used window. Reached only past
-// dedupMaxSources distinct names, which the registry's own ceiling makes
-// transient; the evicted source degrades to the pre-guard behaviour rather
-// than losing data. Must be called with d.mu held.
+// forgetSource drops a window whose source the registry has released. Ingest
+// refuses a name the registry does not hold, so nothing consults it again.
+func (d *cycleDedup) forgetSource(source string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.bySource, source)
+}
+
+// evictLRU drops a window to make room, preferring one whose source the
+// registry no longer holds and falling back to the least recently used —
+// eviction never refuses the newcomer. Reached only past dedupMaxSources
+// distinct names, which the registry's own ceiling makes transient; the
+// evicted source degrades to the pre-guard behaviour rather than losing data.
+// Must be called with d.mu held.
 func (d *cycleDedup) evictLRU() {
 	var victim string
 	var oldest uint64
-	found := false
+	var victimDead, found bool
 	for name, w := range d.bySource {
-		if !found || w.used < oldest {
-			victim, oldest, found = name, w.used, true
+		dead := d.registered != nil && !d.registered(name)
+		switch {
+		case !found, dead && !victimDead:
+		case dead == victimDead && w.used < oldest:
+		default:
+			continue
 		}
+		victim, oldest, victimDead, found = name, w.used, dead, true
 	}
 	if found {
 		delete(d.bySource, victim)
