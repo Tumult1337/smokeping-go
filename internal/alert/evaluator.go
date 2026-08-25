@@ -78,11 +78,12 @@ type alertState struct {
 	// lastCycle is the timestamp of the last cycle accepted for this source,
 	// and the identity a replay is recognised by: (target, source, timestamp)
 	// identifies one measurement in storage too, so the alert path reads the
-	// same tuple rather than inventing a second one — it does not dedupe the
-	// storage write, which still lands twice on a redelivery. A
-	// requeue after a lost ack redelivers the same measurement, which
-	// incremented consecHits twice and fired a sustained:2 alert off one bad
-	// cycle; an older healthy batch delivered late cleared a newer firing one.
+	// same tuple rather than inventing a second one. It is a floor, not a set,
+	// which is the concern master.cycleDedup does not cover: an older healthy
+	// batch delivered late is a distinct measurement that must be stored and
+	// must not clear a newer firing state. A requeue after a lost ack
+	// redelivers the same measurement, which incremented consecHits twice and
+	// fired a sustained:2 alert off one bad cycle.
 	lastCycle time.Time
 }
 

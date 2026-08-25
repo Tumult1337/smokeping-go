@@ -560,6 +560,89 @@ Key points a reader can't derive from a single file:
   (`isRefusal`, the one place a new semantic sentinel is declared).
   `maxCycleCounterKeys` (1024) bounds the same read's counters lookup.
 
+- **Ingest is idempotent; local probing needs no guard.** Cluster delivery
+  is at-least-once — `PushSink.Requeue` resends any batch whose ack was lost
+  to a 5xx or a network error — and all four tables are plain `MergeTree`
+  (`ReplicatedMergeTree` in CH-cluster mode), neither of which deduplicates.
+  A redelivered batch therefore doubled `sum(sent)`, `sum(lost)`, the
+  `quantilesExactWeighted` weights and every hop counter, so a blip between
+  slave and master silently inflated the loss percentages an operator reads.
+  `master.cycleDedup` (`internal/cluster/master/dedup.go`) sits in
+  `ingestBatch`, **upstream of the fanout**, so the writer and the alert
+  evaluator are covered by one check rather than one each. Scoping it to the
+  cluster path is deliberate: a locally probed cycle reaches the fanout once
+  with no retry path behind it, so a guard there would add a window with
+  nothing to catch.
+
+  **Identity is `(source, group, name, timestamp)`.** `source` is the map
+  level above, and it is the authenticated `X-Slave-Name` `ingestBatch`
+  already pins — so two slaves probing one host keep both rows, and no slave
+  can spend another's window. `group` is in it for the same reason it is in
+  every query: `core-backbone/frankfurt` and `retn/frankfurt` are two
+  targets. The reserved `_cluster` health group needs no special case — the
+  target there is the *probed* slave and the source is the *probing* one, so
+  a full mesh is N distinct identities per timestamp. Dedup runs **after**
+  target resolution, so a stale slave's unresolvable targets cannot spend the
+  window a live one needs.
+
+  **A window, never a high-water mark.** A backlog delivered after an outage
+  carries timestamps older than rows already stored and every one of them is a
+  real measurement, so the guard is set membership over recent identities.
+  Ordering is the alert evaluator's `lastCycle` floor, which is why that guard
+  stays.
+
+  **The bound is one batch, because one batch is what gets redelivered.**
+  `Requeue` puts a failed batch back at the ring's *head* and `Drain` reads
+  head-first, so the redelivery is the same cycles, ahead of anything newer;
+  the largest one this master accepts is `cluster.MaxCyclesPerBatch` (1024),
+  which is therefore `dedupWindowPerSource` exactly. `dedupMaxSources` is
+  `maxRegisteredSlaves` (512), because ingest refuses a name the registry
+  does not hold, so the registry's ceiling *is* the number of live windows.
+  Measured resident cost at 512 × 1024 entries: 53.7 MB against one target,
+  109.5 MB against 1024 distinct ordinary targets, 381.5 MB in the
+  pathological case of 1024 targets whose group and name are both
+  `config.MaxLabelLen`; the deployed 6-source shape is 0.6 MB. Target keys
+  are interned per window — bounded by `dedupWindowPerSource`, since an
+  N-entry window references at most N distinct keys — which is what makes
+  that cost scale with distinct targets rather than with cycle rate; without
+  it the one-target case measured 341.4 MB.
+
+  **Both eviction paths fail open.** Past the window, and past
+  `dedupMaxSources` where the least recently used window is dropped, the
+  affected source degrades to the pre-guard double-write — never to silence.
+  A guard that muted a peer would be worse than the defect it closes.
+
+  **Residual: a batch in flight across a master restart still double-writes.**
+  The window is in-memory, like the registry and the alert state, so a restart
+  empties it and one redelivery per source lands twice. That is bounded — at
+  most `MaxCyclesPerBatch` cycles per source per restart, against the status
+  quo of every lost ack forever — and closing it means persisting state the
+  master otherwise keeps none of. Two smaller residuals ride with it: a row
+  the writer drops on channel overflow (counted as `writer_drops`) is no
+  longer refilled by a later redelivery, and neither is one lost to a sink
+  panic the fanout recovers. Neither was ever a designed property.
+
+  **The ClickHouse-native options were evaluated and rejected.**
+  `insert_deduplication_token` with `non_replicated_deduplication_window`
+  deduplicates *insert blocks*, and the writer's four per-table flushers batch
+  rows from many cycles and many sources on their own `max_rows`/interval
+  cadence — a redelivered batch's rows land in a differently composed block,
+  so no token can be 1:1 with a pushed batch. `ReplacingMergeTree` collapses
+  on the sorting key, and two of the four sorting keys are not unique per row:
+  `probe_cycle` orders by `(target_id, source, timestamp)` with no
+  `target_group`, so it would merge the two `frankfurt` targets the group
+  predicate exists to separate, and `probe_hop` orders by
+  `(..., timestamp, ttl)` while rows are per `(ttl, responder)`, so it would
+  collapse ECMP siblings. Fixing that means re-keying, which ClickHouse
+  refuses on a key column, so it means rebuilding all four tables — and reads
+  before a merge still see duplicates without `FINAL` on every query. An
+  application guard is both cheaper and correct earlier.
+
+  The ack now carries `{"accepted": n, "duplicate": d}` and the master logs
+  `cluster ingest skipped redelivered cycles` when `d > 0`, at most one line
+  per push: sustained duplicates mean acks are being lost between the peers,
+  which is a link fault rather than a slave fault.
+
 - **Slave push buffer + auth:** `slave.PushSink` is a fixed 600-cycle
   ring with drop-oldest on overflow; a failed push `Requeue`s on 5xx /
   network errors and drops on 404 (master lost state; next /register
@@ -742,10 +825,13 @@ Key points a reader can't derive from a single file:
   two fields rather than one because `lastCycle`'s zero value would
   otherwise mean *admit*, and any producer stamping nothing would disable
   the guard for its source forever. The timestamp is the
-  `(target, source, timestamp)` tuple that *identifies* one measurement — it
-  does not deduplicate one: all four tables are plain `MergeTree`, so a
-  redelivered batch still writes duplicate rows that double-count in every
-  bucketed `sum(sent)`, and this guard covers alerting only.
+  `(target, source, timestamp)` tuple that *identifies* one measurement, the
+  same tuple `master.cycleDedup` keys on. That one does not make this one
+  redundant: it is a set and this is a floor, and they disagree exactly where
+  it matters — an unseen *older* cycle is a real measurement ingest must store
+  and alerting must not apply, so ingest admits it and this skips it. This is
+  also the only guard on the local probe path, which never reaches ingest, and
+  the one that still holds past `dedupWindowPerSource`.
   A non-increasing cycle is skipped **before** any state mutation and
   before `lastSeen`. `PushSink.Requeue` resends a batch on any 5xx or network
   error, so a lost ack redelivers the same measurement: applied twice it
