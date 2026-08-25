@@ -14,6 +14,9 @@ internal/ui/dist/*
 .DS_Store
 .playwright-mcp/
 .claude/
+# Skills are shared project rules like CLAUDE.md; local settings are not.
+!.claude/skills/
+!.claude/skills/**
 .worktrees/
 todo.md
 docs/superpowers/
