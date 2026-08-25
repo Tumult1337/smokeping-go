@@ -100,9 +100,12 @@ func PickHopStep(span, interval time.Duration) time.Duration {
 		step = 5 * time.Minute
 	}
 	if interval > step {
-		// Whole seconds, the unit the query renders; flooring a value already
-		// above a whole-second step cannot land under it.
+		// Whole seconds is the unit the query renders, and rounding up rather
+		// than down is what keeps the step from landing back under the cadence.
 		step = interval.Truncate(time.Second)
+		if step < interval {
+			step += time.Second
+		}
 	}
 	return step
 }

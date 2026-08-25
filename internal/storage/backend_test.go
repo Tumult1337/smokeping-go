@@ -35,13 +35,16 @@ func TestPickHopStep(t *testing.T) {
 		interval time.Duration
 		want     time.Duration
 	}{
-		{time.Hour, time.Second, MinHopStep},                    // finest tier
-		{2 * time.Hour, time.Second, MinHopStep},                // finest tier (boundary)
-		{time.Hour, 30 * time.Millisecond, MinHopStep},          // the one-hop mtr rate that overran the raw cap
-		{time.Hour, 20 * time.Second, 20 * time.Second},         // never finer than the cadence
-		{2 * time.Hour, 5 * time.Minute, 5 * time.Minute},       // the default interval
-		{time.Hour, 20500 * time.Millisecond, 20 * time.Second}, // whole seconds, the unit the query renders
-		{3 * time.Hour, time.Second, 5 * time.Minute},           // 5m tier
+		{time.Hour, time.Second, MinHopStep},                                                  // finest tier
+		{2 * time.Hour, time.Second, MinHopStep},                                              // finest tier (boundary)
+		{time.Hour, 30 * time.Millisecond, MinHopStep},                                        // the one-hop mtr rate that overran the raw cap
+		{time.Hour, 20 * time.Second, 20 * time.Second},                                       // never finer than the cadence
+		{2 * time.Hour, 5 * time.Minute, 5 * time.Minute},                                     // the default interval
+		{time.Hour, 20500 * time.Millisecond, 21 * time.Second},                               // whole seconds, rounded up so no slot outruns the cadence
+		{3 * time.Hour, 5*time.Minute + 500*time.Millisecond, 5*time.Minute + time.Second},    // 5m tier, fractional
+		{25 * time.Hour, 15*time.Minute + 500*time.Millisecond, 15*time.Minute + time.Second}, // 15m tier, fractional
+		{time.Hour, 11500 * time.Millisecond, 12 * time.Second},                               // just past the finest tier
+		{3 * time.Hour, time.Second, 5 * time.Minute},                                         // 5m tier
 		{24 * time.Hour, time.Second, 5 * time.Minute},
 		{24 * time.Hour, 10 * time.Minute, 10 * time.Minute},
 		{25 * time.Hour, time.Second, 15 * time.Minute},
@@ -63,6 +66,29 @@ func TestPickHopStepNeverReturnsARawGrid(t *testing.T) {
 		for _, interval := range intervals {
 			if got := PickHopStep(span, interval); got < MinHopStep {
 				t.Fatalf("span=%v interval=%v: step %v under the %v floor", span, interval, got, MinHopStep)
+			}
+		}
+	}
+}
+
+// A step below the probe interval leaves slots no cycle can fill, which the
+// heatmap draws as a stopped probe.
+func TestPickHopStepNeverRunsAheadOfTheCadence(t *testing.T) {
+	intervals := []time.Duration{
+		time.Millisecond, 30 * time.Millisecond, time.Second,
+		20 * time.Second, 20500 * time.Millisecond,
+		5*time.Minute + 500*time.Millisecond,
+		15*time.Minute + 500*time.Millisecond,
+		time.Hour + time.Nanosecond,
+	}
+	for span := time.Minute; span <= MaxHopTimelineWindow; span += 71 * time.Minute {
+		for _, interval := range intervals {
+			step := PickHopStep(span, interval)
+			if step < interval {
+				t.Fatalf("span=%v interval=%v: step %v is finer than the cadence", span, interval, step)
+			}
+			if step%time.Second != 0 {
+				t.Fatalf("span=%v interval=%v: step %v is not whole seconds", span, interval, step)
 			}
 		}
 	}
