@@ -135,9 +135,16 @@ func (d *cycleDedup) forget(source, target string, nano int64) {
 
 // forgetSource drops a window whose source the registry has released. Ingest
 // refuses a name the registry does not hold, so nothing consults it again.
+// Sweep captures the name and releases the registry lock before calling this,
+// so the membership is re-read here: a re-registration that landed in that gap
+// owns the window now, and dropping it would refuse nothing and remember
+// nothing.
 func (d *cycleDedup) forgetSource(source string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.registered != nil && d.registered(source) {
+		return
+	}
 	delete(d.bySource, source)
 }
 

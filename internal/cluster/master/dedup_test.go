@@ -566,3 +566,45 @@ func TestReleasedSlotsKeepTheWindowBounded(t *testing.T) {
 		t.Errorf("intern table holds %d keys, over the window", len(w.names))
 	}
 }
+
+// Sweep drops the registry entry, releases the lock, and only then runs the
+// callback. A re-registration that lands in that gap re-establishes the
+// window, and the late callback must not take it with it.
+func TestStaleRemovalKeepsAReestablishedWindow(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	store := config.NewStore("", &config.Config{
+		Cluster: &config.Cluster{Token: "tok"},
+		Targets: []config.Group{{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}}},
+	})
+	reg := NewRegistry(log)
+	srv := NewServer(log, store, reg, &recordingSink{}, nil)
+
+	reg.Touch("edge-1", "", "", "")
+	reg.Sweep(0)
+
+	// The slave re-registers and pushes before the removal Sweep captured runs.
+	reg.Touch("edge-1", "", "", "")
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{{
+		Time: time.Now().UTC(), Group: "g", Name: "t", Sent: 5,
+	}}}
+	if n, _ := srv.ingestBatch(nil, batch); n != 1 {
+		t.Fatalf("first push after re-registration accepted %d, want 1", n)
+	}
+
+	srv.dedup.forgetSource("edge-1")
+
+	if n, dup := srv.ingestBatch(nil, batch); n != 0 || dup != 1 {
+		t.Errorf("redelivery: accepted=%d duplicate=%d, want 0/1; a stale removal erased the live window", n, dup)
+	}
+}
+
+// An uncoupled dedup has no membership to re-read, so its removal stays
+// unconditional rather than dereferencing a nil check.
+func TestForgetSourceWithoutARegistryDropsTheWindow(t *testing.T) {
+	d := newCycleDedup()
+	d.admit("edge-1", "g/t", 1)
+	d.forgetSource("edge-1")
+	if _, ok := d.bySource["edge-1"]; ok {
+		t.Error("window survived a removal with no registry coupled")
+	}
+}

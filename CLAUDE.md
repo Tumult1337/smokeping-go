@@ -646,7 +646,11 @@ Key points a reader can't derive from a single file:
   kept its slot. With no dead candidate it falls back to plain LRU; it never
   refuses the newcomer. `admit` calls `Registry.Has` under the dedup lock and
   `Sweep` calls `forgetSource` with the registry lock already released, which
-  is the order that keeps the two from meeting in the middle.
+  is the order that keeps the two from meeting in the middle. That release is
+  also a gap a re-registration fits through, so `forgetSource` re-reads
+  membership under the dedup lock rather than trusting the name `Sweep`
+  captured: the removal is stale exactly when the slave came back, and
+  applying it would erase a window that is already refusing redeliveries.
 
   **Both eviction paths fail open.** Past the window, and past
   `dedupMaxSources` where the least recently used window is dropped, the
