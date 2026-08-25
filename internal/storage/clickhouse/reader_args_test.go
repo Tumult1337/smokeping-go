@@ -100,3 +100,86 @@ func TestReaderQueryPlaceholdersMatchArgs(t *testing.T) {
 		}
 	}
 }
+
+// orderByLead returns the first column of the query's last ORDER BY clause.
+func orderByLead(query string) string {
+	i := strings.LastIndex(query, "ORDER BY ")
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(query[i+len("ORDER BY "):])
+	for _, cut := range []string{",", " ", "\n", "`"} {
+		if j := strings.Index(rest, cut); j >= 0 {
+			rest = rest[:j]
+		}
+	}
+	return rest
+}
+
+// The charts consume row order straight from the server: ui/src/chartUtils.ts
+// normalizes each point's timestamp once and the series builders preserve the
+// response order rather than re-sorting. A read that lost its ORDER BY, or
+// gained a UNION that dissolves it, would draw a scribble instead of a line,
+// and no unit test reaches that path without a live server.
+func TestReaderQueriesOrderForTheirConsumer(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+
+	// Time-series reads must lead on time; the hop snapshot reads pin one
+	// instant per source, so their consumer relies on (source, ttl) instead.
+	cases := []struct {
+		name  string
+		call  func(*Reader, storage.QueryFilter) error
+		leads []string
+	}{
+		{"QueryCycles", func(r *Reader, f storage.QueryFilter) error {
+			_, err := r.QueryCycles(context.Background(), ref, from, to, f)
+			return err
+		}, []string{"timestamp", "bucket_ts"}},
+		{"QueryRTTs", func(r *Reader, f storage.QueryFilter) error {
+			_, err := r.QueryRTTs(context.Background(), ref, from, to, f)
+			return err
+		}, []string{"timestamp"}},
+		{"QueryHTTPSamples", func(r *Reader, f storage.QueryFilter) error {
+			_, err := r.QueryHTTPSamples(context.Background(), ref, from, to, f)
+			return err
+		}, []string{"timestamp"}},
+		{"QueryHopsTimeline", func(r *Reader, f storage.QueryFilter) error {
+			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, f)
+			return err
+		}, []string{"timestamp", "bucket_ts"}},
+		{"QueryLatestHops", func(r *Reader, f storage.QueryFilter) error {
+			_, err := r.QueryLatestHops(context.Background(), ref, f)
+			return err
+		}, []string{"source"}},
+		{"QueryHopsAt", func(r *Reader, f storage.QueryFilter) error {
+			_, err := r.QueryHopsAt(context.Background(), ref, from, 30*time.Minute, f)
+			return err
+		}, []string{"source"}},
+	}
+
+	for _, tc := range cases {
+		for fname, f := range map[string]storage.QueryFilter{
+			"raw":      {},
+			"bucketed": {Step: time.Hour},
+		} {
+			t.Run(tc.name+"/"+fname, func(t *testing.T) {
+				conn := &recordConn{}
+				if err := tc.call(&Reader{conn: conn}, f); err != nil {
+					t.Fatalf("%s: %v", tc.name, err)
+				}
+				lead := orderByLead(conn.query)
+				if lead == "" {
+					t.Fatalf("%s: query has no ORDER BY:%s", tc.name, conn.query)
+				}
+				for _, want := range tc.leads {
+					if lead == want {
+						return
+					}
+				}
+				t.Fatalf("%s: ORDER BY leads on %q, want one of %v:%s", tc.name, lead, tc.leads, conn.query)
+			})
+		}
+	}
+}
