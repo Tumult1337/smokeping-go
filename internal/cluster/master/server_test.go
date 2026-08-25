@@ -156,10 +156,14 @@ func TestIngestBatchOverridesForgedPerCycleSource(t *testing.T) {
 	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, nil)
 	srv.registry.Touch("frankfurt-1", "", "", "")
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	// Distinct timestamps because (source, group, name, timestamp) is one
+	// measurement: same-stamped cycles are one identity and the ingest dedup
+	// collapses them, which would hide the second forged source from this test.
+	now := time.Now().UTC()
+	first, second := now.Format(time.RFC3339Nano), now.Add(-time.Second).Format(time.RFC3339Nano)
 	body := `{"source":"frankfurt-1","cycles":[` +
-		`{"group":"g","name":"t","probe":"icmp","source":"master","time":"` + now + `","sent":5,"loss_count":0},` +
-		`{"group":"g","name":"t","probe":"icmp","source":"tokyo-1","time":"` + now + `","sent":5,"loss_count":0}` +
+		`{"group":"g","name":"t","probe":"icmp","source":"master","time":"` + first + `","sent":5,"loss_count":0},` +
+		`{"group":"g","name":"t","probe":"icmp","source":"tokyo-1","time":"` + second + `","sent":5,"loss_count":0}` +
 		`]}`
 	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
 	req.Header.Set("Authorization", "Bearer tok")

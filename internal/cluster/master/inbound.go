@@ -10,11 +10,11 @@ import (
 )
 
 // ingestBatch turns each wire-format CyclePayload back into a scheduler.Cycle
-// and feeds it through the master's sink. Returns the number of accepted
-// cycles; silently drops any whose group/name no longer resolves (stale slave
-// config vs. fresh master config). That's acceptable — the slave will refresh
-// and stop sending within 60s.
-func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) int {
+// and feeds it through the master's sink. Returns the number of cycles ingested
+// and the number recognised as redeliveries; silently drops any whose
+// group/name no longer resolves (stale slave config vs. fresh master config).
+// That's acceptable — the slave will refresh and stop sending within 60s.
+func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, int) {
 	cfg := s.store.Current()
 	targets := make(map[string]config.Target, len(cfg.AllTargets()))
 	for _, t := range cfg.AllTargets() {
@@ -42,7 +42,7 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) int {
 	sinkCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	accepted := 0
+	accepted, duplicates := 0, 0
 	for _, p := range batch.Cycles {
 		key := p.Group + "/" + p.Name
 		target, ok := targets[key]
@@ -64,9 +64,18 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) int {
 		// names its probe, so the wire value is discarded for the same reason
 		// Source is: it is free text a token holder chooses.
 		p.ProbeName = target.Probe
+		// Delivery is at-least-once — PushSink.Requeue resends a batch whose
+		// ack was lost — and every storage table is a plain MergeTree that
+		// keeps both copies, so a redelivery doubles sum(sent) and every loss
+		// percentage derived from it. Guarding here rather than in a sink puts
+		// one check upstream of the whole fanout.
+		if !s.dedup.admit(batch.Source, key, p.Time.UnixNano()) {
+			duplicates++
+			continue
+		}
 		cycle := p.ToCycle(target)
 		s.sink.OnCycle(sinkCtx, cycle)
 		accepted++
 	}
-	return accepted
+	return accepted, duplicates
 }

@@ -35,6 +35,7 @@ type Server struct {
 	registry *Registry
 	sink     scheduler.Sink
 	health   func() *slavehealth.Set
+	dedup    *cycleDedup
 }
 
 // currentToken returns the bearer secret the master accepts right now. It is
@@ -64,6 +65,7 @@ func NewServer(log *slog.Logger, store *config.Store, registry *Registry, sink s
 		registry: registry,
 		sink:     sink,
 		health:   health,
+		dedup:    newCycleDedup(),
 	}
 }
 
@@ -194,8 +196,14 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.registry.Touch(name, version, r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
 	batch.Source = name
-	n := s.ingestBatch(r, batch)
-	writeJSON(w, http.StatusOK, map[string]any{"accepted": n})
+	n, dup := s.ingestBatch(r, batch)
+	if dup > 0 {
+		// At most one line per push, so the rate is the slave's flush cadence:
+		// sustained duplicates mean acks are being lost between the two peers.
+		s.log.Info("cluster ingest skipped redelivered cycles",
+			"slave", name, "duplicates", dup, "accepted", n)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"accepted": n, "duplicate": dup})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
