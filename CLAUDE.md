@@ -924,7 +924,7 @@ Key points a reader can't derive from a single file:
   set at all, so the slice stays nil for every source whose clock is not
   ahead. It is bounded by `aheadCap` — the skew plus one `alertFreshness`
   window, over which an honest producer emits one cycle per interval per
-  target, so 11 entries at the 1m interval and 31 at 20s — floored at
+  target, so 11 entries at the 1m interval and 31 at 20s — capped at
   `min(derived, aheadCeiling)`, because config bounds no interval from below
   and the derivation alone asks for ~6e11 int64 at a 1ns schedule, which
   `slices.Contains` and `slices.DeleteFunc` then walk per cycle.
