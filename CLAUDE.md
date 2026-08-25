@@ -446,6 +446,23 @@ Key points a reader can't derive from a single file:
   compares on. Text that fails to parse becomes `""` there as well —
   fail-closed if a future caller reaches `ToCycle` without `Validate`.
 
+  **Parsing is not bounding.** `netip.ParseAddr` accepts a zone of any
+  length, so `fe80::1%<90 MiB of unique text>` was a hop `ip` that parsed,
+  canonicalized and landed in `hop_addr` — the leaf attack the paragraph
+  above closed, reconstructed through the one field that looked already
+  validated. `parseHopAddr` is now the single reading both `validate` and
+  `ToCycle` take: `MaxHopAddrLen` (302) bounds the whole encoded value
+  *before* `ParseAddr` sees it, and a zone must be shaped like the interface
+  name or decimal index Go fills one from — `MaxHopZoneLen` (256, the widest
+  interface name any supported platform reports: `IFNAMSIZ`−1 = 15 on Linux,
+  macOS and the BSDs, `IF_MAX_STRING_SIZE` = 256 on Windows, against 10
+  digits for an `int32` index) and no ASCII control byte, `%` or `/` — the
+  characters no OS can name an interface and that RFC 6874 requires escaping
+  in this same text form. `MaxHopAddrLen` is that ceiling plus RFC 4291
+  §2.2 form 3, the longest textual address `ParseAddr` accepts (45 bytes).
+  `fe80::1%eth0` and `fe80::1%3` both still pass, which is the point: a
+  refused hop address is a refused batch.
+
   **The hop bound is derived from the producer, not picked.**
   `config.MaxHopRowsPerCycle` = `MaxTraceRounds` (10) × `MaxTraceTTL` (30)
   = 300 is `walkRounds`' exact ceiling — one row per (ttl, distinct

@@ -68,6 +68,19 @@ Two operator-visible consequences:
   longer counts twice toward `sustained`. A producer whose clock steps
   backwards is logged the same way with `reason=duplicate_cycle`.
 
+## Hop addresses are bounded whole, zone included
+
+`netip.ParseAddr` accepts a zone of any length, so a registered slave could put
+`fe80::1%<megabytes of text>` in a hop's `ip` and have it stored in
+`probe_hop.hop_addr` and served by an unauthenticated `/hops`. Ingest now
+bounds the complete encoded address at 302 bytes and requires a zone to be
+shaped like an interface name or index. Real link-local hops
+(`fe80::1%eth0`, `fe80::1%3`) are unaffected.
+
+Rows written before this release are not rewritten. If you suspect one was
+planted, `probe_hop` rows outlive only their TTL, so either wait it out or
+delete by `length(hop_addr) > 302` in ClickHouse.
+
 ## An interval above one hour is now refused at load
 
 `interval` is capped at `config.MaxProbeInterval` (1h). A cycle runs under a

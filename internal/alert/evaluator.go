@@ -288,7 +288,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		// Before any mutation, and before lastSeen: a source that only ever
 		// replays must age out of the quorum denominator rather than vote.
 		if !st.lastCycle.IsZero() && !cy.Time.After(st.lastCycle) {
-			skipped = append(skipped, cy.Time.Sub(st.lastCycle))
+			skipped = append(skipped, st.lastCycle.Sub(cy.Time))
 			continue
 		}
 		st.lastCycle = cy.Time
@@ -382,7 +382,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	e.mu.Unlock()
 
 	if len(skipped) > 0 {
-		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Min(skipped))
+		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
 	}
 
 	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
