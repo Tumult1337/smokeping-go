@@ -21,7 +21,7 @@ import (
 // traceFunc matches traceHops' signature. Injected on ICMP so tests can
 // substitute a spy and assert the noTrace gate actually calls (or doesn't
 // call) tracing — without needing CAP_NET_RAW.
-type traceFunc func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error)
+type traceFunc func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error)
 
 // The TTL walk's default bounds, named so the sequence space it reserves is
 // derived in one place rather than restated.

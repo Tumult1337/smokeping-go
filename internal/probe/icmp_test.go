@@ -82,9 +82,9 @@ func TestICMPProbeNoTraceGatesTraceCall(t *testing.T) {
 		p := NewICMP("icmp", time.Second, true)
 		p.spacing = time.Millisecond
 		called := false
-		p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+		p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 			called = true
-			return []Hop{{Index: 1, IP: "10.0.0.1"}}, true, nil
+			return []Hop{{Index: 1, IP: "10.0.0.1"}}, roundStats{attempted: rounds, reached: rounds}, nil
 		}
 
 		res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1)
@@ -104,9 +104,9 @@ func TestICMPProbeNoTraceGatesTraceCall(t *testing.T) {
 		p.spacing = time.Millisecond
 		called := false
 		want := []Hop{{Index: 1, IP: "10.0.0.1"}, {Index: 2, IP: "10.0.0.2"}}
-		p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+		p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 			called = true
-			return want, true, nil
+			return want, roundStats{attempted: rounds, reached: rounds}, nil
 		}
 
 		res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1)
@@ -138,10 +138,10 @@ func TestICMPProbeTracesDespiteExhaustedEchoBudget(t *testing.T) {
 	var traceDeadline time.Time
 	var traceBounded bool
 	want := []Hop{{Index: 1, IP: "10.0.0.1"}, {Index: 2, IP: "10.0.0.2"}}
-	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 		entered, entryErr = true, ctx.Err()
 		traceDeadline, traceBounded = ctx.Deadline()
-		return want, true, nil
+		return want, roundStats{attempted: rounds, reached: rounds}, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
@@ -183,9 +183,9 @@ func TestICMPProbeRunsTraceConcurrentlyWithEchoBatch(t *testing.T) {
 
 	const traceDur = 200 * time.Millisecond
 	want := []Hop{{Index: 1, IP: "10.0.0.1"}}
-	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 		time.Sleep(traceDur)
-		return want, true, nil
+		return want, roundStats{attempted: rounds, reached: rounds}, nil
 	}
 
 	start := time.Now()
@@ -214,9 +214,9 @@ func TestICMPProbeJoinsSlowTraceOnEarlyReturn(t *testing.T) {
 
 	const traceDur = 250 * time.Millisecond
 	want := []Hop{{Index: 1, IP: "10.0.0.1"}}
-	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 		time.Sleep(traceDur)
-		return want, true, nil
+		return want, roundStats{attempted: rounds, reached: rounds}, nil
 	}
 
 	// The echo loop is cancelled at ~60ms, long before the trace finishes.
@@ -299,7 +299,7 @@ func TestICMPProbeContainsTracePanic(t *testing.T) {
 
 	p := NewICMP("icmp", time.Second, false)
 	p.spacing = time.Millisecond
-	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 		panic("boom in the TTL walk")
 	}
 
@@ -521,8 +521,8 @@ func TestICMPProbeWarnsOnTransientTraceError(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	p := NewICMP("icmp", time.Second, false)
-	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
-		return nil, false, errors.New("no buffer space available")
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
+		return nil, roundStats{}, errors.New("no buffer space available")
 	}
 	p.send = func(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq int, timeout time.Duration) (time.Duration, error) {
 		return time.Millisecond, nil

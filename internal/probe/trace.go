@@ -21,22 +21,23 @@ import (
 // cannot be opened — callers use errors.Is(err, errRawUnavailable) to distinguish
 // permission failures from actual probe errors and skip trace gracefully.
 //
-// The second return value is true iff the target itself replied at least once
-// during the trace. Callers that mirror per-hop stats as "target" stats (mtr.go)
-// use this to avoid passing off an intermediate hop's numbers when the target
-// was silent all the way to maxTTL.
-func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+// The second return value counts the rounds the walk ran and the subset of
+// them the target itself echoed in. Callers that mirror per-hop stats as
+// "target" stats (mtr.go) report loss from those counts: a round is the unit
+// of a trace, and hop rows cannot answer how many rounds reached the target
+// once each round stops at its own terminal.
+func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 	if host == "" {
-		return nil, false, errors.New("trace: host required")
+		return nil, roundStats{}, errors.New("trace: host required")
 	}
 	ip, err := net.ResolveIPAddr(familyNetwork("ip", family), host)
 	if err != nil {
-		return nil, false, fmt.Errorf("resolve %q: %w", host, err)
+		return nil, roundStats{}, fmt.Errorf("resolve %q: %w", host, err)
 	}
 	isV6 := ip.IP.To4() == nil
 	conn, err := listenRawFn(isV6)
 	if err != nil {
-		return nil, false, classifyListenErr(err)
+		return nil, roundStats{}, classifyListenErr(err)
 	}
 	defer func() { _ = conn.Close() }()
 	return traceOnConn(ctx, conn, ip, isV6, rounds, maxTTL, timeout, spacing)
@@ -150,15 +151,22 @@ type ttlReply struct {
 // stepFunc sends one probe at ttl during round and reports what answered.
 type stepFunc func(ctx context.Context, round, ttl int) ttlReply
 
+// roundStats counts the trace rounds that sent at least one probe and the
+// subset of them the target echoed in. Attempted trails the requested round
+// count when the cycle deadline cuts the walk short.
+type roundStats struct {
+	attempted int
+	reached   int
+}
+
 // walkRounds runs the TTL walk over an injected per-probe step so tests drive
 // this exact loop. Each round walks 1..maxTTL and stops at its own terminal —
 // an echo reply or a gateway's unreachable, which is the real end of the path
 // — so a route that changes mid-cycle is followed rather than clamped to the
-// shortest path seen; reached reports whether any round got an echo. Every
-// responder at a TTL gets its own row, and each row that echoed is marked
-// TargetReply because the target's row is no longer guaranteed to be the
-// deepest.
-func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, step stepFunc) ([]Hop, bool) {
+// shortest path seen. Every responder at a TTL gets its own row, and each row
+// that echoed is marked TargetReply because the target's row is no longer
+// guaranteed to be the deepest.
+func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, step stepFunc) ([]Hop, roundStats) {
 	type respondent struct {
 		addr        string
 		targetReply bool
@@ -171,7 +179,7 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 		losses int
 	}
 	agg := make([]ttlAgg, maxTTL+1)
-	reached := false
+	var stats roundStats
 
 	for round := range rounds {
 		if ctx.Err() != nil {
@@ -182,6 +190,7 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 				break
 			}
 			r := step(ctx, round, ttl)
+			stats.attempted = round + 1
 			if r.err != nil || r.addr == "" {
 				agg[ttl].losses++
 			} else {
@@ -201,7 +210,7 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 				}
 			}
 			if r.kind == replyEcho {
-				reached = true
+				stats.reached++
 			}
 			if r.kind == replyEcho || r.kind == replyUnreachable {
 				break
@@ -242,19 +251,19 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 			hops = append(hops, h)
 		}
 	}
-	return hops, reached
+	return hops, stats
 }
 
 // traceOnConn is the core TTL-walk loop, separated from socket setup so the
 // caller can supply a shared conn if it already has one open.
-func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 	id := int(rand.Uint32() & 0xffff)
 	step := func(ctx context.Context, round, ttl int) ttlReply {
 		seq := ((round * (maxTTL + 1)) + ttl) & 0xffff
 		return sendTTL(ctx, conn, ip, isV6, id, seq, ttl, timeout)
 	}
-	hops, reached := walkRounds(ctx, rounds, maxTTL, spacing, step)
-	return hops, reached, nil
+	hops, stats := walkRounds(ctx, rounds, maxTTL, spacing, step)
+	return hops, stats, nil
 }
 
 // classifyReply reports whether a reply is an answer to our own probe at

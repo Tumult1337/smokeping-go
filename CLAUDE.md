@@ -180,9 +180,14 @@ Key points a reader can't derive from a single file:
 - **Path discovery (MTR + opportunistic trace):** `probe.traceHops` is the
   shared TTL-walk helper in `internal/probe/trace.go`; the round loop itself
   is `walkRounds`, driven through an injected `step` so tests exercise the
-  production loop rather than a copy. The `MTR` probe uses the return
-  (`hops`, `reached`, err) directly; the `ICMP` probe calls it concurrently
-  with its echo batch so every icmp target also gets a hops view for free.
+  production loop rather than a copy. It returns `roundStats` — the rounds that
+  actually sent a probe and the subset the target echoed in — and `MTR` reports
+  `Sent`/`LossCount` straight from those two counters, never from the hop rows:
+  a round that walks past the target's old TTL folds its loss onto the marked
+  row there, so summing marked rows counts one round once per TTL the target
+  ever answered at, and a lengthening route reads as loss it never suffered.
+  The `ICMP` probe calls the walk concurrently with its echo batch so every
+  icmp target also gets a hops view for free, and discards the counters.
   Trace needs `CAP_NET_RAW` — callers distinguish the *permission* error with
   `errors.Is(err, errRawUnavailable)` and skip gracefully, while every other
   raw-socket failure stays loud. Concurrent because both share the cycle
@@ -196,8 +201,8 @@ Key points a reader can't derive from a single file:
   last hop, annotated with a closed-set `Unreach` label (`unreachLabel`,
   RFC 792 / RFC 4443 codes normalized across families); walking past it
   re-elicited that same gateway at every deeper TTL and fabricated a clean
-  30-hop path at zero loss out of one router. An unreachable never sets
-  `reached`, so MTR still reports full target loss.
+  30-hop path at zero loss out of one router. An unreachable never counts a
+  round as reached, so MTR still reports full target loss.
 
   Rows are per `(ttl, responder address)` in first-seen order, so ECMP
   siblings each carry their own samples; a TTL's losses have no responder to
@@ -205,7 +210,7 @@ Key points a reader can't derive from a single file:
   numbers identical to the pre-split shape, and a TTL nothing answered emits
   one `IP: ""` row. Rows the target itself answered carry `TargetReply` —
   the target's row is no longer guaranteed to be the deepest, so `/hops`
-  redaction, MTR's mirror, and the UI's end-to-end loss all key on that
+  redaction, MTR's RTT mirror, and the UI's end-to-end loss all key on that
   marker instead of on position.
 
 - **ICMP cycle budget:** the echo batch and the TTL walk run concurrently

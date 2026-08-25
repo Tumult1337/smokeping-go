@@ -159,8 +159,8 @@ func TestWalkRoundsFollowsRouteLengthening(t *testing.T) {
 		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
 		{1, 1}: te("10.0.0.1"), {1, 2}: te("10.0.1.2"), {1, 3}: te("10.0.1.3"), {1, 4}: ech("192.0.2.9"),
 	}}
-	hops, reached := walkRounds(context.Background(), 2, 10, 0, s.step)
-	if !reached {
+	hops, stats := walkRounds(context.Background(), 2, 10, 0, s.step)
+	if stats.reached == 0 {
 		t.Fatal("target answered in both rounds; reached must be true")
 	}
 	if !s.called(1, 3) || !s.called(1, 4) {
@@ -212,8 +212,8 @@ func TestWalkRoundsMarksEarlyEchoRow(t *testing.T) {
 	s := &scriptStep{replies: map[[2]int]ttlReply{
 		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
 	}}
-	hops, reached := walkRounds(context.Background(), 2, 4, 0, s.step)
-	if !reached {
+	hops, stats := walkRounds(context.Background(), 2, 4, 0, s.step)
+	if stats.reached == 0 {
 		t.Fatal("round 0 reached the target; a silent round 1 must not clear it")
 	}
 	target := hopByIndex(t, hops, 2)
@@ -241,9 +241,12 @@ func TestWalkRoundsEmitsPartialOnCancel(t *testing.T) {
 		}
 		return te(fmt.Sprintf("10.0.0.%d", ttl))
 	}
-	hops, reached := walkRounds(ctx, 3, 10, 0, step)
-	if reached {
+	hops, stats := walkRounds(ctx, 3, 10, 0, step)
+	if stats.reached > 0 {
 		t.Fatal("nothing echoed; reached must be false")
+	}
+	if stats.attempted != 1 {
+		t.Fatalf("attempted = %d, want only the round that ran before cancel", stats.attempted)
 	}
 	if len(hops) != 2 {
 		t.Fatalf("got %d hops, want the 2 collected before cancel: %+v", len(hops), hops)
@@ -297,8 +300,8 @@ func TestWalkRoundsAttachesLossToFirstResponder(t *testing.T) {
 		{1, 1}: teRTT("10.0.0.1", 5*time.Millisecond),
 		{2, 1}: teRTT("10.0.9.9", 7*time.Millisecond),
 	}}
-	hops, reached := walkRounds(context.Background(), 3, 1, 0, s.step)
-	if reached {
+	hops, stats := walkRounds(context.Background(), 3, 1, 0, s.step)
+	if stats.reached > 0 {
 		t.Fatal("no echo in script")
 	}
 	var a, b Hop
@@ -375,8 +378,8 @@ func TestWalkRoundsStopsAtUnreachable(t *testing.T) {
 			s.replies[[2]int{round, ttl}] = unreach("10.0.0.2", "host-unreachable")
 		}
 	}
-	hops, reached := walkRounds(context.Background(), 3, 30, 0, s.step)
-	if reached {
+	hops, stats := walkRounds(context.Background(), 3, 30, 0, s.step)
+	if stats.reached > 0 {
 		t.Fatal("an unreachable reply must not count as reaching the target")
 	}
 	if len(hops) != 2 {
@@ -513,5 +516,29 @@ func TestClassifyReply(t *testing.T) {
 					matched, kind, unreach, tc.wantMatch, tc.wantKind, tc.wantUnreach)
 			}
 		})
+	}
+}
+
+// MTR's loss is round-based, so a round that reached the target counts once
+// however many TTLs the target answered at: here a lengthening route marks it
+// at three, and the marked rows sum to more probes than there were rounds.
+func TestWalkRoundsCountsRoundsNotEchoRows(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
+		{1, 1}: te("10.0.0.1"), {1, 3}: ech("192.0.2.9"),
+		{2, 1}: te("10.0.0.1"), {2, 4}: ech("192.0.2.9"),
+	}}
+	hops, stats := walkRounds(context.Background(), 3, 10, 0, s.step)
+	if stats.attempted != 3 || stats.reached != 3 {
+		t.Fatalf("stats = %+v, want 3 attempted and 3 reached", stats)
+	}
+	rowSent := 0
+	for _, h := range hops {
+		if h.TargetReply {
+			rowSent += h.Sent
+		}
+	}
+	if rowSent <= stats.reached {
+		t.Fatalf("fixture no longer reproduces row-summed inflation: rowSent=%d", rowSent)
 	}
 }

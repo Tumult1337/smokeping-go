@@ -46,30 +46,23 @@ func (m *MTR) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	if count > maxRounds {
 		count = maxRounds
 	}
-	hops, reached, err := m.trace(ctx, t.Host, t.Family, count, m.maxTTL, m.timeout, m.spacing)
+	hops, stats, err := m.trace(ctx, t.Host, t.Family, count, m.maxTTL, m.timeout, m.spacing)
 	if err != nil {
 		return nil, err
 	}
 
-	result := &Result{Sent: count, Hops: hops}
-	// Mirror the rows the target itself answered, never the deepest row: a
-	// per-round walk can leave a silent intermediate below the target's echo,
-	// and without an EchoReply anywhere the path's last hop is an intermediate
-	// router whose latency and loss say nothing about the target.
-	if reached {
-		var rtts []time.Duration
-		sent, lost := 0, 0
-		for _, h := range hops {
-			if !h.TargetReply {
-				continue
-			}
-			rtts = append(rtts, h.RTTs...)
-			sent += h.Sent
-			lost += h.Lost
+	// Sent and lost are counted in rounds, not in hop rows: a round that walks
+	// past the target's old TTL folds its loss onto the marked row there, so
+	// summing marked rows counts one round once per TTL the target ever
+	// answered at — a lengthening route then reads as loss it never suffered.
+	result := &Result{Sent: stats.attempted, LossCount: stats.attempted - stats.reached, Hops: hops}
+	// The RTTs still come from the rows the target itself answered, never the
+	// deepest row: a per-round walk can leave a silent intermediate below the
+	// target's echo, whose latency says nothing about the target.
+	for _, h := range hops {
+		if h.TargetReply {
+			result.RTTs = append(result.RTTs, h.RTTs...)
 		}
-		result.RTTs, result.Sent, result.LossCount = rtts, sent, lost
-	} else {
-		result.LossCount = count
 	}
 	return result, nil
 }
