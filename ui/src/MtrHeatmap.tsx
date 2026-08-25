@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getHopsTimeline, type HopPoint } from "./api";
 import { lossColor } from "./palette";
 import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
+import { cycleAtSec } from "./chartUtils";
 
 // The heatmap's chrome colours all live as CSS custom properties in styles.css
 // (single source of truth). A <canvas> 2d context can't read CSS vars, so
@@ -318,6 +319,8 @@ function PathHeatmap({
     // the median inter-cycle gap is the right estimate because cycles are not
     // aligned to a grid. With neither available, draw a thin mark: under-
     // drawing one cycle is honest, overdrawing invents history.
+    // The same step fixes the offset: bucket timestamps are bucket starts, so
+    // a bucketed column is drawn from t, and only the raw tier is centred.
     let colW = Math.max(1, MIN_COL_PX);
     if (stepSec > 0) {
       colW = Math.max(1, colWForSec(stepSec));
@@ -339,7 +342,7 @@ function PathHeatmap({
         for (const t of cycles) {
           const p = row.get(t);
           if (!p) continue;
-          const x = xForSec(t) - colW / 2;
+          const x = stepSec > 0 ? xForSec(t) : xForSec(t) - colW / 2;
           // Color by MaxLossPct so a brief 100% loss event inside a 5-min
           // bucket stays visible — averaging it (LossPct) to ~3% would make
           // it disappear into the clean background.
@@ -395,7 +398,7 @@ function PathHeatmap({
       ctx.fillStyle = markerFill;
       ctx.fillRect(Math.round(x), 2, 2, plotH - 4);
     }
-  }, [rows, cycles, visibleHops, height, fromSec, toSec, selectedSec, repaintCount]);
+  }, [rows, cycles, visibleHops, height, fromSec, toSec, selectedSec, stepSec, repaintCount]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -415,17 +418,7 @@ function PathHeatmap({
     const plotW = rect.width - gutter - 4;
     const frac = (px - plotX) / plotW;
     if (frac < 0 || frac > 1) return null;
-    const sec = fromSec + frac * (toSec - fromSec);
-    let best = cycles[0];
-    let diff = Math.abs(sec - best);
-    for (const t of cycles) {
-      const d = Math.abs(sec - t);
-      if (d < diff) {
-        best = t;
-        diff = d;
-      }
-    }
-    return best;
+    return cycleAtSec(cycles, stepSec, fromSec + frac * (toSec - fromSec));
   }
 
   // worstCycleSec maps a clicked bucket-start (unix sec, as keyed in `rows`) to
