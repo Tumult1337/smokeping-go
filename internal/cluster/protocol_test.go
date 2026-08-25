@@ -457,7 +457,6 @@ func TestHopAddrZoneIsBounded(t *testing.T) {
 		"zone carries a NUL":     "fe80::1%eth\x000",
 		"zone carries a DEL":     "fe80::1%eth\x7f0",
 		"zone carries a slash":   "fe80::1%../../etc",
-		"zone carries a percent": "fe80::1%eth0%eth1",
 	}
 	for name, ip := range rejected {
 		batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{
@@ -609,5 +608,40 @@ func TestHopZoneBoundIsSizedForTheShippedPlatforms(t *testing.T) {
 	// derived and starts inflating the /hops response cap.
 	if cluster.MaxHopZoneLen > 2*ifNameMax {
 		t.Errorf("MaxHopZoneLen %d exceeds twice the producer ceiling %d", cluster.MaxHopZoneLen, 2*ifNameMax)
+	}
+}
+
+// A zone is refused for what the bytes do downstream, never on the claim that
+// no operating system can name an interface that way: Linux refuses a literal
+// "%" but the BSD rename path applies no format expansion, and a producer's
+// whole batch is the cost of guessing wrong. The length bound is what closed
+// the unbounded-zone hole, so it is asserted here on the same character.
+func TestHopAddrZoneAcceptsAPercent(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	target := config.Target{Name: "edge"}
+
+	accepted := []string{
+		"fe80::1%uplink%blue",
+		"fe80::1%%",
+		"fe80::1%" + strings.Repeat("%", cluster.MaxHopZoneLen),
+	}
+	for _, ip := range accepted {
+		p := cluster.CyclePayload{Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: ip}}}
+		batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{p}}
+		if err := batch.Validate(now); err != nil {
+			t.Errorf("%q: refused a zone the producer can emit: %v", ip, err)
+			continue
+		}
+		if got := p.ToCycle(target).Hops[0].IP; got != ip {
+			t.Errorf("%q: stored as %q", ip, got)
+		}
+	}
+
+	tooLong := "fe80::1%" + strings.Repeat("%", cluster.MaxHopZoneLen+1)
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{
+		{Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: tooLong}}},
+	}}
+	if err := batch.Validate(now); err == nil {
+		t.Errorf("%q: accepted a zone past the cap", tooLong)
 	}
 }

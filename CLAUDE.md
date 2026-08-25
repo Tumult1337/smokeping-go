@@ -478,12 +478,18 @@ Key points a reader can't derive from a single file:
   `clickhouse.maxHopRows` — a bound derived in rows — into a byte ceiling on
   an unauthenticated `/hops`**: at 30 the worst case is 485,280 × 76 B ≈
   36.9 MB, where a zone of 256 would have made it ≈146 MB. The character
-  class refuses ASCII control bytes, `%` and `/` — what no OS can name an
-  interface, and what RFC 6874 requires escaping in this same text form.
+  class refuses ASCII control bytes and `/` for what those bytes do
+  downstream, **not** as a survey of what a kernel accepts: `%` is permitted,
+  because refusing a character some platform can name an interface with costs
+  the producer its whole batch. Linux itself refuses a literal `%` —
+  `register_netdevice` sends any name holding one through `dev_alloc_name`'s
+  `%d` expansion, verified against 7.1.8 — but the BSD rename path applies no
+  such expansion, and the refusal bought nothing: a zone's danger is its
+  length, which `MaxHopZoneLen` bounds.
   `MaxHopAddrLen` (76) is the zone ceiling plus RFC 4291 §2.2 form 3, the
-  longest textual address `ParseAddr` accepts (45 bytes). `fe80::1%eth0` and
-  `fe80::1%3` both still pass, which is the point: a refused hop address is a
-  refused batch.
+  longest textual address `ParseAddr` accepts (45 bytes). `fe80::1%eth0`,
+  `fe80::1%3` and `fe80::1%uplink%blue` all pass, which is the point: a
+  refused hop address is a refused batch.
 
   **The hop bound is derived from the producer, not picked.**
   `config.MaxHopRowsPerCycle` = `MaxTraceRounds` (10) × `MaxTraceTTL` (30)

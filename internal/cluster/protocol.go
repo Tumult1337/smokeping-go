@@ -372,19 +372,20 @@ func parseHopAddr(ip string) (netip.Addr, error) {
 	return addr, nil
 }
 
-// interfaceZoneShaped reports whether a zone looks like the interface name or
-// decimal index Go fills one from. RFC 4007 section 11.2 leaves the zone
-// implementation-defined, so this refuses only what no operating system can
-// name an interface and what makes slave-supplied text dangerous downstream:
-// ASCII control bytes, and the "%" and "/" that RFC 6874 requires escaping in
-// this same text form.
+// interfaceZoneShaped reports whether a zone is short enough to be the
+// interface name or decimal index Go fills one from, and free of the bytes
+// that make slave-supplied text dangerous downstream: ASCII control bytes and
+// the "/" a path or devfs node would take. RFC 4007 section 11.2 leaves the
+// zone implementation-defined and the character class is not a survey of what
+// each kernel accepts, so "%" passes — refusing a character some platform can
+// name an interface costs the producer's whole batch.
 func interfaceZoneShaped(zone string) bool {
 	if len(zone) > MaxHopZoneLen {
 		return false
 	}
 	for i := range len(zone) {
 		switch c := zone[i]; {
-		case c < 0x20, c == 0x7f, c == '%', c == '/':
+		case c < 0x20, c == 0x7f, c == '/':
 			return false
 		}
 	}
