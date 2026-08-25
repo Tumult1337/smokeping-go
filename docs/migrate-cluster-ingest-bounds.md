@@ -105,8 +105,10 @@ schedule it cannot store.
 for slaves that predate that. It used to be *refused* at 4096 — but the string
 is `Get "<url>": <cause>` and config bounds no URL's length, so a legitimate
 5 KiB URL plus a connection failure produced a 400 that permanently dropped the
-whole batch, up to 99 unrelated cycles with it. A truncated error string ends
-in `…(truncated)`.
+whole batch, up to 99 unrelated cycles with it. A truncated error string keeps
+its head and its tail with `…(truncated)…` between them: the cause is printed
+after the URL, so cutting only the tail off a URL longer than the bound stored
+the URL and dropped the `connection refused`.
 
 ## Schema
 

@@ -129,19 +129,29 @@ const MaxHTTPErrLen = 4096
 
 // errTruncationMark tells an operator reading probe_http.error that the text
 // was cut rather than that the transport reported this much.
-const errTruncationMark = "…(truncated)"
+const errTruncationMark = "…(truncated)…"
 
 // TruncateHTTPErr bounds a probe error before it is stored or serialized,
-// cutting on a rune boundary so the column never holds half a code point.
+// keeping a head and a tail because the diagnosis is at the end: url.Error
+// prints the whole request URL before the cause, so a head-only cut on a URL
+// longer than the bound stored the URL and dropped the "connection refused".
+// Cutting both ends on a rune boundary keeps the column free of half a code
+// point, and reading from the end rather than unwrapping *url.Error keeps the
+// last wrapped cause of any error shape.
 func TruncateHTTPErr(s string) string {
 	if len(s) <= MaxHTTPErrLen {
 		return s
 	}
-	cut := MaxHTTPErrLen - len(errTruncationMark)
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
+	budget := MaxHTTPErrLen - len(errTruncationMark)
+	head := budget / 2
+	for head > 0 && !utf8.RuneStart(s[head]) {
+		head--
 	}
-	return s[:cut] + errTruncationMark
+	tail := len(s) - (budget - head)
+	for tail < len(s) && !utf8.RuneStart(s[tail]) {
+		tail++
+	}
+	return s[:head] + errTruncationMark + s[tail:]
 }
 
 // maxHTTPRequests caps requests per cycle. HTTP is far more expensive than a

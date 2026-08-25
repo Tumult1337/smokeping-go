@@ -2,6 +2,8 @@ package probe
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +35,35 @@ func TestHTTPProbeTruncatesTransportError(t *testing.T) {
 		t.Fatalf("stored error is %d bytes, limit %d", len(got), MaxHTTPErrLen)
 	}
 	if !strings.Contains(got, "127.0.0.1:1") {
+		t.Fatalf("truncated error lost the request identity: %q", got)
+	}
+	if !strings.Contains(got, "connection refused") {
 		t.Fatalf("truncated error lost the diagnosis: %q", got)
+	}
+}
+
+// url.Error prints the URL before the cause, so cutting only the tail off a
+// URL longer than the bound stores the URL and drops the one part an operator
+// acts on. The URL here is past MaxHTTPErrLen by itself.
+func TestTruncateHTTPErrKeepsTheCausePastTheBound(t *testing.T) {
+	long := "https://example.test/" + strings.Repeat("a", 2*MaxHTTPErrLen)
+	e := &url.Error{
+		Op:  "Get",
+		URL: long,
+		Err: errors.New("dial tcp 10.0.0.1:443: connect: connection refused"),
+	}
+	got := TruncateHTTPErr(e.Error())
+	if len(got) > MaxHTTPErrLen {
+		t.Fatalf("stored error is %d bytes, limit %d", len(got), MaxHTTPErrLen)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation produced invalid utf-8: %q", got)
+	}
+	if !strings.Contains(got, "connection refused") {
+		t.Fatalf("truncation dropped the cause: %q", got)
+	}
+	if !strings.HasPrefix(got, `Get "https://example.test/`) {
+		t.Fatalf("truncation dropped the request identity: %q", got[:64])
 	}
 }
 
