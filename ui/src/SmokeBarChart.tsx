@@ -448,6 +448,16 @@ function BarChartLegend({
                 {src || "—"}
               </span>
             )}
+            <span
+              className="smoke-legend-scope"
+              title={
+                cursorIdx == null
+                  ? "Window: percentile columns are the mean of each cycle's percentile; min and max are true extrema."
+                  : "One cycle's own percentiles."
+              }
+            >
+              {cursorIdx == null ? "window" : "cycle"}
+            </span>
             {BAR_PCT_LABELS.map((label, j) => {
               const col = built.data[base + j] as (number | null)[] | undefined;
               const cursorVal = cursorIdx != null && col ? col[cursorIdx] : null;
@@ -633,6 +643,8 @@ function buildSources(points: CyclePoint[]): Built {
 
     const valid = pts.filter((p) => p.LossPct < 100);
     if (valid.length > 0) {
+      // Mean of each per-cycle percentile, not a window percentile — averaging
+      // p95s suppresses the isolated spikes a p95 exists to surface.
       const avg = (fn: (p: CyclePoint) => number) =>
         valid.reduce((s, p) => s + fn(p), 0) / valid.length;
       const mins = valid

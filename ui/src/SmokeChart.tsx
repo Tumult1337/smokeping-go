@@ -332,6 +332,16 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
                     {src || "—"}
                   </span>
                 )}
+                <span
+                  className="smoke-legend-scope"
+                  title={
+                    cursorIdx == null
+                      ? "Window: percentile columns are the mean of each cycle's percentile; min and max are true extrema."
+                      : "One cycle's own percentiles."
+                  }
+                >
+                  {cursorIdx == null ? "window" : "cycle"}
+                </span>
                 {PCT_LABELS.map((label, j) => {
                   const col = built.data[base + j] as (number | null)[] | undefined;
                   const cursorVal = cursorIdx != null && col ? col[cursorIdx] : null;
@@ -501,8 +511,8 @@ function buildAligned(points: CyclePoint[]): Built {
     if (hasLoss) anyLoss = true;
     lossSeries.push({ ts, losses, hasLoss });
 
-    // Per-source window aggregate for the legend (mean of each percentile
-    // across all non-100%-loss cycles in the window).
+    // Mean of each per-cycle percentile, not a window percentile — averaging
+    // p95s suppresses the isolated spikes a p95 exists to surface.
     const valid = sorted.filter((p) => p.LossPct < 100);
     if (valid.length > 0) {
       const avg = (fn: (p: CyclePoint) => number) =>

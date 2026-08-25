@@ -775,6 +775,14 @@ body {
   text-decoration-color: currentColor;
 }
 .smoke-legend-row.dimmed { opacity: 0.3; }
+.smoke-legend-scope {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-right: 6px;
+}
 .smoke-legend-val {
   background: transparent;
   border: none;

@@ -875,13 +875,13 @@ export default function App() {
                 {windowStats && (
                   <div className="stats" style={{ marginTop: 12 }}>
                     <span>
-                      median:{" "}
+                      avg cycle median:{" "}
                       <strong>
                         {windowStats.median == null ? "—" : `${windowStats.median.toFixed(1)}ms`}
                       </strong>
                     </span>
                     <span>
-                      p95:{" "}
+                      avg cycle p95:{" "}
                       <strong>
                         {windowStats.p95 == null ? "—" : `${windowStats.p95.toFixed(1)}ms`}
                       </strong>
