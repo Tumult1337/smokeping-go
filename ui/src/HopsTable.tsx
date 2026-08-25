@@ -159,8 +159,10 @@ export function HopsPath({
             </tr>
           </thead>
           <tbody>
-            {rows.map((h) => (
-              <tr key={h.Index}>
+            {/* Index and IP both collide inside one TTL — ECMP responders,
+                and two target rows blanked alike by health redaction. */}
+            {rows.map((h, i) => (
+              <tr key={`${h.Index}|${h.IP}|${i}`}>
                 <td>{h.Index}</td>
                 <td>
                   {h.IP ? (
@@ -178,6 +180,14 @@ export function HopsPath({
                     </>
                   ) : (
                     <span className="hop-none">???</span>
+                  )}
+                  {h.Unreach && (
+                    <span
+                      className="hop-unreach"
+                      title="The trace ended here: this router reported the target unreachable"
+                    >
+                      {h.Unreach}
+                    </span>
                   )}
                 </td>
                 <td className="num" style={{ color: lossColor(h.LossPct, "#cfd3dd") }}>

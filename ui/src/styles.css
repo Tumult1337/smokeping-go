@@ -476,6 +476,19 @@ body {
   transition: color 0.1s, opacity 0.1s;
 }
 .hops-table .hop-whois:hover { color: var(--accent); opacity: 1; }
+/* Tinted from the loss ramp's top stop (#ef4444, palette.ts) rather than a
+   token: an unreachable is the same class of bad news as total loss. */
+.hops-table .hop-unreach {
+  margin-left: 8px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: #f4b4b4;
+  background: rgba(239, 68, 68, 0.16);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  vertical-align: 1px;
+}
 .hops-loss-bar {
   display: inline-block;
   height: 10px;

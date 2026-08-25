@@ -222,14 +222,7 @@ function MultiSourceLayout({
       <div className="mtr-sections">
         {groups.map((g) => {
           const isCollapsed = collapsed.has(g.source);
-          // End-to-end loss = deepest TTL row's loss. Matches the cycle
-          // metric in mtr.go (last reached hop) and ignores intermediate
-          // routers that rate-limit TTL-expired ICMP.
-          const lastHop = g.hops.reduce(
-            (m, h) => (h.Index > m.Index ? h : m),
-            g.hops[0],
-          );
-          const endToEndLoss = lastHop?.LossPct ?? 0;
+          const endToEndLoss = targetLoss(g.hops);
           const scale = Math.max(1, ...g.hops.map((h) => h.Max));
           return (
             <div key={g.source || "(unspecified)"} className="mtr-section">
@@ -289,6 +282,25 @@ function MultiSourceLayout({
       </div>
     </>
   );
+}
+
+// Loss at the target is lost-over-sent across every marked row, because a
+// per-round walk marks the target at each TTL it answered from and the
+// deepest of those is routinely the clean row a lost echo pushed a hop
+// further; unmarked data falls back to the deepest TTL as before.
+function targetLoss(hops: HopPoint[]): number {
+  let rows = hops.filter((h) => h.TargetReply);
+  if (rows.length === 0) {
+    const deepest = Math.max(...hops.map((h) => h.Index));
+    rows = hops.filter((h) => h.Index === deepest);
+  }
+  let sent = 0;
+  let lost = 0;
+  for (const h of rows) {
+    sent += h.Sent;
+    lost += h.LossCount;
+  }
+  return sent > 0 ? (100 * lost) / sent : 0;
 }
 
 interface HopsGroup {
