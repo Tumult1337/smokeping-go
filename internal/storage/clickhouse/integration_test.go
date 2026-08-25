@@ -2442,6 +2442,95 @@ VALUES (?, 'slow', 'g', 'master', ?, '10.0.0.1', '', 1, 3, 0, 0, 1000, 1000, 100
 	}
 }
 
+// The click-through stamp decides which cycle /hops?at= resolves, and the
+// resolution is nearest-wins: truncating the stamp to a whole second moves it
+// off the cycle the bucket was drawn for and can leave a neighbouring bucket's
+// cycle nearer, so the click opens a cycle the user did not click. Cycles are
+// stamped from a wall clock and stored at DateTime64(3), so milliseconds are
+// the precision the stamp has to survive at.
+func TestIntegrationBucketClickThroughSurvivesASubSecondSeam(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+
+	const (
+		interval = time.Second
+		window   = 2 * time.Hour
+	)
+	step := storage.PickHopStep(window, interval)
+	if step != storage.MinHopStep {
+		t.Fatalf("step %s: the fixture needs the finest tier", step)
+	}
+	// toStartOfInterval counts from the epoch, so a bucket start is a whole
+	// multiple of the step.
+	unaligned := time.Now().UTC().Add(-time.Hour)
+	bucket := time.Unix(unaligned.Unix()-unaligned.Unix()%int64(step/time.Second), 0).UTC()
+	inside := bucket.Add(900 * time.Millisecond)
+	before := bucket.Add(-100 * time.Millisecond)
+	ref := config.TargetRef{Target: config.Target{Name: "seam"}, Group: "g"}
+	for _, ts := range []time.Time{before, inside} {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time: ts, Target: ref, Source: "master", Sent: 3,
+			Hops: []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 0, RTTs: []time.Duration{time.Millisecond}}},
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	pts, err := hopsTimeline(ctx, r, ref, bucket.Add(-step), bucket.Add(window),
+		storage.QueryFilter{Source: "master", Step: step})
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	var drawn storage.HopPoint
+	for _, p := range pts {
+		if p.Time.Equal(bucket) {
+			drawn = p
+		}
+	}
+	if drawn.Time.IsZero() {
+		t.Fatalf("no grid row at bucket %s: %+v", bucket, pts)
+	}
+	if !drawn.WorstTime.Equal(inside) {
+		t.Fatalf("WorstTime = %s, want the cycle inside the bucket, %s", drawn.WorstTime.UTC(), inside)
+	}
+
+	selected := func(at time.Time) time.Time {
+		t.Helper()
+		hops, err := hopsAt(ctx, r, ref, at, 30*time.Minute, storage.QueryFilter{Source: "master"})
+		if err != nil {
+			t.Fatalf("hops at %s: %v", at.UTC(), err)
+		}
+		if len(hops) != 1 {
+			t.Fatalf("at %s resolved %d hop rows, want the cycle's 1", at.UTC(), len(hops))
+		}
+		return hops[0].Time
+	}
+	if got := selected(drawn.WorstTime.Truncate(time.Second)); !got.Equal(before) {
+		t.Errorf("a second-truncated stamp resolved %s, not the neighbouring bucket's %s: the fixture no longer reproduces the seam",
+			got.UTC(), before.UTC())
+	}
+	got := selected(drawn.WorstTime)
+	if got.Before(bucket) || !got.Before(bucket.Add(step)) {
+		t.Errorf("a click on bucket %s opened the cycle at %s, outside [%s, %s)",
+			bucket, got.UTC(), bucket, bucket.Add(step))
+	}
+}
+
 // The widest grid reaches maxHopTimelineRows exactly. A 7d window whose start
 // is off the 15m grid spans MaxHopGridSlots buckets, ttl is a UInt8 that
 // cluster ingest admits the whole domain of, and the cap refuses only past

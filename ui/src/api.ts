@@ -162,13 +162,25 @@ export function getHops(
   signal?: AbortSignal,
 ): Promise<HopsResponse> {
   const params = new URLSearchParams();
-  if (atSec != null) params.set("at", String(Math.floor(atSec)));
+  if (atSec != null) params.set("at", atParam(atSec));
   if (source) params.set("source", source);
   const qs = params.toString();
   return jsonGet<HopsResponse>(
     `/api/v1/targets/${id}/hops${qs ? `?${qs}` : ""}`,
     signal,
   );
+}
+
+// /hops?at= resolves the cycle nearest the instant it is given, and RFC3339 is
+// the only form it accepts that carries the milliseconds a stamp needs to stay
+// nearer its own cycle than the neighbouring one — the unix form parses as an
+// integer.
+function atParam(atSec: number): string {
+  const ms = Math.round(atSec * 1000);
+  // Outside Date's range toISOString throws, so let the server reject it.
+  return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15
+    ? new Date(ms).toISOString()
+    : String(atSec);
 }
 
 export interface HopsTimelineResponse {

@@ -193,10 +193,12 @@ export default function App() {
   // null means replace (derived correction / refinement). Set by user-action
   // handlers, read+cleared by the URL-sync effect (see Task 5).
   const navIntentRef = useRef<"push" | null>(null);
-  // Historical MTR pin: when set, HopsTable and the heatmap marker
-  // show the cycle at that unix-seconds timestamp. Cleared when the target
-  // or range changes, or when the user clicks "← latest". Initial value
-  // comes from ?t=<unix> so a shared link lands on the chosen cycle.
+  // Historical MTR pin: when set, HopsTable and the heatmap marker show the
+  // cycle at that unix timestamp, which carries a fraction when a heatmap
+  // bucket supplied it — a whole second does not name one cycle at a
+  // sub-2s cadence. Cleared when the target or range changes, or when the
+  // user clicks "← latest". Initial value comes from ?t=<unix> so a shared
+  // link lands on the chosen cycle.
   const [pickedSec, setPickedSec] = useState<number | null>(initialUrl.pickedSec);
   // Source override forwarded by an MtrHeatmap click: the probe origin whose
   // data dominated the clicked column (worst loss). The HopsTable uses this

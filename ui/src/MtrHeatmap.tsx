@@ -377,7 +377,7 @@ function PathHeatmap({
       }
     }
     if (worstISO) {
-      const s = Math.floor(new Date(worstISO).getTime() / 1000);
+      const s = new Date(worstISO).getTime() / 1000;
       if (Number.isFinite(s)) return s;
     }
     return bucketSec;

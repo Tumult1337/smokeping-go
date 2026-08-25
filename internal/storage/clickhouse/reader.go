@@ -426,10 +426,14 @@ func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.
 	// table ends up rendering a stack of consecutive cycles instead
 	// of one. With argMin we pin per-source and let the IN-list join
 	// pull only those rows.
+	//
+	// The centre travels as epoch milliseconds because the driver renders a
+	// bound time.Time at whole-second precision, and a centre rounded off the
+	// cycle it names leaves a neighbouring cycle nearer than that cycle.
 	q := `
 WITH nearest AS (
   SELECT source,
-         argMin(timestamp, abs(dateDiff('millisecond', timestamp, toDateTime64(?, 3, 'UTC')))) AS ts
+         argMin(timestamp, abs(dateDiff('millisecond', timestamp, fromUnixTimestamp64Milli(?, 'UTC')))) AS ts
   FROM probe_hop
   WHERE target_id = ?
     AND target_group = ?` + srcClause + `
@@ -446,7 +450,7 @@ WHERE target_id = ?
 ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	// args layout: CTE — `at` (the centre), target id+group, optional source, from, to;
 	//              outer — target id+group, optional source.
-	args := []any{at, ref.Target.Name, ref.Group}
+	args := []any{at.UnixMilli(), ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
 	args = append(args, at.Add(-half), at.Add(half))
 	args = append(args, ref.Target.Name, ref.Group)

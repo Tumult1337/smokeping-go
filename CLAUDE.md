@@ -335,6 +335,14 @@ Key points a reader can't derive from a single file:
   puts the producer's cycle rate — the one factor nothing bounds — back into
   the row cap below.
 
+  A bucket's click-through carries its `WorstTime` at full precision, all the
+  way from the row to `?t=` in the page URL. `/hops?at=` resolves the cycle
+  *nearest* the stamp, so rounding one to a whole second can leave the
+  neighbouring bucket's cycle nearer than the cycle the column was drawn for —
+  at a sub-2s cadence the click then opens a cycle outside the bucket clicked.
+  RFC3339 is the only `at` form that survives the trip, since the unix form
+  parses as an integer.
+
 - **Cluster mode (master/slave):** `--slave` flips the binary into a
   runner that registers with a master, pulls the target list over HTTP,
   probes locally, and pushes cycle batches back. Slaves never touch
