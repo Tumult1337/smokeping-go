@@ -91,6 +91,15 @@ Key points a reader can't derive from a single file:
   - cycles: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h, >180d 1d
   - hops:   ≤2h 11s, ≤24h 5m, >24h 15m, never finer than the probe interval
 
+  **Known limitation — `/overview`'s bucket origin.** Every timestamp bound
+  in every reader travels as epoch milliseconds through `dtMilli`, with one
+  exception: `QueryOverview`'s `intDiv(toUInt32(timestamp) - ?, ?)` subtracts a
+  signed `from.Unix()` from a `UInt32` cast, so its bucket index is wrong
+  outside the 1970–2106 range that cast spans. Unreachable today because the
+  endpoint only queries near now. `TestReaderBindsEveryTimestampAsMilliseconds`
+  exempts it **by name** rather than by weakening the rule, so fixing the
+  expression means deleting that exemption in the same edit.
+
   **Write buffers.** Each table's channel is sized by
   `writerChanCap(table, pings)` (base 4096 slots × a rows-per-cycle factor,
   clamped to [4096, 131072]) so all four absorb a comparable ClickHouse

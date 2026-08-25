@@ -5,8 +5,14 @@ Compose, including the ClickHouse backend it writes to. Slaves are a
 separate concern — see the *Adding slaves* section at the bottom.
 
 The repo ships a `Dockerfile` (multi-stage: Vite UI build → Go build →
-Alpine runtime) but no compose file. Everything below assumes you build
-the image from this repo.
+Alpine runtime) and two compose files, but neither is the stack this guide
+builds: the tracked `docker-compose.yml` runs gosmokeping alone against a
+ClickHouse already installed on the host, and `docker-compose.slave.yml`
+runs a slave. The two-service master + containerised ClickHouse stack in
+section 4 is one you write. Under Pattern A below it lands on top of the
+tracked file, so either give yours another name and pass it with `-f`, or
+overwrite it knowing the next `git pull` will conflict. Everything below
+assumes you build the image from this repo.
 
 ---
 
@@ -49,7 +55,7 @@ is just `.`.
 /opt/smokeping/                  # the repo, with extras alongside
 ├── Dockerfile                   # from the repo
 ├── cmd/ internal/ ui/ ...       # from the repo
-├── docker-compose.yml           # you create
+├── docker-compose.yml           # you write (the repo tracks one already)
 ├── config.json                  # you create (from config.example.json)
 └── .env                         # you create (from .env.example)
 ```

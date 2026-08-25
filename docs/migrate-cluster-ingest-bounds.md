@@ -91,10 +91,13 @@ delete by `length(hop_addr) > 76` in ClickHouse.
 
 `interval` is capped at `config.MaxProbeInterval`, which is exactly
 71m34.967295s. A cycle runs under a context whose deadline is the interval, so
-the interval is also the largest RTT a probe can measure — and `probe_rtt`
-stores microseconds in a `UInt32`, which stops representing a value as itself
-at that point. An interval above it therefore produced latencies the master's
-own ingest refused, dropping the batch, and stored the rest saturated.
+the interval is also the largest RTT a probe can measure — and the per-cycle
+and per-hop latency summaries (`probe_cycle.*_us`, `probe_hop.*_us`) store
+microseconds in a `UInt32`, which `durUS` saturates at, so a larger value stops
+being stored as itself. Raw per-ping samples are not the binding column:
+`probe_rtt.rtt_ms` is a `Float64`. An interval above the cap therefore produced
+latencies the master's own ingest refused, dropping the batch, and stored the
+rest saturated.
 
 The cap is the storage limit itself rather than a round number below it, so no
 schedule that was working is refused. Nothing changes for the 5s–5m range every

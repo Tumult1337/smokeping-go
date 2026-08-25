@@ -77,7 +77,8 @@ docker run -d --name clickhouse -p 9000:9000 \
 ```
 
 gosmokeping creates the `probe_cycle`, `probe_rtt`, `probe_hop`, and `probe_http`
-tables with automatic rollup policies on first start.
+tables on first start and re-applies their per-table TTLs on every start.
+There is nothing to schedule: bucketing happens at query time.
 
 ### 2. Configure
 
@@ -399,8 +400,8 @@ make lint              # go vet
 
 See [`CLAUDE.md`](CLAUDE.md) for architecture notes covering the
 scheduler-as-hub pipeline, config hot-reload contract, storage tiering,
-ICMP socket quirks, MTR trace semantics, rollup task versioning, and the
-UI time-axis contract.
+ICMP socket quirks, MTR trace semantics, schema versioning and retention,
+and the UI time-axis contract.
 
 ## Layout
 
