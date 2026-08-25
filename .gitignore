@@ -13,10 +13,10 @@ internal/ui/dist/*
 .env
 .DS_Store
 .playwright-mcp/
-.claude/
-# Skills are shared project rules like CLAUDE.md; local settings are not.
+# Contents, not the directory: git will not descend into an excluded
+# directory, so a negation inside one never applies.
+.claude/*
 !.claude/skills/
-!.claude/skills/**
 .worktrees/
 todo.md
 docs/superpowers/
