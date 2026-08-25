@@ -674,3 +674,98 @@ func TestClassifyReplyDeniesAnInvalidDestination(t *testing.T) {
 		t.Fatalf("an unresolved destination matched an echo reply as %d", kind)
 	}
 }
+
+// A link-local address is unique only inside its zone, so fe80::1%eth0 and
+// fe80::1%eth1 name different hosts on different links.
+func TestPeerAddrKeepsIPv6Zone(t *testing.T) {
+	want := netip.MustParseAddr("fe80::1%eth0")
+	cases := map[string]net.Addr{
+		"udp ping socket": &net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0"},
+		"raw socket":      &net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0"},
+	}
+	for name, a := range cases {
+		if got := peerAddr(a); got != want {
+			t.Errorf("%s: peerAddr = %v, want %v", name, got, want)
+		}
+	}
+	if got := peerAddr(&net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth1"}); got == want {
+		t.Errorf("a reply off another link reduced to %v, the same value as %v", got, want)
+	}
+}
+
+// The destination side of the comparison comes from net.ResolveIPAddr, so the
+// zone check is inert unless resolution keeps the zone the operator wrote.
+func TestResolvedDestinationKeepsItsZone(t *testing.T) {
+	ip, err := net.ResolveIPAddr("ip6", "fe80::1%eth0")
+	if err != nil {
+		t.Skipf("resolve fe80::1%%eth0: %v", err)
+	}
+	if got, want := peerAddr(ip), netip.MustParseAddr("fe80::1%eth0"); got != want {
+		t.Fatalf("resolved destination reduced to %v, want %v", got, want)
+	}
+}
+
+// The walk holds one destination and expands it again to send. A zone dropped
+// here probes a different link than the one the reply is checked against.
+func TestSendAddrKeepsIPv6Zone(t *testing.T) {
+	dst := peerAddr(&net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0"})
+	got := sendAddr(dst)
+	if got.Zone != "eth0" || !got.IP.Equal(net.ParseIP("fe80::1")) {
+		t.Fatalf("sendAddr = %v, want fe80::1%%eth0", got)
+	}
+	if back := peerAddr(got); back != dst {
+		t.Fatalf("send address reduces to %v, not the destination %v it was built from", back, dst)
+	}
+}
+
+// An echo reply is accepted only from the destination, and a link-local
+// destination is not identified by its address alone: without the zone, a
+// reply arriving over another interface answered for a host on a different
+// link. Errors stay exempt, as they do for the address itself.
+func TestMatchDatagramRequiresTheDestinationZone(t *testing.T) {
+	const id, seq = 0x1234, 7
+	dst := peerAddr(&net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0"})
+	echoReply, err := (&icmp.Message{
+		Type: ipv6.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq, Data: []byte("x")},
+	}).Marshal(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeExceeded, err := (&icmp.Message{
+		Type: ipv6.ICMPTypeTimeExceeded, Body: &icmp.TimeExceeded{Data: embeddedEcho(true, id, seq)},
+	}).Marshal(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		datagram []byte
+		peer     net.Addr
+		wantOK   bool
+		wantAddr string
+		wantKind replyKind
+	}{
+		{"echo from the destination's own zone", echoReply,
+			&net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0"}, true, "fe80::1%eth0", replyEcho},
+		{"echo from the same address on another link", echoReply,
+			&net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth1"}, false, "", replyNone},
+		{"echo from the same address on another link, ping socket", echoReply,
+			&net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth1"}, false, "", replyNone},
+		{"echo with no zone at all", echoReply,
+			&net.IPAddr{IP: net.ParseIP("fe80::1")}, false, "", replyNone},
+		{"time exceeded from another link still answers", timeExceeded,
+			&net.IPAddr{IP: net.ParseIP("fe80::2"), Zone: "eth1"}, true, "fe80::2%eth1", replyTimeExceeded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := matchDatagram(tc.datagram, 58, tc.peer, true, id, seq, dst)
+			if ok != tc.wantOK {
+				t.Fatalf("matched = %v, want %v (%+v)", ok, tc.wantOK, got)
+			}
+			if got.addr != tc.wantAddr || got.kind != tc.wantKind {
+				t.Fatalf("got addr %q kind %d, want %q %d", got.addr, got.kind, tc.wantAddr, tc.wantKind)
+			}
+		})
+	}
+}

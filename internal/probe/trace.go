@@ -35,13 +35,17 @@ func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, tim
 	if err != nil {
 		return nil, roundStats{}, fmt.Errorf("resolve %q: %w", host, err)
 	}
-	isV6 := ip.IP.To4() == nil
+	dst := peerAddr(ip)
+	if !dst.IsValid() {
+		return nil, roundStats{}, fmt.Errorf("resolve %q: unusable address %q", host, ip)
+	}
+	isV6 := dst.Is6()
 	conn, err := listenRawFn(isV6)
 	if err != nil {
 		return nil, roundStats{}, classifyListenErr(err)
 	}
 	defer func() { _ = conn.Close() }()
-	return traceOnConn(ctx, conn, ip, isV6, rounds, maxTTL, timeout, spacing)
+	return traceOnConn(ctx, conn, dst, isV6, rounds, maxTTL, timeout, spacing)
 }
 
 // errRawUnavailable wraps the underlying OS error when a raw ICMP socket is
@@ -257,36 +261,47 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 
 // traceOnConn is the core TTL-walk loop, separated from socket setup so the
 // caller can supply a shared conn if it already has one open.
-func traceOnConn(ctx context.Context, conn *icmp.PacketConn, ip *net.IPAddr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
+func traceOnConn(ctx context.Context, conn *icmp.PacketConn, dst netip.Addr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 	id := int(rand.Uint32() & 0xffff)
 	step := func(ctx context.Context, round, ttl int) ttlReply {
 		seq := ((round * (maxTTL + 1)) + ttl) & 0xffff
-		return sendTTL(ctx, conn, ip, isV6, id, seq, ttl, timeout)
+		return sendTTL(ctx, conn, dst, isV6, id, seq, ttl, timeout)
 	}
 	hops, stats := walkRounds(ctx, rounds, maxTTL, spacing, step)
 	return hops, stats, nil
 }
 
-// peerAddr reduces the source address of a received datagram to a comparable
-// value. The socket type decides which shape arrives: an unprivileged ping
-// socket reports *net.UDPAddr, a raw one *net.IPAddr. An address of any other
-// shape resolves to the invalid zero Addr, which matches no destination.
+// peerAddr reduces a socket address to a comparable value. The socket type
+// decides which shape arrives: an unprivileged ping socket reports
+// *net.UDPAddr, a raw one *net.IPAddr. An address of any other shape resolves
+// to the invalid zero Addr, which matches no destination. Both sides of the
+// destination check go through here so neither can drop a zone the other keeps.
 func peerAddr(a net.Addr) netip.Addr {
 	switch pa := a.(type) {
 	case *net.UDPAddr:
-		return addrFromIP(pa.IP)
+		return addrFromIP(pa.IP, pa.Zone)
 	case *net.IPAddr:
-		return addrFromIP(pa.IP)
+		return addrFromIP(pa.IP, pa.Zone)
 	}
 	return netip.Addr{}
 }
 
-func addrFromIP(ip net.IP) netip.Addr {
+// sendAddr expands the destination back into the shape conn.WriteTo needs.
+// The walk sends to and compares against one netip.Addr, so a reply can never
+// be matched against an address the probe never went to.
+func sendAddr(dst netip.Addr) *net.IPAddr {
+	return &net.IPAddr{IP: dst.AsSlice(), Zone: dst.Zone()}
+}
+
+// addrFromIP carries the zone because a link-local address names a different
+// host per link: an echo from fe80::1%eth1 does not answer a probe of
+// fe80::1%eth0. WithZone is a no-op on IPv4, where there are no zones.
+func addrFromIP(ip net.IP, zone string) netip.Addr {
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
 		return netip.Addr{}
 	}
-	return addr.Unmap()
+	return addr.Unmap().WithZone(zone)
 }
 
 // classifyReply reports whether a reply is an answer to our own probe at
@@ -330,7 +345,7 @@ func classifyReply(reply *icmp.Message, isV6 bool, id, seq int, peer, dst netip.
 // classifyReply matches: the target's EchoReply, an intermediate router's
 // TimeExceeded, or a gateway's unreachable. Everything else is ignored and
 // reading continues until the per-probe deadline.
-func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq, ttl int, timeout time.Duration) ttlReply {
+func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst netip.Addr, isV6 bool, id, seq, ttl int, timeout time.Duration) ttlReply {
 	var msg icmp.Message
 	if isV6 {
 		msg = icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq, Data: icmpPayload}}
@@ -360,9 +375,8 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		return ttlReply{err: err}
 	}
 
-	dstAddr := addrFromIP(dst.IP)
 	start := time.Now()
-	if _, err := conn.WriteTo(wire, dst); err != nil {
+	if _, err := conn.WriteTo(wire, sendAddr(dst)); err != nil {
 		return ttlReply{err: err}
 	}
 
@@ -379,7 +393,7 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 			return ttlReply{err: err}
 		}
 		elapsed := time.Since(start)
-		if r, ok := matchDatagram(buf[:n], proto, peer, isV6, id, seq, dstAddr); ok {
+		if r, ok := matchDatagram(buf[:n], proto, peer, isV6, id, seq, dst); ok {
 			r.rtt = elapsed
 			return r
 		}
