@@ -223,7 +223,9 @@ func TestFlushOnceDropsPermanentlyRejectedBatch(t *testing.T) {
 // transient must still requeue, and 5xx must be untouched.
 func TestFlushOnceRequeuesRetryableStatuses(t *testing.T) {
 	for _, status := range []int{
+		http.StatusProxyAuthRequired,
 		http.StatusRequestTimeout,
+		http.StatusMisdirectedRequest,
 		http.StatusTooEarly,
 		http.StatusTooManyRequests,
 		http.StatusInternalServerError,
@@ -253,5 +255,38 @@ func TestFlushOncePreservesAuthAndNotFound(t *testing.T) {
 	}
 	if buffered != 0 {
 		t.Errorf("404: %d cycles buffered, want the batch dropped", buffered)
+	}
+}
+
+// The retryable set is the statuses whose own RFC says the same bytes may
+// succeed later or on another connection, not the three someone remembered.
+// Sweeping the whole 4xx range makes adding a status a deliberate act: a new
+// one defaults to a drop, which is data loss.
+func TestRetryable4xxMatchesTheRFC(t *testing.T) {
+	want := map[int]string{
+		http.StatusProxyAuthRequired:  "RFC 9110 15.5.8: the proxy demands credentials, not a verdict on the batch",
+		http.StatusRequestTimeout:     "RFC 9110 15.5.9: the client MAY repeat the request without modifications",
+		http.StatusMisdirectedRequest: "RFC 9110 15.5.20: the client MAY retry the request over a different connection",
+		http.StatusTooEarly:           "RFC 8470 5.2: replay the request once it is not early data",
+		http.StatusTooManyRequests:    "RFC 6585 4: a transient rate limit",
+	}
+	for code := 400; code < 500; code++ {
+		reason, isRetryable := want[code]
+		if got := retryable4xx(code); got != isRetryable {
+			if isRetryable {
+				t.Errorf("%d is dropped but %s", code, reason)
+			} else {
+				t.Errorf("%d is retried; a status with no transient reading head-of-line blocks the ring", code)
+			}
+		}
+	}
+	// The three statuses classified before retryable4xx is consulted must not
+	// also appear in it, or their own handling becomes unreachable.
+	for _, code := range []int{
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+	} {
+		if retryable4xx(code) {
+			t.Errorf("%d is both specially handled and retryable", code)
+		}
 	}
 }

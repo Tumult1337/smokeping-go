@@ -502,13 +502,29 @@ Key points a reader can't derive from a single file:
   ring with drop-oldest on overflow; a failed push `Requeue`s on 5xx /
   network errors and drops on 404 (master lost state; next /register
   re-establishes us) and on `ErrRejected` — every 4xx except 401, 403, 404
-  and the transient `retryable4xx` set (408, 425, 429). A 4xx the master
+  and the transient `retryable4xx` set. A 4xx the master
   will answer identically forever (a batch outside the ingest bounds, or
   one whose oldest cycle aged past `MaxCycleAge` during an outage) must not
   requeue: it head-of-line blocks the ring, so every later flush re-sends
   the same doomed batch while drop-oldest discards the live cycles behind
   it. The drop logs at Error with the master's own message, because a
-  master, WAF or proxy answering 4xx to everything is now silent data loss. A 401 on any endpoint cancels the runner's
+  master, WAF or proxy answering 4xx to everything is now silent data loss.
+
+  **`retryable4xx` is derived from each status's own specification**, not
+  from the master's behaviour, because any intermediary on the path can
+  answer: 407 (RFC 9110 §15.5.8 — the *proxy* wants credentials, which says
+  nothing about the batch, and the master never emits it), 408 (§15.5.9,
+  "the client MAY repeat the request without modifications"), 421 (§15.5.20,
+  "the client MAY retry the request over a different connection" — a reverse
+  proxy's routing condition), 425 (RFC 8470 §5.2) and 429 (RFC 6585 §4).
+  409 is deliberately *not* in the set: its "resubmit" is conditioned on the
+  user resolving the conflict, not on time passing.
+  `TestRetryable4xxMatchesTheRFC` sweeps 400–499 so a status added without a
+  citation reddens, and asserts none of 401/403/404 appear — those are
+  classified before `retryable4xx` is consulted, so listing one there would
+  make its own handling unreachable. The cost of a wrong entry is the
+  head-of-line block above; the `push failed, requeueing` Warn on every
+  flush is the signal. A 401 on any endpoint cancels the runner's
   context with cause = `ErrAuth` so the process exits non-zero and the
   operator must rotate the token. Target-set fingerprint changes (group
   + name + probe + host + url + interval + pings) trigger a scheduler

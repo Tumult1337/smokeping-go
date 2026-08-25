@@ -51,13 +51,33 @@ var ErrNotFound = errors.New("cluster: 404 not found")
 // same doomed batch while drop-oldest discards the live cycles behind it.
 var ErrRejected = errors.New("cluster: batch permanently rejected")
 
-// retryable4xx are the client-error statuses that are a condition of the
-// moment rather than of the batch, so resending the same bytes can succeed.
-// Anything else in 4xx is ErrRejected; 401, 403 and 404 are classified before
-// this is consulted.
+// retryable4xx are the client-error statuses whose own specification says the
+// same bytes may succeed later or on another connection, so they describe the
+// moment rather than the batch. Anything else in 4xx is ErrRejected; 401, 403
+// and 404 are classified before this is consulted. Entries are the RFC's
+// reading, not a guess at the master's behaviour, because the answer can come
+// from any intermediary on the path.
 func retryable4xx(code int) bool {
 	switch code {
-	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+	// RFC 9110 15.5.8: the proxy is demanding credentials, which says nothing
+	// about the batch. The master never emits it, so only an intermediary can,
+	// and dropping there loses data for a reason unrelated to the payload.
+	case http.StatusProxyAuthRequired:
+		return true
+	// RFC 9110 15.5.9: "the client MAY repeat the request without
+	// modifications at any later time".
+	case http.StatusRequestTimeout:
+		return true
+	// RFC 9110 15.5.20: "the client MAY retry the request over a different
+	// connection" — a reverse proxy's routing condition, not a verdict.
+	case http.StatusMisdirectedRequest:
+		return true
+	// RFC 8470 5.2: the server refused early data; the same request succeeds
+	// once it is not replayable.
+	case http.StatusTooEarly:
+		return true
+	// RFC 6585 4: a transient rate limit.
+	case http.StatusTooManyRequests:
 		return true
 	}
 	return false
