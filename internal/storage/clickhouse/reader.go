@@ -483,14 +483,18 @@ func (r *Reader) queryCycleCounters(ctx context.Context, ref config.TargetRef, h
 		last = max(last, ms)
 	}
 	args := append([]any{ref.Target.Name, ref.Group, first, last}, tuples...)
+	// GROUP BY, not raw rows: ingestion is at-least-once and probe_cycle is an
+	// ordinary MergeTree, so a requeued push leaves the same cycle twice and a
+	// LIMIT sized by the key count would spend it on one source's duplicates.
 	q := `
-SELECT source, timestamp, sent, lost, loss_pct
+SELECT source, timestamp, any(sent), any(lost), any(loss_pct)
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
   AND timestamp >= fromUnixTimestamp64Milli(?)
   AND timestamp <= fromUnixTimestamp64Milli(?)
   AND (source, timestamp) IN (` + strings.Join(pairs, ", ") + `)
+GROUP BY source, timestamp
 LIMIT ` + strconv.Itoa(len(keys))
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
