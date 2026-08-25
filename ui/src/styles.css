@@ -17,7 +17,8 @@
   --text-dim:   #cfd3dd;
   --text-muted: #8a93a6;
   --text-faint: #4a5160;
-  --text-id:    #6b7282;  /* monospace ids (consolidates #6b7282 / #6b7284) */
+  --text-subtle: #8b909b;  /* faint but meaningful text; 5.15:1 on --surface-hover */
+  --text-id:    #878d9b;  /* monospace ids; 4.95:1 on --surface-hover */
 
   /* Blue — interactive only: focus, selected, active, sort, drag.
      Single source of truth: change --accent-rgb (one line) to retint every
@@ -192,7 +193,7 @@ th.overview-th { padding: 0; }
   white-space: nowrap;
 }
 
-.overview-na { color: var(--text-faint); }
+.overview-na { color: var(--text-subtle); }
 
 .overview-spark-col {
   width: 72px;

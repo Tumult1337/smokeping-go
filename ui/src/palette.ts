@@ -17,22 +17,24 @@
 // >8 slaves against one target, the upgrade path is a secondary channel (e.g.
 // a dashed stroke on the repeated half) rather than adding more hues — more
 // hues at this point stop being reliably distinguishable, colorblind or not.
-export const PALETTE: { stroke: string; fill: (a: number) => string }[] = [
-  { stroke: "#3987e5", fill: (a) => `rgba(57,135,229,${a})` },
-  { stroke: "#d95926", fill: (a) => `rgba(217,89,38,${a})` },
-  { stroke: "#199e70", fill: (a) => `rgba(25,158,112,${a})` },
-  { stroke: "#c98500", fill: (a) => `rgba(201,133,0,${a})` },
-  { stroke: "#d55181", fill: (a) => `rgba(213,81,129,${a})` },
-  { stroke: "#008300", fill: (a) => `rgba(0,131,0,${a})` },
-  { stroke: "#9085e9", fill: (a) => `rgba(144,133,233,${a})` },
-  { stroke: "#e66767", fill: (a) => `rgba(230,103,103,${a})` },
+// `text` is the same hue lightened where the stroke misses the 4.5:1 small-text
+// gate; strokes are graphics (3:1) and stay exactly as validated above.
+export const PALETTE: { stroke: string; text: string; fill: (a: number) => string }[] = [
+  { stroke: "#3987e5", text: "#4b91e8", fill: (a) => `rgba(57,135,229,${a})` },
+  { stroke: "#d95926", text: "#e06a3c", fill: (a) => `rgba(217,89,38,${a})` },
+  { stroke: "#199e70", text: "#199e70", fill: (a) => `rgba(25,158,112,${a})` },
+  { stroke: "#c98500", text: "#c98500", fill: (a) => `rgba(201,133,0,${a})` },
+  { stroke: "#d55181", text: "#dc6693", fill: (a) => `rgba(213,81,129,${a})` },
+  { stroke: "#008300", text: "#3aa23a", fill: (a) => `rgba(0,131,0,${a})` },
+  { stroke: "#9085e9", text: "#9085e9", fill: (a) => `rgba(144,133,233,${a})` },
+  { stroke: "#e66767", text: "#e66767", fill: (a) => `rgba(230,103,103,${a})` },
 ];
 
 // paletteForSorted maps sorted source names → palette entries the way both
 // chart components do, so callers can render UI affordances in the same colour
 // the line on the chart uses.
-export function paletteForSorted(sortedSources: string[]): Map<string, { stroke: string; fill: (a: number) => string }> {
-  const out = new Map<string, { stroke: string; fill: (a: number) => string }>();
+export function paletteForSorted(sortedSources: string[]): Map<string, { stroke: string; text: string; fill: (a: number) => string }> {
+  const out = new Map<string, { stroke: string; text: string; fill: (a: number) => string }>();
   sortedSources.forEach((name, i) => {
     out.set(name, PALETTE[i % PALETTE.length]);
   });
@@ -49,4 +51,13 @@ export function lossColor(pct: number, okColor: string): string {
   if (pct < 5) return "#eab308";
   if (pct < 20) return "#f97316";
   return "#ef4444";
+}
+
+// lossColor's ramp with the >=20% red lightened to clear 4.5:1 as small text.
+// Canvas marks keep lossColor — they are graphics, gated at 3:1.
+export function lossTextColor(pct: number, okColor: string): string {
+  if (pct <= 0) return okColor;
+  if (pct < 5) return "#eab308";
+  if (pct < 20) return "#f97316";
+  return "#f15c5c";
 }

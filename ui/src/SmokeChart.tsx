@@ -307,7 +307,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
                   <button
                     type="button"
                     className="smoke-legend-name smoke-legend-name-btn"
-                    style={{ color: palette.stroke }}
+                    style={{ color: palette.text }}
                     onClick={() => {
                       const next = soloSource === src ? null : src;
                       setSoloSource(next);
@@ -320,7 +320,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
                 ) : (
                   <span
                     className="smoke-legend-name"
-                    style={{ color: palette.stroke }}
+                    style={{ color: palette.text }}
                   >
                     {src || "—"}
                   </span>

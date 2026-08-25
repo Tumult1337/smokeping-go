@@ -4,7 +4,7 @@ import { HopsPath } from "./HopsTable";
 import { HopsTable } from "./HopsTable";
 import { MtrHeatmap } from "./MtrHeatmap";
 import { countDistinct, useCollapsedSources } from "./mtrUtils";
-import { lossColor } from "./palette";
+import { lossTextColor } from "./palette";
 
 interface Props {
   targetId: string;
@@ -256,7 +256,7 @@ function MultiSourceLayout({
                   {countDistinct(g.hops) === 1 ? "" : "s"}
                   <span
                     className="mtr-section-worst"
-                    style={{ color: lossColor(endToEndLoss, "#4a5160") }}
+                    style={{ color: lossTextColor(endToEndLoss, "var(--text-subtle)") }}
                   >
                     loss {endToEndLoss.toFixed(1)}%
                   </span>

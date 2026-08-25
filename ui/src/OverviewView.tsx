@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getOverview, type OverviewRow, type OverviewWindow } from "./api";
-import { lossColor } from "./palette";
+import { lossTextColor } from "./palette";
 
 // SortKey covers every clickable column header. The "target" sort orders
 // rows alphabetically by id — handy when the user wants a stable view
@@ -337,7 +337,7 @@ function Row({
         {row.loss_avg == null ? (
           <span className="overview-na">—</span>
         ) : (
-          <span style={{ color: lossColor(row.loss_avg, "#cfd3dd") }}>
+          <span style={{ color: lossTextColor(row.loss_avg, "#cfd3dd") }}>
             {row.loss_avg.toFixed(1)}%
           </span>
         )}
@@ -346,7 +346,7 @@ function Row({
         {row.loss_max == null ? (
           <span className="overview-na">—</span>
         ) : (
-          <span style={{ color: lossColor(row.loss_max, "#cfd3dd") }}>
+          <span style={{ color: lossTextColor(row.loss_max, "#cfd3dd") }}>
             {row.loss_max.toFixed(1)}%
           </span>
         )}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getHopsTimeline, type HopPoint } from "./api";
-import { lossColor } from "./palette";
+import { lossColor, lossTextColor } from "./palette";
 import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
 import { cycleAtSec } from "./chartUtils";
 
@@ -173,7 +173,7 @@ export function MtrHeatmap({
                 {hopCount} hop{hopCount === 1 ? "" : "s"}
                 <span
                   className="mtr-heatmap-worst"
-                  style={{ color: lossColor(worstLoss, "#4a5160") }}
+                  style={{ color: lossTextColor(worstLoss, "var(--text-subtle)") }}
                 >
                   max {worstLoss.toFixed(1)}%
                 </span>

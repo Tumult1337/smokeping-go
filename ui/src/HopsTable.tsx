@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getHops, type HopPoint } from "./api";
-import { lossColor } from "./palette";
+import { lossTextColor } from "./palette";
 
 interface Props {
   targetId: string;
@@ -190,7 +190,7 @@ export function HopsPath({
                     </span>
                   )}
                 </td>
-                <td className="num" style={{ color: lossColor(h.LossPct, "#cfd3dd") }}>
+                <td className="num" style={{ color: lossTextColor(h.LossPct, "#cfd3dd") }}>
                   {h.LossPct.toFixed(1)}
                 </td>
                 <td className="num">{h.Sent}</td>

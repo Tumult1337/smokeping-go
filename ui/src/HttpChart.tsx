@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData } from "uplot";
 import { getHttpSamples, type HttpPoint } from "./api";
-import { paletteForSorted, lossColor } from "./palette";
+import { paletteForSorted, lossTextColor } from "./palette";
 import { colorFor, statusLabel, statusClass, isSuccess, type StatusClass } from "./httpStatus";
 import { StatusStrip } from "./StatusStrip";
 
@@ -347,7 +347,7 @@ export function HttpChart({
         <div className="stats" style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 16 }}>
           <span>
             uptime:{" "}
-            <strong style={{ color: lossColor(100 - summary.uptime, "#5eead4") }}>
+            <strong style={{ color: lossTextColor(100 - summary.uptime, "#5eead4") }}>
               {summary.uptime.toFixed(1)}%
             </strong>{" "}
             <span style={{ color: "#8a93a6" }}>({summary.total} samples)</span>

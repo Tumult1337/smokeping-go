@@ -428,7 +428,7 @@ function BarChartLegend({
               <button
                 type="button"
                 className="smoke-legend-name smoke-legend-name-btn"
-                style={{ color: palette.stroke }}
+                style={{ color: palette.text }}
                 onClick={() => {
                   const next = soloSource === src ? null : src;
                   setSoloSource(() => next);
@@ -441,7 +441,7 @@ function BarChartLegend({
             ) : (
               <span
                 className="smoke-legend-name"
-                style={{ color: palette.stroke }}
+                style={{ color: palette.text }}
               >
                 {src || "—"}
               </span>

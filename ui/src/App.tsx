@@ -11,7 +11,7 @@ import { SmokeChart } from "./SmokeChart";
 import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
 import { MtrSection } from "./MtrSection";
-import { paletteForSorted, lossColor } from "./palette";
+import { paletteForSorted, lossTextColor } from "./palette";
 import { effectiveMin, windowLoss } from "./chartUtils";
 import { OverviewView, type SortKey, type SortDir } from "./OverviewView";
 import type { OverviewWindow } from "./api";
@@ -897,7 +897,7 @@ export default function App() {
                           key={s}
                           type="button"
                           className={`chip ${selectedSource === s ? "active" : ""}`}
-                          style={c ? { color: c.stroke } : undefined}
+                          style={c ? { color: c.text } : undefined}
                           onClick={() => {
                             if (selectedSource !== s) navIntentRef.current = "push";
                             setSelectedSource(s);
@@ -980,13 +980,13 @@ export default function App() {
                       {windowStats.loss == null ? (
                         <strong>—</strong>
                       ) : (
-                        <strong style={{ color: lossColor(windowStats.loss, "#8a93a6") }}>
+                        <strong style={{ color: lossTextColor(windowStats.loss, "#8a93a6") }}>
                           {windowStats.loss.toFixed(1)}%
                         </strong>
                       )}{" "}
                       <span style={{ color: "var(--text-muted)" }}>
                         (max{" "}
-                        <strong style={{ color: lossColor(windowStats.maxLoss, "#8a93a6") }}>
+                        <strong style={{ color: lossTextColor(windowStats.maxLoss, "#8a93a6") }}>
                           {windowStats.maxLoss.toFixed(1)}%
                         </strong>
                         )
