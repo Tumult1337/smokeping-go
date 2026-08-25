@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"net"
 	"time"
@@ -32,18 +33,33 @@ func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, tim
 		return nil, false, fmt.Errorf("resolve %q: %w", host, err)
 	}
 	isV6 := ip.IP.To4() == nil
-	conn, err := listenRaw(isV6)
+	conn, err := listenRawFn(isV6)
 	if err != nil {
-		return nil, false, fmt.Errorf("%w: %v", errRawUnavailable, err)
+		return nil, false, classifyListenErr(err)
 	}
 	defer func() { _ = conn.Close() }()
 	return traceOnConn(ctx, conn, ip, isV6, rounds, maxTTL, timeout, spacing)
 }
 
-// errRawUnavailable wraps the underlying OS error when a raw ICMP socket
-// can't be opened (typically EPERM without CAP_NET_RAW). Callers that want to
-// degrade gracefully (e.g., icmp probe) check this with errors.Is.
+// errRawUnavailable wraps the underlying OS error when a raw ICMP socket is
+// refused for lack of permission (EPERM/EACCES without CAP_NET_RAW). Callers
+// that want to degrade gracefully (e.g., icmp probe) check this with
+// errors.Is; transient failures deliberately never carry it.
 var errRawUnavailable = errors.New("raw icmp socket unavailable")
+
+// listenRawFn is the injectable seam over listenRaw so tests can drive the
+// error classification below without a socket.
+var listenRawFn = listenRaw
+
+// classifyListenErr reserves errRawUnavailable for permission failures: that
+// class is logged once per process, so folding a transient EMFILE into it
+// silences every later raw-socket failure.
+func classifyListenErr(err error) error {
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("%w: %w", errRawUnavailable, err)
+	}
+	return fmt.Errorf("open trace socket: %w", err)
+}
 
 // traceOnConn is the core TTL-walk loop, separated from socket setup so the
 // caller can supply a shared conn if it already has one open.

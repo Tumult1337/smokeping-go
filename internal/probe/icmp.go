@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -200,7 +201,10 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		case errors.Is(tr.err, errRawUnavailable):
 			logRawUnavailableOnce(tr.err)
 		default:
-			slog.Debug("icmp trace error", "probe", i.name, "host", t.Host, "err", tr.err)
+			if ok, suppressed := traceErrLogAllowed(time.Since(traceErrEpoch)); ok {
+				slog.Warn("icmp trace error", "probe", i.name, "host", t.Host,
+					"suppressed", suppressed, "err", tr.err)
+			}
 		}
 	}()
 
@@ -237,6 +241,41 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	}
 
 	return result, nil
+}
+
+// traceErrLogEvery throttles transient trace-failure warns process-wide; at
+// the deployed 122-target/20s install an unthrottled fd-exhaustion emits ~6
+// lines a second and buries the incident it reports.
+const traceErrLogEvery = 1 * time.Minute
+
+var (
+	traceErrEpoch      = time.Now()
+	traceErrLastLog    atomic.Int64
+	traceErrSuppressed atomic.Uint64
+)
+
+// traceErrLogAllowed reports whether a warn may be emitted at sinceStart
+// elapsed (monotonic, from traceErrEpoch — never wall clock; time.Since is
+// strictly positive, and 0 is the never-logged sentinel), admitting at most
+// one per traceErrLogEvery. When allowed it returns and resets the count of
+// warns the window swallowed, so the emitted line can carry suppressed=N —
+// a throttle without a count is a blind window.
+func traceErrLogAllowed(sinceStart time.Duration) (bool, uint64) {
+	for {
+		last := traceErrLastLog.Load()
+		if last != 0 && sinceStart-time.Duration(last) < traceErrLogEvery {
+			traceErrSuppressed.Add(1)
+			return false, 0
+		}
+		if traceErrLastLog.CompareAndSwap(last, int64(sinceStart)) {
+			return true, traceErrSuppressed.Swap(0)
+		}
+	}
+}
+
+func resetTraceErrThrottle() {
+	traceErrLastLog.Store(0)
+	traceErrSuppressed.Store(0)
 }
 
 var rawUnavailableOnce sync.Once

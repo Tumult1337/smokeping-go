@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -500,5 +501,42 @@ func TestICMPProbePassesDerivedTimeoutToSend(t *testing.T) {
 	if timeouts[count-1] <= 4*timeouts[0] {
 		t.Fatalf("last send got %v against a first of %v: the budget is not recomputed per ping",
 			timeouts[count-1], timeouts[0])
+	}
+}
+
+// Transient trace errors must surface at Warn — Debug is invisible at the
+// default level, which is how a fleet lost hops silently after one EMFILE
+// burned the sync.Once permission line. Drives the real Probe so the defer
+// switch, not a helper, is under test.
+func TestICMPProbeWarnsOnTransientTraceError(t *testing.T) {
+	resetTraceErrThrottle()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	p := NewICMP("icmp", time.Second, false)
+	p.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, bool, error) {
+		return nil, false, errors.New("no buffer space available")
+	}
+	p.send = func(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq int, timeout time.Duration) (time.Duration, error) {
+		return time.Millisecond, nil
+	}
+
+	res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1)
+	if res == nil {
+		t.Skipf("ICMP echo unavailable here (no unprivileged ping / CAP_NET_RAW): %v", err)
+	}
+	if !strings.Contains(buf.String(), "icmp trace error") {
+		t.Fatalf("transient trace error did not reach Warn:\n%s", buf.String())
+	}
+
+	// Second cycle inside the throttle window must not add a second line.
+	before := buf.Len()
+	if _, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1); err != nil {
+		t.Fatalf("second probe: %v", err)
+	}
+	if buf.Len() != before {
+		t.Fatalf("throttle did not suppress the second warn:\n%s", buf.String())
 	}
 }
