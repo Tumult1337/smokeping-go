@@ -15,7 +15,7 @@ func TestAddColumnStatements(t *testing.T) {
 		"ALTER TABLE probe_hop ADD COLUMN IF NOT EXISTS target_group LowCardinality(String) AFTER target_id",
 		"ALTER TABLE probe_http ADD COLUMN IF NOT EXISTS target_group LowCardinality(String) AFTER target_id",
 		"ALTER TABLE probe_hop ADD COLUMN IF NOT EXISTS unreach LowCardinality(String) AFTER hop_addr",
-		"ALTER TABLE probe_hop ADD COLUMN IF NOT EXISTS target_reply UInt8 AFTER unreach",
+		"ALTER TABLE probe_hop ADD COLUMN IF NOT EXISTS target_reply UInt8 CODEC(T64, ZSTD(1)) AFTER unreach",
 	}
 	if len(stmts) != len(want) {
 		t.Fatalf("got %d statements, want %d:\n%s", len(stmts), len(want), strings.Join(stmts, "\n"))

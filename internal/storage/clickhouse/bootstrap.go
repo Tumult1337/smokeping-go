@@ -101,14 +101,16 @@ func tlsConfig(enabled bool) *tls.Config {
 // stay ahead of NewWriter in openStorage. Metadata-only: no historical part is
 // rewritten, and old rows read as "" / 0, which is why the reader requires a
 // non-empty group rather than treating "" as a wildcard. Order matters:
-// unreach must exist before target_reply's AFTER clause names it.
+// unreach must exist before target_reply's AFTER clause names it, and each
+// type must carry the same codec its CREATE TABLE column does or an upgraded
+// deployment ends up with a different column definition than a fresh one.
 func addColumnStatements(cluster string) []string {
 	cols := []struct{ table, column, typ, after string }{
 		{"probe_rtt", "target_group", "LowCardinality(String)", "target_id"},
 		{"probe_hop", "target_group", "LowCardinality(String)", "target_id"},
 		{"probe_http", "target_group", "LowCardinality(String)", "target_id"},
 		{"probe_hop", "unreach", "LowCardinality(String)", "hop_addr"},
-		{"probe_hop", "target_reply", "UInt8", "unreach"},
+		{"probe_hop", "target_reply", "UInt8 CODEC(T64, ZSTD(1))", "unreach"},
 	}
 	out := make([]string, 0, len(cols))
 	for _, c := range cols {

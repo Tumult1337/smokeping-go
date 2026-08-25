@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -1597,27 +1598,35 @@ func TestIntegrationBootstrapUpgradesLegacyTables(t *testing.T) {
 	}
 	defer conn.Close()
 
-	columnType := func(table, column string) string {
-		var types []string
+	// The codec is asserted alongside the type: an ADD COLUMN that omits the
+	// codec its CREATE TABLE column carries leaves an upgraded deployment with
+	// a different column definition than a fresh one.
+	columnDef := func(table, column string) (string, string) {
+		var defs []string
 		err := conn.QueryRow(ctx,
-			"SELECT groupArray(type) FROM system.columns WHERE database = ? AND table = ? AND name = ?",
+			"SELECT groupArray(concat(type, '\t', compression_codec)) FROM system.columns WHERE database = ? AND table = ? AND name = ?",
 			cfg.Database, table, column,
-		).Scan(&types)
+		).Scan(&defs)
 		if err != nil {
 			t.Fatalf("system.columns %s.%s: %v", table, column, err)
 		}
-		if len(types) == 0 {
-			return ""
+		if len(defs) == 0 {
+			return "", ""
 		}
-		return types[0]
+		typ, codec, _ := strings.Cut(defs[0], "\t")
+		return typ, codec
+	}
+	columnType := func(table, column string) string {
+		typ, _ := columnDef(table, column)
+		return typ
 	}
 
-	added := []struct{ table, column, typ string }{
-		{"probe_rtt", "target_group", "LowCardinality(String)"},
-		{"probe_hop", "target_group", "LowCardinality(String)"},
-		{"probe_http", "target_group", "LowCardinality(String)"},
-		{"probe_hop", "unreach", "LowCardinality(String)"},
-		{"probe_hop", "target_reply", "UInt8"},
+	added := []struct{ table, column, typ, codec string }{
+		{"probe_rtt", "target_group", "LowCardinality(String)", ""},
+		{"probe_hop", "target_group", "LowCardinality(String)", ""},
+		{"probe_http", "target_group", "LowCardinality(String)", ""},
+		{"probe_hop", "unreach", "LowCardinality(String)", ""},
+		{"probe_hop", "target_reply", "UInt8", "CODEC(T64, ZSTD(1))"},
 	}
 	for _, c := range added {
 		stmt := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", c.table, c.column)
@@ -1633,8 +1642,13 @@ func TestIntegrationBootstrapUpgradesLegacyTables(t *testing.T) {
 		t.Fatalf("re-bootstrap: %v", err)
 	}
 	for _, c := range added {
-		if got := columnType(c.table, c.column); got != c.typ {
-			t.Fatalf("%s.%s after upgrade = %q, want %q", c.table, c.column, got, c.typ)
+		typ, codec := columnDef(c.table, c.column)
+		if typ != c.typ {
+			t.Fatalf("%s.%s after upgrade = %q, want %q", c.table, c.column, typ, c.typ)
+		}
+		if codec != c.codec {
+			t.Fatalf("%s.%s codec after upgrade = %q, want %q — a fresh CREATE TABLE and an upgrade must agree",
+				c.table, c.column, codec, c.codec)
 		}
 	}
 
