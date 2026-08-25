@@ -141,7 +141,7 @@ type hopsCacheKey struct {
 	// stepSec is the resolved bucket width. Two windows that quantize to the
 	// same from/to but straddle a step-ladder boundary resolve to different
 	// bucket widths; without this they would collide and serve wrong-shaped
-	// data. Zero for raw/latest.
+	// data. Zero for the pinned kinds, which read one cycle rather than a grid.
 	stepSec int64
 }
 
