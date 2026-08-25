@@ -34,6 +34,10 @@ interface Props {
   source?: string;
 }
 
+// One overview re-render per interval, independent of the data refresh: the
+// label must keep ageing when auto-refresh is off.
+const LAST_SEEN_TICK_MS = 15_000;
+
 const WINDOW_BUTTONS: { label: string; value: OverviewWindow }[] = [
   { label: "1h", value: "-1h" },
   { label: "6h", value: "-6h" },
@@ -57,6 +61,11 @@ export function OverviewView(props: Props) {
   } = props;
 
   const [rows, setRows] = useState<OverviewRow[] | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), LAST_SEEN_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   // prevKeyRef tracks the last (window, source) we fetched. A change to either
@@ -222,6 +231,7 @@ export function OverviewView(props: Props) {
                 <Row
                   key={row.id}
                   row={row}
+                  nowMs={nowMs}
                   hideWorstSrc={!!source}
                   onPick={() => onPickTarget(row.id, source)}
                 />
@@ -293,10 +303,12 @@ function Th(props: {
 
 function Row({
   row,
+  nowMs,
   onPick,
   hideWorstSrc,
 }: {
   row: OverviewRow;
+  nowMs: number;
   onPick: () => void;
   hideWorstSrc?: boolean;
 }) {
@@ -340,7 +352,7 @@ function Row({
         {row.last_seen == null ? (
           <span className="overview-na">never</span>
         ) : (
-          relativeTime(row.last_seen)
+          relativeTime(row.last_seen, nowMs)
         )}
       </td>
       <td className="overview-spark-col">
@@ -355,9 +367,11 @@ function fmtMs(v: number | null): React.ReactNode {
   return <>{v.toFixed(1)}ms</>;
 }
 
-function relativeTime(iso: string): string {
+// Wall clock, not monotonic: this is the age of a server-supplied timestamp,
+// and there is no monotonic reading of a remote clock.
+function relativeTime(iso: string, nowMs: number): string {
   const t = new Date(iso).getTime();
-  const dSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  const dSec = Math.max(0, Math.floor((nowMs - t) / 1000));
   if (dSec < 60) return `${dSec}s ago`;
   if (dSec < 3600) return `${Math.floor(dSec / 60)}m ago`;
   if (dSec < 86400) return `${Math.floor(dSec / 3600)}h ago`;
