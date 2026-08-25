@@ -48,18 +48,20 @@ func TestCycleRoundTrip(t *testing.T) {
 		Summary:   summary,
 		Hops: []probe.Hop{
 			{
-				Index: 1,
-				IP:    "10.0.0.1",
-				RTTs:  []time.Duration{500 * time.Microsecond, 600 * time.Microsecond},
-				Sent:  3,
-				Lost:  1,
+				Index:   1,
+				IP:      "10.0.0.1",
+				Unreach: "admin-prohibited",
+				RTTs:    []time.Duration{500 * time.Microsecond, 600 * time.Microsecond},
+				Sent:    3,
+				Lost:    1,
 			},
 			{
-				Index: 2,
-				IP:    "10.0.0.2",
-				RTTs:  []time.Duration{900 * time.Microsecond},
-				Sent:  3,
-				Lost:  2,
+				Index:       2,
+				IP:          "10.0.0.2",
+				TargetReply: true,
+				RTTs:        []time.Duration{900 * time.Microsecond},
+				Sent:        3,
+				Lost:        2,
 			},
 		},
 		HTTPSamples: []probe.HTTPSample{
@@ -135,5 +137,45 @@ func TestCycleRoundTripEmptySlices(t *testing.T) {
 	}
 	if len(got.HTTPSamples) != 0 {
 		t.Errorf("http samples should round-trip empty, got %d", len(got.HTTPSamples))
+	}
+}
+
+// A slave is authenticated but not trusted: whatever it puts in unreach lands
+// in a LowCardinality dictionary and in browsers, so ToCycle folds anything
+// outside the closed set to the fixed fallback. Empty stays empty — inventing
+// an annotation would mark every hop unreachable. TargetReply crosses
+// verbatim: extra marks only widen master-side redaction, which fails closed.
+func TestToCycleNormalizesUnreach(t *testing.T) {
+	target := config.Target{Name: "gw"}
+	mk := func(unreach string) cluster.CyclePayload {
+		return cluster.CyclePayload{Hops: []cluster.HopDTO{{Index: 2, IP: "10.0.0.2", Unreach: unreach}}}
+	}
+	if got := mk("admin-prohibited").ToCycle(target).Hops[0].Unreach; got != "admin-prohibited" {
+		t.Fatalf("valid label rewritten: %q", got)
+	}
+	if got := mk("").ToCycle(target).Hops[0].Unreach; got != "" {
+		t.Fatalf("empty label invented: %q", got)
+	}
+	if got := mk("<img src=x onerror=alert(1)>").ToCycle(target).Hops[0].Unreach; got != "unreachable-other" {
+		t.Fatalf("hostile label survived ingest: %q", got)
+	}
+}
+
+// FromCycle must carry both annotations at all — without this, the
+// normalization test passes against a wire that silently drops the fields.
+func TestCycleRoundTripCarriesHopAnnotations(t *testing.T) {
+	c := scheduler.Cycle{Hops: []probe.Hop{{Index: 2, IP: "10.0.0.2", Unreach: "no-route", TargetReply: true}}}
+	p := cluster.FromCycle(c)
+	buf, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back cluster.CyclePayload
+	if err := json.Unmarshal(buf, &back); err != nil {
+		t.Fatal(err)
+	}
+	got := back.ToCycle(config.Target{Name: "gw"}).Hops[0]
+	if got.Unreach != "no-route" || !got.TargetReply {
+		t.Fatalf("annotations lost over the wire: %+v", got)
 	}
 }

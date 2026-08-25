@@ -84,11 +84,14 @@ type CyclePayload struct {
 // HopDTO mirrors probe.Hop. Kept separate from the domain type so adding a
 // new internal field on probe.Hop doesn't silently change the wire shape.
 type HopDTO struct {
-	Index int             `json:"index"`
-	IP    string          `json:"ip,omitempty"`
-	RTTs  []time.Duration `json:"rtts,omitempty"`
-	Sent  int             `json:"sent"`
-	Lost  int             `json:"lost"`
+	Index int    `json:"index"`
+	IP    string `json:"ip,omitempty"`
+	// Unreach is normalized at ingest (ToCycle): a slave's value is untrusted.
+	Unreach     string          `json:"unreach,omitempty"`
+	TargetReply bool            `json:"target_reply,omitempty"`
+	RTTs        []time.Duration `json:"rtts,omitempty"`
+	Sent        int             `json:"sent"`
+	Lost        int             `json:"lost"`
 }
 
 // HTTPSampleDTO mirrors probe.HTTPSample.
@@ -107,7 +110,15 @@ type HTTPSampleDTO struct {
 func (p CyclePayload) ToCycle(target config.Target) scheduler.Cycle {
 	hops := make([]probe.Hop, len(p.Hops))
 	for i, h := range p.Hops {
-		hops[i] = probe.Hop{Index: h.Index, IP: h.IP, RTTs: h.RTTs, Sent: h.Sent, Lost: h.Lost}
+		hops[i] = probe.Hop{
+			Index:       h.Index,
+			IP:          h.IP,
+			TargetReply: h.TargetReply,
+			Unreach:     probe.CanonicalUnreach(h.Unreach),
+			RTTs:        h.RTTs,
+			Sent:        h.Sent,
+			Lost:        h.Lost,
+		}
 	}
 	samples := make([]probe.HTTPSample, len(p.HTTPSamples))
 	for i, s := range p.HTTPSamples {
@@ -131,7 +142,15 @@ func (p CyclePayload) ToCycle(target config.Target) scheduler.Cycle {
 func FromCycle(c scheduler.Cycle) CyclePayload {
 	hops := make([]HopDTO, len(c.Hops))
 	for i, h := range c.Hops {
-		hops[i] = HopDTO{Index: h.Index, IP: h.IP, RTTs: h.RTTs, Sent: h.Sent, Lost: h.Lost}
+		hops[i] = HopDTO{
+			Index:       h.Index,
+			IP:          h.IP,
+			Unreach:     h.Unreach,
+			TargetReply: h.TargetReply,
+			RTTs:        h.RTTs,
+			Sent:        h.Sent,
+			Lost:        h.Lost,
+		}
 	}
 	samples := make([]HTTPSampleDTO, len(c.HTTPSamples))
 	for i, s := range c.HTTPSamples {
