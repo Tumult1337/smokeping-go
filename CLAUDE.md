@@ -89,7 +89,7 @@ Key points a reader can't derive from a single file:
   and `storage.PickHopStep` (in `internal/storage/backend.go`) are the
   single decision points, called from the API layer. Tier ladders:
   - cycles: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h, >180d 1d
-  - hops:   ≤2h raw, ≤24h 5m, >24h 15m
+  - hops:   ≤2h 11s, ≤24h 5m, >24h 15m, never finer than the probe interval
 
   **Write buffers.** Each table's channel is sized by
   `writerChanCap(table, pings)` (base 4096 slots × a rows-per-cycle factor,
@@ -327,8 +327,9 @@ Key points a reader can't derive from a single file:
   because a window holding a single bucket has no row gap to measure. Sizing
   a column from row count instead painted that one bucket across the entire
   window, reading as hours of history that had not been collected. `step_sec`
-  is 0 on the raw tier, where the median inter-cycle gap is the right estimate
-  since raw cycles are not grid-aligned.
+  is always positive: the hop ladder has no raw tier, because a slot per cycle
+  puts the producer's cycle rate — the one factor nothing bounds — back into
+  the row cap below.
 
 - **Cluster mode (master/slave):** `--slave` flips the binary into a
   runner that registers with a master, pulls the target list over HTTP,
@@ -542,12 +543,18 @@ Key points a reader can't derive from a single file:
   on `/hops/timeline`; an empty value is the untagged pre-cluster origin,
   and a missing one is a 400. The heatmap already fetches and draws one
   canvas per source, so the UI never sends the request that is refused.
-  The raw tier (≤2h, one slot per cycle) is inside the same ceiling
-  without a bucket ladder to lean on: `probe` walks one TTL per 50ms and
-  the scheduler runs one cycle per (source, target) at a time, so 2h of
-  one origin's hop rows is at most 144,000. On the bucketed tier no
-  schema-legal result can reach the cap at all, which is the point — the
-  refusal is an assertion about the data, not a policy about the query.
+  **Every tier buckets**, so no schema-legal result reaches the cap at all,
+  which is the point — the refusal is an assertion about the data, not a
+  policy about the query. The ≤2h tier was raw and justified separately, on
+  `probe` walking one TTL per 50ms; a round ends at the target's own reply
+  *before* it pays that spacing and config bounds no interval from below, so
+  a one-hop MTR target at a 30ms interval wrote 240,000 rows into the window
+  that bound said held 144,000 — the fourth cap in a row set under its own
+  producer. `storage.MinHopStep` (11s) is `ceil(2h / (MaxHopGridSlots-1))`,
+  so the finest tier needs no more slots than the 7d tier the cap is derived
+  from, and no step goes below the probe interval: an empty slot renders as
+  history that was never collected. `docs/migrate-hops-timeline-contract.md`
+  carries the operator-facing form.
 
   Reaching either cap is reported, never trimmed. Hop reads order
   oldest-first, so the prefix a silent truncation left was missing the

@@ -31,7 +31,10 @@ slaves handle them; the whole batch is refused, never part of it.
 | Batch outside the ingest bounds — cycle count, hop rows, RTT array lengths, counters outside their storage column's range, or a timestamp outside `[now-7d, now+5m]` | 400 | Drops the batch and logs at Error. It previously requeued, which head-of-line blocked the ring until drop-oldest discarded everything behind it. |
 | Source not in the master's registry | 403 | Re-registers, keeps the batch, retries on the next push tick. |
 
-408, 425, 429, every 5xx and network errors still requeue unchanged.
+407, 408, 421, 425, 429, every 5xx and network errors still requeue unchanged.
+That set is each status's own specification, not the master's behaviour, because
+any proxy on the path can answer one; 421 also drops the idle connections it was
+misrouted over.
 
 A cycle buffered through an outage longer than seven days is now refused and
 dropped rather than written already past retention. At the shipped 600-cycle

@@ -42,3 +42,18 @@ producer limit derives it — a one-hop trace has no floor on how fast it can ru
 
 **If you consume the JSON directly**, drop any branch keyed on `step_sec == 0`.
 Sizing a column from `step_sec` is correct on every tier now.
+
+## `source` is required
+
+A request without the `source` parameter is refused with `400`. The endpoint
+serves one probe origin per request: the window and the ladder bound the grid
+and the `UInt8` ttl column bounds its other axis, but nothing bounds how many
+sources have rows in a window, so the origin is admitted rather than derived.
+An empty value is a source — the untagged pre-cluster origin — so `source=`
+alone is a valid request, and `source=master` is what a standalone install
+sends.
+
+**This breaks a direct consumer written against an earlier release.** The
+bundled UI fetches and draws one canvas per source and has always sent the
+parameter, so it never issues the refused request. A script that read the
+all-sources response has to loop over `/api/v1/sources` instead.

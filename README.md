@@ -256,7 +256,7 @@ loss.
 | GET | `/api/v1/targets/{group}/{name}/rtts?from&to` | Raw per-ping samples (window ≤24h) |
 | GET | `/api/v1/targets/{group}/{name}/http?from&to` | Raw HTTP samples (window ≤7d) |
 | GET | `/api/v1/targets/{group}/{name}/hops?at=<unix>` | Latest MTR path, or the one nearest `at` |
-| GET | `/api/v1/targets/{group}/{name}/hops/timeline?from&to` | Per-hop loss history (window ≤7d) |
+| GET | `/api/v1/targets/{group}/{name}/hops/timeline?from&to&source` | Per-hop loss history (window ≤7d, `source` required) |
 
 `from` / `to` accept RFC3339, unix seconds, or relative durations like `-24h`.
 The bucket width on `/cycles` and `/hops/timeline` is picked server-side from
@@ -275,12 +275,21 @@ Since the binary ships no authentication, these are what stop an anonymous
 request from turning a full-retention scan into a response; keep a rate limit
 in front of the origin regardless. A hop read past its row cap is refused with
 `400` as well: hop rows come back oldest-first, so serving the prefix would
-hand back a path history missing its newest data with no sign of it. Narrow the
-window or add `source=` and the same view fits.
+hand back a path history missing its newest data with no sign of it. That cap
+binds `/hops`, which returns one cycle per source — narrow the window or add
+`source=` and the same view fits. `/hops/timeline` cannot reach its own cap:
+it buckets every tier and admits one probe origin per request, which is why
+`source` is required there rather than optional.
 
 All endpoints accept `source=<name>` to filter by probe origin in master/slave
-deployments. `/cycles` and `/hops/timeline` echo the resolved `from`/`to` in
-the response so the UI can pin its x-axis exactly to what the server returned.
+deployments. **`/hops/timeline` requires it**: it serves one probe origin per
+request, and a request without the parameter is refused with `400`. An empty
+value is a source too — the untagged pre-cluster origin — so `source=` alone is
+a valid request. This is a breaking change for a consumer written against an
+earlier release; the bundled UI has always sent it.
+
+`/cycles` and `/hops/timeline` echo the resolved `from`/`to` in the response so
+the UI can pin its x-axis exactly to what the server returned.
 `/hops/timeline` also echoes `step_sec`, the bucket width it picked — always
 positive — so a client can size one bucket without inferring it from row
 spacing, which is unmeasurable when a window contains a single bucket.
