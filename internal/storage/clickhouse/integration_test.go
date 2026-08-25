@@ -1695,3 +1695,49 @@ func TestIntegrationBootstrapUpgradesLegacyTables(t *testing.T) {
 		t.Fatalf("annotations did not survive the upgraded table: %+v", got)
 	}
 }
+
+// A slave that stamps a cycle years ahead pinned itself as that source's
+// newest hop row until the lie expired, and outlived probe_hop's TTL because
+// that TTL derives from the row timestamp. Ingest refuses such a row now, but
+// rows already written are only kept off the endpoint by the reader's
+// ceiling — asserted here against a real server, since the unit test can only
+// read the SQL text.
+func TestIntegrationQueryLatestHopsIgnoresFutureRows(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, _ := NewWriter(ctx, log, cfg, 10)
+	now := time.Now().UTC().Truncate(time.Second)
+	ref := config.TargetRef{Target: config.Target{Name: "future"}, Group: "g"}
+	rows := map[string]time.Time{
+		"honest":   now.Add(-time.Minute),
+		"poisoned": now.AddDate(5, 0, 0),
+	}
+	for ip, ts := range rows {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time: ts, Target: ref, Source: "edge-1", Sent: 3,
+			Hops: []probe.Hop{{Index: 1, IP: ip, Sent: 3, Lost: 0,
+				RTTs: []time.Duration{time.Millisecond}}},
+		})
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("writer close: %v", err)
+	}
+
+	r, _ := NewReader(ctx, cfg)
+	defer r.Close() //nolint:errcheck // test cleanup
+	pts, err := r.QueryLatestHops(ctx, ref, storage.QueryFilter{})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 1 {
+		t.Fatalf("got %d rows, want the one honest row: %+v", len(pts), pts)
+	}
+	if pts[0].IP != "honest" {
+		t.Fatalf("latest hop is %q, want the honest row — the future one is still served", pts[0].IP)
+	}
+}

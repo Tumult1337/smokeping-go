@@ -5,6 +5,7 @@
 package cluster
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -67,6 +68,90 @@ type ProbeDTO struct {
 type CycleBatch struct {
 	Source string         `json:"source"`
 	Cycles []CyclePayload `json:"cycles"`
+}
+
+// Ingest bounds. Every field below arrives from a slave holding the shared
+// cluster token, and until these existed the only limit on a POST /cycles was
+// the 100 MiB body cap. Each value is stated against the deployed reference
+// shape — 122 targets, 6 sources, a 20s interval, an mtr walk of 30 TTLs over
+// 10 rounds — which sits at or below 10% of every one of them.
+const (
+	// MaxCyclesPerBatch bounds one POST /cycles. slave.Runner drains at most
+	// batchLimit (100) cycles per push, so this is 10× the shipped flush.
+	MaxCyclesPerBatch = 1024
+	// MaxHopsPerCycle bounds hop rows in one cycle. traceHops walks to
+	// maxTTL 30 and emits one row per (ttl, distinct responder), so this
+	// admits ~8 responders per ttl against a real ECMP fan-out of 2–4.
+	MaxHopsPerCycle = 256
+	// MaxRTTsPerHop bounds samples on one hop row: one per round that
+	// reached that responder, and mtr runs 10 rounds to icmp's 3.
+	MaxRTTsPerHop = 128
+	// MaxHTTPSamplesPerCycle bounds http samples in one cycle. The http
+	// probe issues at most maxHTTPRequests (2) per cycle.
+	MaxHTTPSamplesPerCycle = 64
+	// Ceilings of the storage columns these land in: probe_hop.ttl is UInt8,
+	// every sent/lost counter is UInt16. A negative or oversized value wraps
+	// on the way in rather than failing, so it is refused here.
+	maxHopIndex = 1<<8 - 1
+	maxCounter  = 1<<16 - 1
+)
+
+// Validate bounds a received batch against the ingest limits. It rejects the
+// whole batch rather than dropping offending cycles: a legitimate slave never
+// produces one, so a violation is a protocol disagreement, and quietly
+// ingesting the rest of a batch means two peers disagreeing about what was
+// stored. now is the master's clock at ingest.
+func (b CycleBatch) Validate(now time.Time) error {
+	if len(b.Cycles) > MaxCyclesPerBatch {
+		return fmt.Errorf("batch carries %d cycles, limit %d", len(b.Cycles), MaxCyclesPerBatch)
+	}
+	oldest, newest := now.Add(-config.MaxCycleAge), now.Add(config.MaxFutureSkew)
+	for i, c := range b.Cycles {
+		if err := c.validate(oldest, newest); err != nil {
+			return fmt.Errorf("cycle %d (%s/%s): %w", i, c.Group, c.Name, err)
+		}
+	}
+	return nil
+}
+
+func (p CyclePayload) validate(oldest, newest time.Time) error {
+	if p.Time.Before(oldest) || p.Time.After(newest) {
+		return fmt.Errorf("timestamp %s outside [%s, %s]", p.Time, oldest, newest)
+	}
+	if err := boundCounters("cycle", p.Sent, p.LossCount); err != nil {
+		return err
+	}
+	if len(p.RTTs) > config.MaxPingsPerCycle {
+		return fmt.Errorf("%d rtts, limit %d", len(p.RTTs), config.MaxPingsPerCycle)
+	}
+	if len(p.HTTPSamples) > MaxHTTPSamplesPerCycle {
+		return fmt.Errorf("%d http samples, limit %d", len(p.HTTPSamples), MaxHTTPSamplesPerCycle)
+	}
+	if len(p.Hops) > MaxHopsPerCycle {
+		return fmt.Errorf("%d hops, limit %d", len(p.Hops), MaxHopsPerCycle)
+	}
+	for _, h := range p.Hops {
+		if h.Index < 0 || h.Index > maxHopIndex {
+			return fmt.Errorf("hop index %d outside [0, %d]", h.Index, maxHopIndex)
+		}
+		if err := boundCounters("hop", h.Sent, h.Lost); err != nil {
+			return err
+		}
+		if len(h.RTTs) > MaxRTTsPerHop {
+			return fmt.Errorf("hop %d carries %d rtts, limit %d", h.Index, len(h.RTTs), MaxRTTsPerHop)
+		}
+	}
+	return nil
+}
+
+func boundCounters(what string, sent, lost int) error {
+	if sent < 0 || sent > maxCounter {
+		return fmt.Errorf("%s sent %d outside [0, %d]", what, sent, maxCounter)
+	}
+	if lost < 0 || lost > maxCounter {
+		return fmt.Errorf("%s lost %d outside [0, %d]", what, lost, maxCounter)
+	}
+	return nil
 }
 
 // CyclePayload is a single scheduler.Cycle serialized for the wire. RTTs and

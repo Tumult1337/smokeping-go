@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -112,8 +113,9 @@ func TestIngestResolvesHealthTargets(t *testing.T) {
 		func() *slavehealth.Set { return hs })
 	srv.registry.Touch("frankfurt-1", "", "", "")
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	body := `{"source":"frankfurt-1","cycles":[{"group":"` + slavehealth.Group +
-		`","name":"tokyo-1","probe":"` + slavehealth.ProbeName + `","sent":5,"loss_count":0}]}`
+		`","name":"tokyo-1","probe":"` + slavehealth.ProbeName + `","time":"` + now + `","sent":5,"loss_count":0}]}`
 	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
 	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("X-Slave-Name", "frankfurt-1")
@@ -153,9 +155,10 @@ func TestIngestBatchOverridesForgedPerCycleSource(t *testing.T) {
 	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, nil)
 	srv.registry.Touch("frankfurt-1", "", "", "")
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	body := `{"source":"frankfurt-1","cycles":[` +
-		`{"group":"g","name":"t","probe":"icmp","source":"master","sent":5,"loss_count":0},` +
-		`{"group":"g","name":"t","probe":"icmp","source":"tokyo-1","sent":5,"loss_count":0}` +
+		`{"group":"g","name":"t","probe":"icmp","source":"master","time":"` + now + `","sent":5,"loss_count":0},` +
+		`{"group":"g","name":"t","probe":"icmp","source":"tokyo-1","time":"` + now + `","sent":5,"loss_count":0}` +
 		`]}`
 	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
 	req.Header.Set("Authorization", "Bearer tok")
@@ -345,7 +348,8 @@ func TestHandleCyclesPrefersHeaderOverBatchSource(t *testing.T) {
 	srv.registry.Touch("a", "", "", "")
 	srv.registry.Touch("b", "", "", "")
 
-	body := `{"source":"b","cycles":[{"group":"core","name":"gw","probe":"icmp","source":"b","sent":5}]}`
+	now := time.Now().UTC().Format(time.RFC3339)
+	body := `{"source":"b","cycles":[{"group":"core","name":"gw","probe":"icmp","source":"b","time":"` + now + `","sent":5}]}`
 	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
 	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("X-Slave-Name", "a")
@@ -401,5 +405,34 @@ func TestRegisterRefusedAtCap(t *testing.T) {
 	}
 	if code := postCycles(t, srv, "", "slave-0"); code != http.StatusOK {
 		t.Fatalf("registered slave refused while the registry is full: got %d, want 200", code)
+	}
+}
+
+// The ingest bounds have to fire at the HTTP boundary, not only in the DTO
+// unit test: without the call site a hostile batch reaches the sink.
+func TestHandleCyclesRejectsUnboundedBatch(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := config.NewStore("", &config.Config{
+		Cluster: &config.Cluster{Token: "tok"},
+		Targets: []config.Group{{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}}},
+	})
+	sink := &captureSink{}
+	srv := NewServer(log, store, NewRegistry(slog.New(slog.DiscardHandler)), sink, nil)
+	srv.registry.Touch("edge-1", "", "", "")
+
+	future := time.Now().Add(365 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	body := `{"source":"edge-1","cycles":[{"group":"g","name":"t","probe":"icmp","time":"` +
+		future + `","sent":5}]}`
+	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("X-Slave-Name", "edge-1")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("future-dated cycle: got %d, want 400", rec.Code)
+	}
+	if len(sink.got) != 0 {
+		t.Fatalf("sink saw %d cycles from a rejected batch, want 0", len(sink.got))
 	}
 }

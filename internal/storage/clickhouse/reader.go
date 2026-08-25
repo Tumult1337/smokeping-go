@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -304,6 +305,26 @@ ORDER BY timestamp, seq`
 	return out, rows.Err()
 }
 
+// maxHopRows caps the rows any one hop read buffers into a
+// []storage.HopPoint. hop_addr is slave-supplied text and widens
+// queryHopsBucketed's GROUP BY per distinct value, so a source minting a
+// fresh address per cycle grows the result set without bound on endpoints
+// that carry no auth. The widest legitimate read is a 7d timeline at 15m
+// buckets: 672 buckets x 30 ttls x 6 sources x 2 addresses through a route
+// flap is ~242k rows, so 300k clears the real ceiling and truncates only
+// under the abuse it exists to bound.
+const maxHopRows = 300_000
+
+// hopRowLimit is appended to every hop query rather than declared per query,
+// so a new hop read cannot inherit the unbounded shape by omission.
+var hopRowLimit = fmt.Sprintf("\nLIMIT %d", maxHopRows)
+
+// maxFutureSkewSeconds mirrors the ingest ceiling on the read side. Rows a
+// slave wrote ahead of the master's clock before that bound existed are still
+// in the table, and each one still pins itself as its source's newest until
+// the lie expires; the CTE stops considering them.
+var maxFutureSkewSeconds = strconv.Itoa(int(config.MaxFutureSkew / time.Second))
+
 func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
 	srcClause, srcArgs := sourceFilter(f.Source)
 	// Optional staleness floor: bounding the CTE's max() to rows at or after
@@ -328,6 +349,7 @@ WITH latest AS (
   FROM probe_hop
   WHERE target_id = ?
     AND target_group = ?` + srcClause + freshClause + `
+    AND timestamp <= now() + INTERVAL ` + maxFutureSkewSeconds + ` SECOND
   GROUP BY source
 )
 SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
@@ -337,7 +359,7 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM latest)
-ORDER BY source, ttl`
+ORDER BY source, ttl` + hopRowLimit
 	// args layout: CTE filter (target id+group, opt source, opt freshness), outer filter (target id+group, opt source).
 	args := []any{ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
@@ -381,7 +403,7 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM nearest)
-ORDER BY source, ttl`
+ORDER BY source, ttl` + hopRowLimit
 	// args layout: CTE — `at` (the centre), target id+group, optional source, from, to;
 	//              outer — target id+group, optional source.
 	args := []any{at, ref.Target.Name, ref.Group}
@@ -452,7 +474,7 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?
   AND timestamp >= ? AND timestamp < ?` + srcClause + `
-ORDER BY timestamp, ttl`
+ORDER BY timestamp, ttl` + hopRowLimit
 	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
@@ -496,7 +518,7 @@ WHERE target_id = ?
   AND target_group = ?
   AND timestamp >= ? AND timestamp < ?%s
 GROUP BY bucket_ts, source, ttl, hop_addr
-ORDER BY bucket_ts, source, ttl`, int(step.Seconds()), srcClause)
+ORDER BY bucket_ts, source, ttl%s`, int(step.Seconds()), srcClause, hopRowLimit)
 	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {

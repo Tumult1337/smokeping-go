@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -184,6 +185,11 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 	// the unauthenticated API as an origin that never existed.
 	if !s.registry.Has(name) {
 		http.Error(w, "unregistered slave: POST /register first", http.StatusForbidden)
+		return
+	}
+	if err := batch.Validate(time.Now()); err != nil {
+		s.log.Warn("rejecting cluster batch outside ingest bounds", "slave", name, "err", err)
+		http.Error(w, "batch outside ingest bounds", http.StatusBadRequest)
 		return
 	}
 	_ = s.registry.Touch(name, version, r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))

@@ -179,3 +179,97 @@ func TestCycleRoundTripCarriesHopAnnotations(t *testing.T) {
 		t.Fatalf("annotations lost over the wire: %+v", got)
 	}
 }
+
+// A cycle timestamp is slave-supplied and nothing bounded it. Far in the
+// future it pins that source at the top of QueryLatestHops for as long as the
+// lie lasts and evades probe_hop's TTL, which derives from the row timestamp —
+// clearing it needs a manual ClickHouse delete. Far in the past it writes rows
+// already past retention.
+func TestCycleBatchRejectsOutOfRangeTimestamps(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	cases := map[string]time.Time{
+		"a decade ahead":      now.AddDate(10, 0, 0),
+		"just past the skew":  now.Add(config.MaxFutureSkew + time.Second),
+		"just past max age":   now.Add(-config.MaxCycleAge - time.Second),
+		"the unix zero value": {},
+	}
+	for name, ts := range cases {
+		batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{{Time: ts}}}
+		if err := batch.Validate(now); err == nil {
+			t.Errorf("%s (%s): accepted, want rejected", name, ts)
+		}
+	}
+
+	ok := map[string]time.Time{
+		"now":                 now,
+		"within the skew":     now.Add(config.MaxFutureSkew - time.Second),
+		"a requeued hour-old": now.Add(-time.Hour),
+		"at the age boundary": now.Add(-config.MaxCycleAge + time.Second),
+	}
+	for name, ts := range ok {
+		batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{{Time: ts}}}
+		if err := batch.Validate(now); err != nil {
+			t.Errorf("%s (%s): rejected (%v), want accepted", name, ts, err)
+		}
+	}
+}
+
+func TestCycleBatchRejectsOversizedShapes(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	base := cluster.CyclePayload{Time: now}
+
+	cases := map[string]cluster.CycleBatch{
+		"too many cycles": {Cycles: func() []cluster.CyclePayload {
+			// Timestamps must be in range or the window check masks the count.
+			cs := make([]cluster.CyclePayload, cluster.MaxCyclesPerBatch+1)
+			for i := range cs {
+				cs[i].Time = now
+			}
+			return cs
+		}()},
+		"too many hops": {Cycles: []cluster.CyclePayload{
+			{Time: now, Hops: make([]cluster.HopDTO, cluster.MaxHopsPerCycle+1)},
+		}},
+		"too many rtts on a hop": {Cycles: []cluster.CyclePayload{
+			{Time: now, Hops: []cluster.HopDTO{{Index: 1, RTTs: make([]time.Duration, cluster.MaxRTTsPerHop+1)}}},
+		}},
+		"too many http samples": {Cycles: []cluster.CyclePayload{
+			{Time: now, HTTPSamples: make([]cluster.HTTPSampleDTO, cluster.MaxHTTPSamplesPerCycle+1)},
+		}},
+		"negative sent":       {Cycles: []cluster.CyclePayload{{Time: now, Sent: -1}}},
+		"negative loss":       {Cycles: []cluster.CyclePayload{{Time: now, LossCount: -1}}},
+		"counter over uint16": {Cycles: []cluster.CyclePayload{{Time: now, Sent: 1 << 16}}},
+		"hop index over uint8": {Cycles: []cluster.CyclePayload{
+			{Time: now, Hops: []cluster.HopDTO{{Index: 256}}},
+		}},
+		"negative hop index": {Cycles: []cluster.CyclePayload{
+			{Time: now, Hops: []cluster.HopDTO{{Index: -1}}},
+		}},
+		"negative hop lost": {Cycles: []cluster.CyclePayload{
+			{Time: now, Hops: []cluster.HopDTO{{Index: 1, Lost: -1}}},
+		}},
+	}
+	for name, batch := range cases {
+		batch.Source = "edge-1"
+		if err := batch.Validate(now); err == nil {
+			t.Errorf("%s: accepted, want rejected", name)
+		}
+	}
+
+	// The shape a 122-target / 6-source / 20s install actually pushes: the
+	// slave drains 100 cycles per tick, an mtr walk is 30 ttls over 10 rounds.
+	real := cluster.CycleBatch{Source: "edge-1"}
+	for range 100 {
+		c := base
+		c.Sent, c.LossCount = 20, 1
+		c.RTTs = make([]time.Duration, 20)
+		for ttl := 1; ttl <= 30; ttl++ {
+			c.Hops = append(c.Hops, cluster.HopDTO{Index: ttl, Sent: 10, Lost: 0,
+				RTTs: make([]time.Duration, 10)})
+		}
+		real.Cycles = append(real.Cycles, c)
+	}
+	if err := real.Validate(now); err != nil {
+		t.Fatalf("a real 122-target/6-source/20s batch was rejected: %v", err)
+	}
+}

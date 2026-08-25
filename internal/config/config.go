@@ -486,6 +486,24 @@ const (
 	MaxPingsPerCycle = 1<<16 - icmpTraceSeqReserve
 )
 
+// Cycle timestamp bounds. They live here rather than in cluster because both
+// the ingest that refuses an out-of-range timestamp and the reader that must
+// keep already-stored ones off the API have to agree on the same window.
+const (
+	// MaxFutureSkew is how far ahead of the master's clock a cycle may be
+	// stamped. NTP-synced hosts agree to milliseconds; a drifting VM is
+	// seconds to minutes out. Beyond it a row pins itself as its source's
+	// "latest" for as long as the lie lasts and outlives probe_hop's TTL,
+	// which is derived from the row timestamp — only a manual ClickHouse
+	// delete clears it.
+	MaxFutureSkew = 5 * time.Minute
+	// MaxCycleAge is how stale a pushed cycle may be. slave.PushSink is a
+	// 600-cycle drop-oldest ring, so even a multi-day master outage delivers
+	// cycles far younger than this; a row older than the shortest default
+	// retention (14d, probe_rtt and probe_http) is written already expired.
+	MaxCycleAge = 7 * 24 * time.Hour
+)
+
 // HasICMPProbe reports whether any probe is subject to the ping schedule
 // below, which is an icmp property — MTR's worst case is unrelated, and every
 // other probe type ignores spacing entirely.

@@ -325,6 +325,45 @@ Key points a reader can't derive from a single file:
   under `cluster.pull_every` `"0"` a master restart would otherwise
   refuse that slave for the life of its process.
 
+- **Ingest bounds.** `cluster.CycleBatch.Validate` is the trust boundary
+  for everything a slave puts in a batch; before it the only limit on a
+  POST `/cycles` was the 100 MiB body cap. It refuses the **whole**
+  batch, never part of it: a legitimate slave never trips a bound, so a
+  violation is a protocol disagreement, and half-ingesting one leaves
+  the two peers disagreeing about what was stored. The counts live in
+  `internal/cluster/protocol.go` (`MaxCyclesPerBatch` 1024 —
+  `slave.Runner` drains 100 per push; `MaxHopsPerCycle` 256 — the walk
+  runs 30 TTLs with one row per distinct responder; `MaxRTTsPerHop` 128
+  — one per round, mtr runs 10; `MaxHTTPSamplesPerCycle` 64 —
+  `maxHTTPRequests` is 2), RTTs per cycle reuse `config.MaxPingsPerCycle`
+  so no schedule `config.Validate` accepts can be refused at ingest, and
+  the counter ceilings are the storage columns' own (`probe_hop.ttl` is
+  `UInt8`, every sent/lost is `UInt16` — a negative wraps rather than
+  failing, so it is refused here). The deployed 122-target / 6-source /
+  20s install sits at or below 10% of every one.
+
+  `config.MaxFutureSkew` (5m) and `config.MaxCycleAge` (7d) live in
+  `config`, not `cluster`, because the reader needs the same window: a
+  future-dated row pins itself as its source's newest in
+  `QueryLatestHops` for as long as the lie lasts *and* outlives
+  `probe_hop`'s TTL, which derives from the row timestamp, so only a
+  manual ClickHouse delete clears it. Ingest stops new ones;
+  `QueryLatestHops`' CTE carries `timestamp <= now() + MaxFutureSkew` so
+  rows already in the table stop being served. `MaxCycleAge` is 7d
+  because `PushSink` is a 600-cycle drop-oldest ring — even a multi-day
+  outage delivers cycles far younger — while a row past the shortest
+  default retention (14d) is written already expired.
+
+  `clickhouse.maxHopRows` (300k) is on every hop read. `hop_addr` is
+  slave-supplied text that widens `queryHopsBucketed`'s `GROUP BY` per
+  distinct value, and each read buffers its whole result into a
+  `[]storage.HopPoint` for an unauthenticated GET. The widest legitimate
+  read — 7d timeline, 15m buckets, 672 × 30 TTLs × 6 sources × 2
+  addresses through a flap — is ~242k rows, so the cap truncates only
+  under the abuse it exists to bound. It is appended from one
+  `hopRowLimit` var so a new hop read cannot inherit the unbounded shape
+  by omission.
+
 - **Slave push buffer + auth:** `slave.PushSink` is a fixed 600-cycle
   ring with drop-oldest on overflow; a failed push `Requeue`s on 5xx /
   network errors and drops on 404 (master lost state; next /register

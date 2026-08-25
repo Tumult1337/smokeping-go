@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -181,5 +182,58 @@ func TestReaderQueriesOrderForTheirConsumer(t *testing.T) {
 				t.Fatalf("%s: ORDER BY leads on %q, want one of %v:%s", tc.name, lead, tc.leads, conn.query)
 			})
 		}
+	}
+}
+
+// Every hop read buffers its whole result set into a []storage.HopPoint on an
+// unauthenticated endpoint, and hop_addr is a slave-supplied string that
+// widens queryHopsBucketed's GROUP BY without bound. Each path carries a
+// LIMIT so the row set a single GET can force is finite.
+func TestHopQueriesCarryRowLimit(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+
+	calls := map[string]func(*Reader) error{
+		"QueryLatestHops": func(r *Reader) error {
+			_, err := r.QueryLatestHops(context.Background(), ref, storage.QueryFilter{})
+			return err
+		},
+		"QueryHopsAt": func(r *Reader) error {
+			_, err := r.QueryHopsAt(context.Background(), ref, from, 30*time.Minute, storage.QueryFilter{})
+			return err
+		},
+		"QueryHopsTimeline/raw": func(r *Reader) error {
+			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{})
+			return err
+		},
+		"QueryHopsTimeline/bucketed": func(r *Reader) error {
+			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{Step: 15 * time.Minute})
+			return err
+		},
+	}
+	want := "LIMIT " + strconv.Itoa(maxHopRows)
+	for name, call := range calls {
+		conn := &recordConn{}
+		if err := call(&Reader{conn: conn}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(conn.query, want) {
+			t.Errorf("%s: query has no %q:\n%s", name, want, conn.query)
+		}
+	}
+}
+
+// A future-dated row from a hostile slave pinned itself as that source's
+// "latest" until the lie expired. The ingest bound stops new ones; the reader
+// ceiling is what keeps rows already in the table off the endpoint.
+func TestQueryLatestHopsBoundsFutureRows(t *testing.T) {
+	conn := &recordConn{}
+	if _, err := (&Reader{conn: conn}).QueryLatestHops(context.Background(),
+		config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}, storage.QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(conn.query, "timestamp <= now() + INTERVAL") {
+		t.Errorf("no future ceiling in the latest-hops CTE:\n%s", conn.query)
 	}
 }
