@@ -209,6 +209,9 @@ func TestFlushHopsCarriesAnnotations(t *testing.T) {
 	}
 	cols := insertColumns(t, conn.query)
 	args := conn.batch.appended[0]
+	if len(args) != len(cols) {
+		t.Fatalf("appended %d values for %d named columns", len(args), len(cols))
+	}
 	byCol := map[string]any{}
 	for i, c := range cols {
 		byCol[c] = args[i]

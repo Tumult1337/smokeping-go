@@ -508,6 +508,11 @@ func TestICMPProbePassesDerivedTimeoutToSend(t *testing.T) {
 // default level, which is how a fleet lost hops silently after one EMFILE
 // burned the sync.Once permission line. Drives the real Probe so the defer
 // switch, not a helper, is under test.
+func resetTraceErrThrottle() {
+	traceErrLastLog.Store(0)
+	traceErrSuppressed.Store(0)
+}
+
 func TestICMPProbeWarnsOnTransientTraceError(t *testing.T) {
 	resetTraceErrThrottle()
 	var buf bytes.Buffer

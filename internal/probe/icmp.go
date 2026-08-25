@@ -273,11 +273,6 @@ func traceErrLogAllowed(sinceStart time.Duration) (bool, uint64) {
 	}
 }
 
-func resetTraceErrThrottle() {
-	traceErrLastLog.Store(0)
-	traceErrSuppressed.Store(0)
-}
-
 var rawUnavailableOnce sync.Once
 
 func logRawUnavailableOnce(err error) {
