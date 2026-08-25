@@ -113,6 +113,20 @@ const (
 	// URL plus its wrapper fits. At MaxHTTPSamplesPerCycle that is ≤256 KiB of
 	// error text per cycle.
 	MaxHTTPErrLen = 4096
+	// MaxHopZoneLen bounds an address's zone. netip.ParseAddr accepts any
+	// non-empty zone, but the producer fills one only from net.Interface.Name
+	// or — when the name is unknown — the decimal interface index, so the
+	// ceiling is the widest interface name a supported platform reports:
+	// IFNAMSIZ-1 = 15 on Linux, macOS and the BSDs, IF_MAX_STRING_SIZE = 256
+	// on Windows, against 10 digits for an int32 index.
+	MaxHopZoneLen = 256
+	// maxIPv6TextLen is RFC 4291 section 2.2 form 3, the longest textual
+	// address netip.ParseAddr accepts: six groups of four hex digits, five
+	// colons, and a dotted-quad tail.
+	maxIPv6TextLen = 45
+	// MaxHopAddrLen bounds the complete encoded hop address, which is what
+	// lands in probe_hop.hop_addr.
+	MaxHopAddrLen = maxIPv6TextLen + len("%") + MaxHopZoneLen
 	// Ceilings of the storage columns these land in: probe_hop.ttl is UInt8,
 	// every sent/lost counter is UInt16. A negative or oversized value wraps
 	// on the way in rather than failing, so it is refused here.
@@ -184,13 +198,10 @@ func (h HopDTO) validate() error {
 	if h.Index < 0 || h.Index > maxHopIndex {
 		return fmt.Errorf("index %d outside [0, %d]", h.Index, maxHopIndex)
 	}
-	// An empty address is the producer's "nothing answered at this TTL". Any
-	// other value must parse: hop_addr is a LowCardinality dictionary served
-	// back by an unauthenticated /hops, so free text there is both unbounded
-	// cardinality and unbounded response size.
+	// An empty address is the producer's "nothing answered at this TTL".
 	if h.IP != "" {
-		if _, err := netip.ParseAddr(h.IP); err != nil {
-			return fmt.Errorf("ip %q is not an address", truncate(h.IP))
+		if _, err := parseHopAddr(h.IP); err != nil {
+			return fmt.Errorf("ip %w", err)
 		}
 	}
 	if err := boundCounters("hop", h.Sent, h.Lost); err != nil {
@@ -342,14 +353,50 @@ func (p CyclePayload) ToCycle(target config.Target) scheduler.Cycle {
 // hop_addr's LowCardinality dictionary should hold, and drops anything
 // validate would have refused rather than storing text as an address.
 func canonicalHopAddr(ip string) string {
-	if ip == "" {
-		return ""
-	}
-	addr, err := netip.ParseAddr(ip)
+	addr, err := parseHopAddr(ip)
 	if err != nil {
 		return ""
 	}
 	return addr.String()
+}
+
+// parseHopAddr is the single reading of a slave-supplied hop address — the one
+// validate refuses on and the one ToCycle stores. hop_addr is a
+// LowCardinality dictionary an unauthenticated /hops serves back, so the whole
+// encoded value is bounded before it is parsed: netip.ParseAddr accepts a zone
+// of any length, which put megabytes of attacker text in that column behind an
+// address that parsed.
+func parseHopAddr(ip string) (netip.Addr, error) {
+	if len(ip) > MaxHopAddrLen {
+		return netip.Addr{}, fmt.Errorf("is %d bytes, limit %d", len(ip), MaxHopAddrLen)
+	}
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("%q is not an address", truncate(ip))
+	}
+	if z := addr.Zone(); z != "" && !interfaceZoneShaped(z) {
+		return netip.Addr{}, fmt.Errorf("%q carries a zone that is not an interface name", truncate(ip))
+	}
+	return addr, nil
+}
+
+// interfaceZoneShaped reports whether a zone looks like the interface name or
+// decimal index Go fills one from. RFC 4007 section 11.2 leaves the zone
+// implementation-defined, so this refuses only what no operating system can
+// name an interface and what makes slave-supplied text dangerous downstream:
+// ASCII control bytes, and the "%" and "/" that RFC 6874 requires escaping in
+// this same text form.
+func interfaceZoneShaped(zone string) bool {
+	if len(zone) > MaxHopZoneLen {
+		return false
+	}
+	for i := range len(zone) {
+		switch c := zone[i]; {
+		case c < 0x20, c == 0x7f, c == '%', c == '/':
+			return false
+		}
+	}
+	return true
 }
 
 // FromCycle is the slave-side companion to ToCycle.

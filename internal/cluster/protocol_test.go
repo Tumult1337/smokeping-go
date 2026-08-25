@@ -2,6 +2,7 @@ package cluster_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -441,5 +442,106 @@ func TestToCycleCanonicalizesHopAddresses(t *testing.T) {
 	p := cluster.CyclePayload{Hops: []cluster.HopDTO{{Index: 1, IP: "not-an-ip"}}}
 	if got := p.ToCycle(target).Hops[0].IP; got != "" {
 		t.Errorf("unvalidated text stored as %q, want the empty no-reply value", got)
+	}
+}
+
+// netip.ParseAddr treats any non-empty zone as valid, so `fe80::1%<megabytes>`
+// parsed, canonicalized and landed in probe_hop.hop_addr — a LowCardinality
+// column an unauthenticated /hops serves back. Bounding len(Hops) and requiring
+// the text to parse both held; the leaf was still unbounded.
+func TestHopAddrZoneIsBounded(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	maxZone := strings.Repeat("z", cluster.MaxHopZoneLen)
+
+	rejected := map[string]string{
+		"zone of megabytes":      "fe80::1%" + strings.Repeat("a", 1<<20),
+		"zone one past the cap":  "fe80::1%" + maxZone + "z",
+		"zone carries a newline": "fe80::1%eth0\nX-Injected: 1",
+		"zone carries a NUL":     "fe80::1%eth\x000",
+		"zone carries a DEL":     "fe80::1%eth\x7f0",
+		"zone carries a slash":   "fe80::1%../../etc",
+		"zone carries a percent": "fe80::1%eth0%eth1",
+	}
+	for name, ip := range rejected {
+		batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{
+			{Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: ip}}},
+		}}
+		if err := batch.Validate(now); err == nil {
+			t.Errorf("%s: accepted, want rejected", name)
+		}
+	}
+
+	// Every shape internal/probe can put in a zone: Go fills one from
+	// net.Interface.Name, or the decimal interface index when the name is
+	// unknown.
+	accepted := []string{
+		"fe80::1%eth0", "fe80::1%3", "fe80::1%2147483647",
+		"fe80::1%enp0s31f6", "fe80::1%eth0.100", "fe80::1%br-1a2b3c",
+		"fe80::1%wg0", "fe80::1%Local Area Connection 2",
+		"fe80::1%" + maxZone,
+		"::ffff:10.0.0.9%eth0",
+	}
+	for _, ip := range accepted {
+		batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{
+			{Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: ip}}},
+		}}
+		if err := batch.Validate(now); err != nil {
+			t.Errorf("%q: refused a zone the producer emits: %v", ip, err)
+		}
+	}
+}
+
+// The whole-value bound is checked before netip.ParseAddr, so a 90 MiB string
+// is refused without being scanned. It is redundant with the zone bound for
+// every value that parses, which is why the rejection reason is asserted: a
+// length message proves the order, a zone message proves the guard is gone.
+func TestHopAddrLengthIsBoundedBeforeParsing(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	huge := "fe80::1%" + strings.Repeat("a", 1<<20)
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{
+		{Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: huge}}},
+	}}
+	err := batch.Validate(now)
+	if err == nil {
+		t.Fatal("accepted, want rejected")
+	}
+	want := fmt.Sprintf("is %d bytes, limit %d", len(huge), cluster.MaxHopAddrLen)
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("rejected as %q, want the length bound %q — the value was parsed first", err, want)
+	}
+}
+
+// The encoded address is bounded whole, not only its zone: the bound must sit
+// at the longest textual form netip accepts plus a maximal zone.
+func TestHopAddrLengthBoundCoversTheLongestParseableForm(t *testing.T) {
+	longest := "2001:0db8:0000:0000:0000:0000:255.255.255.255%" + strings.Repeat("z", cluster.MaxHopZoneLen)
+	if len(longest) != cluster.MaxHopAddrLen {
+		t.Fatalf("longest parseable form is %d bytes, MaxHopAddrLen is %d", len(longest), cluster.MaxHopAddrLen)
+	}
+	if _, err := netip.ParseAddr(longest); err != nil {
+		t.Fatalf("the form the bound is sized from does not parse: %v", err)
+	}
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{
+		{Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: longest}}},
+	}}
+	if err := batch.Validate(now); err != nil {
+		t.Fatalf("the producer's longest encodable address was refused: %v", err)
+	}
+}
+
+// ToCycle is the fail-closed second reading: text validate would have refused
+// must never reach hop_addr, and a zone the producer does emit must survive.
+func TestToCycleDropsAnOversizedZone(t *testing.T) {
+	target := config.Target{Name: "frankfurt", Probe: "icmp"}
+	cy := cluster.CyclePayload{Hops: []cluster.HopDTO{
+		{Index: 1, IP: "fe80::1%" + strings.Repeat("a", 1<<20)},
+		{Index: 2, IP: "fe80::1%eth0"},
+	}}.ToCycle(target)
+	if got := cy.Hops[0].IP; got != "" {
+		t.Errorf("oversized zone stored as %d bytes, want dropped", len(got))
+	}
+	if got := cy.Hops[1].IP; got != "fe80::1%eth0" {
+		t.Errorf("legitimate zone stored as %q, want fe80::1%%eth0", got)
 	}
 }
