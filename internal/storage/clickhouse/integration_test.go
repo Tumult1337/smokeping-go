@@ -2224,3 +2224,65 @@ func hopsTimeline(ctx context.Context, r *Reader, ref config.TargetRef, from, to
 	res, err := r.QueryHopsTimeline(ctx, ref, from, to, f)
 	return res.Hops, err
 }
+
+// A grid row is one responder's state, never a composite of several. The
+// address came from argMax(hop_addr, loss_pct) and the annotation from
+// max(unreach), which read different rows: a lossy responder's address
+// arrived carrying a clean sibling's unreachable label, a hop state that was
+// never on the wire and that an operator reads as that address refusing them.
+func TestIntegrationTimelineRowComesFromOneResponder(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ref := config.TargetRef{Target: config.Target{Name: "responder"}, Group: "g"}
+	bucket := time.Now().UTC().Truncate(15 * time.Minute).Add(-26 * time.Hour)
+	worst := bucket.Add(2 * time.Minute)
+	// The annotated responder is also the earliest in the slot, so a timestamp
+	// taken from any row but the worst-loss one is visible here too.
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: bucket.Add(time.Minute), Target: ref, Source: "master", Sent: 3,
+		Hops: []probe.Hop{{Index: 1, IP: "10.0.0.2", Sent: 3, Lost: 0, Unreach: "admin-prohibited", RTTs: []time.Duration{time.Millisecond}}},
+	})
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: worst, Target: ref, Source: "master", Sent: 3,
+		Hops: []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 3, Lost: 2, RTTs: []time.Duration{time.Millisecond}}},
+	})
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	pts, err := hopsTimeline(ctx, r, ref, bucket.Add(-time.Hour), bucket.Add(time.Hour),
+		storage.QueryFilter{Source: "master", Step: 15 * time.Minute})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(pts) != 1 {
+		t.Fatalf("got %d rows, want one per (bucket, ttl): %+v", len(pts), pts)
+	}
+	p := pts[0]
+	if p.IP != "10.0.0.1" {
+		t.Fatalf("row kept %q, want the worst-loss responder 10.0.0.1", p.IP)
+	}
+	if p.Unreach != "" {
+		t.Fatalf("row reports %q, an annotation 10.0.0.1 never sent", p.Unreach)
+	}
+	if !p.WorstTime.Equal(worst.Truncate(time.Millisecond)) {
+		t.Fatalf("WorstTime = %s, want the worst-loss cycle %s", p.WorstTime, worst)
+	}
+	if p.MaxLossPct < 66 || p.MaxLossPct > 67 {
+		t.Fatalf("MaxLossPct = %v, want the worst-loss cycle's own 66.6%%", p.MaxLossPct)
+	}
+}

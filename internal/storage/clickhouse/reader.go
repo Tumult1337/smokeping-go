@@ -627,12 +627,16 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 // shadowing the underlying `loss_pct` column: a select-list alias of
 // `loss_pct` would make `max(loss_pct)` aggregate the alias (an aggregate
 // itself) and ClickHouse rejects "aggregate function inside aggregate
-// function" with a 500.
+// function" with a 500. `worst_addr` / `worst_unreach` avoid the same
+// shadowing one step further out — aliasing them to their own column names
+// makes `worst`, which reads those columns, cyclic.
 //
-// max(unreach) surfaces any annotation in the slot because the empty string
-// loses to every label; between two distinct labels the lexicographically
-// larger wins, which is acceptable since they are vanishingly rare and equally
-// alarming.
+// Address, annotation and timestamp come out of one argMax over a tuple so
+// they describe the same row: picked separately, a lossy responder's address
+// was served with a clean sibling's unreachable label and a third row's
+// timestamp — a hop state that never existed. The cost is that an annotation
+// on a responder that is not the slot's worst does not reach the timeline;
+// /hops?at= still carries every responder's own.
 func (r *Reader) queryHopsGrid(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
 	slot := "timestamp"
 	if step > 0 {
@@ -642,13 +646,14 @@ func (r *Reader) queryHopsGrid(ctx context.Context, ref config.TargetRef, from, 
 SELECT ` + slot + ` AS bucket_ts,
        source                                              AS src,
        ttl,
-       argMax(hop_addr, loss_pct)                          AS hop_addr,
-       max(unreach)                                        AS unreach,
+       (argMax(tuple(hop_addr, unreach, timestamp),
+               loss_pct) AS worst).1                       AS worst_addr,
+       worst.2                                             AS worst_unreach,
        sum(sent)                                           AS total_sent,
        sum(lost)                                           AS total_lost,
        if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS avg_loss_pct,
        max(loss_pct)                                       AS max_loss_pct,
-       argMax(timestamp, loss_pct)                         AS worst_ts
+       worst.3                                             AS worst_ts
 FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?
