@@ -1133,3 +1133,72 @@ func TestCachingReader_RefusalIsNotServedFromStaleCache(t *testing.T) {
 		})
 	}
 }
+
+// atEchoReader answers a pinned read with the instant it was asked for, so a
+// caller can tell which cycle the cache handed back.
+type atEchoReader struct {
+	Reader
+	calls atomic.Int64
+}
+
+func (r *atEchoReader) QueryHopsAt(_ context.Context, _ config.TargetRef, at time.Time, _ time.Duration, _ QueryFilter) (HopsResult, error) {
+	r.calls.Add(1)
+	return HopsResult{
+		Hops:   []HopPoint{{Time: at, Index: 1}},
+		Cycles: []CycleCounters{{Time: at, Sent: 10}},
+	}, nil
+}
+
+// Two cycles inside one minute are two different pins. Keying the entry on a
+// minute-floored `at` while querying the precise one made the second click
+// return the first click's path and counters — the two cloned slices were
+// intact, they just described the wrong cycle.
+func TestCachingReader_HopsAt_KeysOnTheRequestedCycle(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &atEchoReader{}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+	ref := newRef("g", "t")
+
+	first := now.Add(-time.Hour).Add(5 * time.Second)
+	second := first.Add(40 * time.Second) // same minute, different cycle
+
+	for _, at := range []time.Time{first, second} {
+		res, err := c.QueryHopsAt(context.Background(), ref, at, 30*time.Minute, QueryFilter{})
+		if err != nil {
+			t.Fatalf("at %s: %v", at, err)
+		}
+		if len(res.Hops) != 1 || !res.Hops[0].Time.Equal(at) {
+			t.Fatalf("at %s: got path for %v", at, res.Hops)
+		}
+		if len(res.Cycles) != 1 || !res.Cycles[0].Time.Equal(at) {
+			t.Fatalf("at %s: got counters for %v", at, res.Cycles)
+		}
+	}
+	if got := inner.calls.Load(); got != 2 {
+		t.Fatalf("inner calls: got %d, want one per distinct cycle", got)
+	}
+
+	// The same pin re-requested — the auto-refresh tick and a remount both do
+	// this — must still come off the entry rather than re-query.
+	if _, err := c.QueryHopsAt(context.Background(), ref, first, 30*time.Minute, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.calls.Load(); got != 2 {
+		t.Fatalf("inner calls after a repeat pin: got %d, want the entry served", got)
+	}
+
+	// The decorator is generic over Reader and may not assume how finely the
+	// one underneath resolves `at`. Today's driver renders a bound time.Time
+	// to whole seconds, so the CH reader cannot separate these two — the key
+	// still must, or a driver that gains sub-second binding reinstates the
+	// defect silently.
+	sub := first.Add(500 * time.Millisecond)
+	res, err := c.QueryHopsAt(context.Background(), ref, sub, 30*time.Minute, QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hops) != 1 || !res.Hops[0].Time.Equal(sub) {
+		t.Fatalf("sub-second pin got %v, want its own entry", res.Hops)
+	}
+}

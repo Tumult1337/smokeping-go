@@ -2009,6 +2009,73 @@ func TestIntegrationCycleCountersSurviveADuplicatePush(t *testing.T) {
 	}
 }
 
+// Two cycles inside one minute are two different pins, and the caching reader
+// is what a request actually lands on. Keyed on a minute-floored `at` the
+// second click was answered from the first click's entry — same path, same
+// counters, wrong cycle.
+func TestIntegrationCachedHopsAtSeparatesCyclesInOneMinute(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ref := config.TargetRef{Target: config.Target{Name: "sameminute"}, Group: "g"}
+	minute := time.Now().UTC().Add(-time.Hour).Truncate(time.Minute)
+	early, late := minute.Add(5*time.Second), minute.Add(45*time.Second)
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: early, Target: ref, Source: "master", Sent: 10, LossCount: 0,
+		Summary: stats.Summary{Min: 1, Max: 2, Mean: 1, Median: 1},
+		Hops:    []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 10, TargetReply: true, RTTs: []time.Duration{time.Millisecond}}},
+	})
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time: late, Target: ref, Source: "master", Sent: 10, LossCount: 6,
+		Summary: stats.Summary{Min: 1, Max: 2, Mean: 1, Median: 1},
+		Hops: []probe.Hop{
+			{Index: 1, IP: "10.0.0.1", Sent: 10, TargetReply: false, RTTs: []time.Duration{time.Millisecond}},
+			{Index: 2, IP: "10.0.0.2", Sent: 10, Lost: 6, TargetReply: true, RTTs: []time.Duration{2 * time.Millisecond}},
+		},
+	})
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+	cached := storage.NewCachingReader(r, 8, 8)
+
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		hops int
+		lost int64
+	}{
+		{"early", early, 1, 0},
+		{"late", late, 2, 6},
+	} {
+		res, err := cached.QueryHopsAt(ctx, ref, tc.at, 30*time.Minute, storage.QueryFilter{})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(res.Hops) != tc.hops {
+			t.Fatalf("%s: %d hop rows, want %d — the other cycle's path", tc.name, len(res.Hops), tc.hops)
+		}
+		if len(res.Cycles) != 1 || res.Cycles[0].LossCount != tc.lost {
+			t.Fatalf("%s: counters %+v, want %d lost", tc.name, res.Cycles, tc.lost)
+		}
+		if len(res.Hops) > 0 && !res.Hops[0].Time.Equal(tc.at.Truncate(time.Millisecond)) {
+			t.Fatalf("%s: path pinned at %s, want %s", tc.name, res.Hops[0].Time, tc.at)
+		}
+	}
+}
+
 // The hop-row assertions below predate HopsResult and only care about the
 // path rows, so these keep them reading as they did.
 func latestHops(ctx context.Context, r *Reader, ref config.TargetRef, f storage.QueryFilter) ([]storage.HopPoint, error) {
