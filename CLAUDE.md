@@ -613,7 +613,33 @@ Key points a reader can't derive from a single file:
   silently excluded. The cost: a slave whose clock lags the master by more
   than that window stops contributing to alerts (its data is still stored),
   and a backlog delivered after an outage longer than the window is stored
-  but not alerted on. `alert.stale_cycle` is the Debug log for it. A quorum alert also has a warm-up: it won't dispatch FIRING
+  but not alerted on. Both are reported at **Warn** as
+  `alert.source_excluded`, not Debug: a source contributing nothing to
+  alerting while its data keeps arriving is the failure alerting exists to
+  prevent. A stably skewed source would emit one line per target per interval,
+  so each `(source, reason)` is logged once per freshness window and carries
+  the count it suppressed; the same window evicts the entry, and source names
+  are already bounded by the master's registry. `reason` is `clock_skew` for
+  the freshness refusal and `duplicate_cycle` for the guard below. There is no
+  health-endpoint field: an API field needs a read site to be worth declaring,
+  and the log is what an operator's alerting-on-alerting consumes.
+
+  **A cycle is evaluated once, in order.** `alertState.lastCycle` holds the
+  timestamp of the last accepted cycle per source — the same
+  `(target, source, timestamp)` identity storage treats as one measurement —
+  and a non-increasing cycle is skipped **before** any state mutation and
+  before `lastSeen`. `PushSink.Requeue` resends a batch on any 5xx or network
+  error, so a lost ack redelivers the same measurement: applied twice it
+  incremented `consecHits` twice and fired a `sustained: 2` alert off one bad
+  cycle, and an older healthy batch delivered late cleared a newer firing
+  state. Skipping before `lastSeen` is what makes it fail closed — a source
+  that only replays ages out of the quorum denominator rather than voting
+  healthy from its ring. The cost is that a producer whose clock steps
+  backwards contributes nothing until its clock passes the last accepted
+  timestamp, which is why that skip is warned about rather than counted
+  silently.
+
+  A quorum alert also has a warm-up: it won't dispatch FIRING
   until either 2 distinct sources have reported for that target+alert or
   the 3×-interval window has elapsed, so a master restart doesn't page
   and immediately resolve on partial data. Webhook/log templates get

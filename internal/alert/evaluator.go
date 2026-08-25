@@ -128,7 +128,34 @@ type Evaluator struct {
 	states map[aggKey]map[string]*alertState // target+alert → source → per-source state
 	agg    map[aggKey]State                  // target+alert → last dispatched aggregate state (quorum alerts only)
 	warmup map[aggKey]*aggWarmup             // target+alert → warm-up bookkeeping (quorum alerts only)
+
+	// excludedMu guards excluded, which rate-limits the warning below. It is
+	// separate from mu because the freshness check runs before the state lock
+	// is taken.
+	excludedMu sync.Mutex
+	excluded   map[exclusionKey]exclusionRecord
 }
+
+// exclusionKey identifies one reason one source is contributing nothing to
+// alerting. Source names are bounded by the master's registry, which refuses a
+// cycle under a name it does not hold, so the map is bounded by that ceiling
+// times the reasons below.
+type exclusionKey struct{ source, reason string }
+
+type exclusionRecord struct {
+	at         time.Time
+	suppressed int
+}
+
+const (
+	// reasonClockSkew is a cycle that arrived older than alertFreshness. A
+	// slave whose clock lags stably by more than that window has every cycle
+	// refused while its data keeps being stored.
+	reasonClockSkew = "clock_skew"
+	// reasonDuplicate is a cycle whose timestamp did not advance: a replay, or
+	// a producer whose clock stepped backwards.
+	reasonDuplicate = "duplicate_cycle"
+)
 
 func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) (*Evaluator, error) {
 	e := &Evaluator{
@@ -140,6 +167,7 @@ func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) 
 		states:     make(map[aggKey]map[string]*alertState),
 		agg:        make(map[aggKey]State),
 		warmup:     make(map[aggKey]*aggWarmup),
+		excluded:   make(map[exclusionKey]exclusionRecord),
 	}
 	if err := e.refreshConditions(); err != nil {
 		return nil, err
@@ -228,11 +256,12 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	// Skipped whole like a cycle that sent nothing, so the source ages out
 	// rather than voting on data it replayed out of its own history.
 	if age := now.Sub(cy.Time); age > alertFreshness(cfg.Interval) {
-		e.log.Debug("alert.stale_cycle", "target", cy.Target.ID(), "source", cy.Source, "age", age)
+		e.warnExcluded(now, reasonClockSkew, cy, "age", age, "limit", alertFreshness(cfg.Interval))
 		return
 	}
 
 	var toDispatch []Event
+	var skipped []time.Duration
 
 	e.mu.Lock()
 	for _, name := range alerts {
@@ -259,8 +288,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		// Before any mutation, and before lastSeen: a source that only ever
 		// replays must age out of the quorum denominator rather than vote.
 		if !st.lastCycle.IsZero() && !cy.Time.After(st.lastCycle) {
-			e.log.Debug("alert.duplicate_cycle", "target", key.target, "alert", name,
-				"source", cy.Source, "cycle", cy.Time, "last", st.lastCycle)
+			skipped = append(skipped, cy.Time.Sub(st.lastCycle))
 			continue
 		}
 		st.lastCycle = cy.Time
@@ -353,6 +381,10 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	}
 	e.mu.Unlock()
 
+	if len(skipped) > 0 {
+		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Min(skipped))
+	}
+
 	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
 	// for other targets running concurrently.
 	for _, ev := range toDispatch {
@@ -362,6 +394,41 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			"firing", ev.Firing, "live", ev.Live)
 		e.dispatcher.Dispatch(ctx, scrubHealthAddresses(ev))
 	}
+}
+
+// warnExcluded reports at Warn that a source's cycles are being stored but not
+// evaluated for alerting. Silent exclusion is the failure alerting exists to
+// prevent, so this is not Debug; a stably-skewed source skips one cycle per
+// target per interval, so each (source, reason) is emitted at most once per
+// alertFreshness window and the suppressed count carries the rest. The window
+// doubles as the eviction rule, so a source that stops being excluded — or
+// leaves the fleet — drops out of the map.
+func (e *Evaluator) warnExcluded(now time.Time, reason string, cy scheduler.Cycle, detail ...any) {
+	window := alertFreshness(e.store.Current().Interval)
+	key := exclusionKey{source: cy.Source, reason: reason}
+
+	e.excludedMu.Lock()
+	rec := e.excluded[key]
+	if !rec.at.IsZero() && now.Sub(rec.at) < window {
+		rec.suppressed++
+		e.excluded[key] = rec
+		e.excludedMu.Unlock()
+		return
+	}
+	suppressed := rec.suppressed
+	for k, r := range e.excluded {
+		if now.Sub(r.at) >= window {
+			delete(e.excluded, k)
+		}
+	}
+	e.excluded[key] = exclusionRecord{at: now}
+	e.excludedMu.Unlock()
+
+	e.log.Warn("alert.source_excluded",
+		append([]any{
+			"source", cy.Source, "target", cy.Target.ID(), "reason", reason,
+			"suppressed", suppressed, "window", window,
+		}, detail...)...)
 }
 
 // scrubHealthAddresses blanks every address-bearing field of an Event for a

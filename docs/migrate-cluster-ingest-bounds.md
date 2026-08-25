@@ -56,11 +56,17 @@ Two operator-visible consequences:
 - A cycle older than `max(3 × interval, 5m)` on arrival is stored but not
   evaluated for alerting. A backlog delivered after an outage longer than that
   window will not replay alert transitions; the next fresh cycle drives the
-  correct state. The Debug log line is `alert.stale_cycle`.
+  correct state.
 - A slave whose clock **lags** the master by more than that window stops
-  contributing to alerts, silently, while its data keeps being stored. Keep
-  NTP working on slaves. (A slave more than five minutes *ahead* was already
-  refused at ingest.)
+  contributing to alerts while its data keeps being stored. Keep NTP working
+  on slaves. (A slave more than five minutes *ahead* was already refused at
+  ingest.) This is no longer silent: it is logged at Warn as
+  `alert.source_excluded` with `reason=clock_skew`, once per source per
+  freshness window, carrying the count of cycles the window suppressed.
+- A cycle whose timestamp does not advance for its source is skipped before it
+  can change alert state, so a requeued batch redelivered after a lost ack no
+  longer counts twice toward `sustained`. A producer whose clock steps
+  backwards is logged the same way with `reason=duplicate_cycle`.
 
 ## Schema
 

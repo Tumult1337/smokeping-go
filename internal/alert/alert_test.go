@@ -1756,3 +1756,220 @@ func TestDuplicateCycleDoesNotRefreshLiveness(t *testing.T) {
 		t.Fatalf("got %d live sources, want 1", evs[0].Live)
 	}
 }
+
+// logCapture records slog records so a test can assert on an operator-facing
+// warning rather than on its absence.
+type logCapture struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *logCapture) WithAttrs([]slog.Attr) slog.Handler       { return c }
+func (c *logCapture) WithGroup(string) slog.Handler            { return c }
+
+func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recs = append(c.recs, r.Clone())
+	return nil
+}
+
+func (c *logCapture) at(level slog.Level, msg string) []slog.Record {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []slog.Record
+	for _, r := range c.recs {
+		if r.Level == level && r.Message == msg {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func attr(r slog.Record, key string) string {
+	var out string
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == key {
+			out = a.Value.String()
+			return false
+		}
+		return true
+	})
+	return out
+}
+
+func newCapturingEvaluator(t *testing.T, a config.Alert) (*Evaluator, *logCapture, *fakeClock) {
+	t.Helper()
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    20,
+		Alerts:   map[string]config.Alert{"quorum-test": a},
+		Actions:  map[string]config.Action{"log": {Type: "log"}},
+	}
+	cap := &logCapture{}
+	ev, err := NewEvaluator(slog.New(cap), config.NewStore("", cfg), &recordingDispatcher{})
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	return ev, cap, pinClock(ev, testBase)
+}
+
+// A slave whose clock lags stably by more than alertFreshness passes the 7-day
+// ingest window and has every cycle refused by alerting: non-quorum alerts
+// from it vanish and quorum drops it from the denominator. Silent exclusion is
+// the failure alerting exists to prevent, so it must not be a Debug line.
+func TestExcludedSourceIsWarnedAbout(t *testing.T) {
+	ev, cap, clk := newCapturingEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+	window := alertFreshness(time.Minute)
+
+	lagging := lossyCycle("tokyo-1", 100)
+	lagging.Time = clk.t.Add(-window - time.Second)
+	ev.OnCycle(ctx, lagging)
+
+	recs := cap.at(slog.LevelWarn, "alert.source_excluded")
+	if len(recs) != 1 {
+		t.Fatalf("got %d warnings, want 1", len(recs))
+	}
+	if got := attr(recs[0], "source"); got != "tokyo-1" {
+		t.Errorf("warning names source %q, want tokyo-1", got)
+	}
+	if got := attr(recs[0], "reason"); got != reasonClockSkew {
+		t.Errorf("warning reason %q, want %q", got, reasonClockSkew)
+	}
+
+	// A source that is being evaluated must not be warned about, or the
+	// warning means nothing.
+	ev.OnCycle(ctx, cycleAt(clk, "frankfurt-1", 100))
+	for _, r := range cap.at(slog.LevelWarn, "alert.source_excluded") {
+		if attr(r, "source") == "frankfurt-1" {
+			t.Fatal("an evaluated source was reported as excluded")
+		}
+	}
+}
+
+// A stably skewed source skips one cycle per target per interval. The warning
+// has to survive that without flooding, and must still say how much it hid.
+func TestExcludedSourceWarningIsRateLimitedPerWindow(t *testing.T) {
+	ev, cap, clk := newCapturingEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+	window := alertFreshness(time.Minute)
+
+	for range 40 {
+		lagging := lossyCycle("tokyo-1", 100)
+		lagging.Time = clk.t.Add(-window - time.Second)
+		ev.OnCycle(ctx, lagging)
+		clk.advance(time.Second)
+	}
+	if recs := cap.at(slog.LevelWarn, "alert.source_excluded"); len(recs) != 1 {
+		t.Fatalf("got %d warnings inside one window, want 1", len(recs))
+	}
+
+	clk.advance(window)
+	lagging := lossyCycle("tokyo-1", 100)
+	lagging.Time = clk.t.Add(-window - time.Second)
+	ev.OnCycle(ctx, lagging)
+
+	recs := cap.at(slog.LevelWarn, "alert.source_excluded")
+	if len(recs) != 2 {
+		t.Fatalf("got %d warnings across two windows, want 2", len(recs))
+	}
+	if got := attr(recs[1], "suppressed"); got != "39" {
+		t.Errorf("second warning reports %q suppressed, want 39", got)
+	}
+}
+
+// The duplicate guard is the other silent exclusion: a producer whose clock
+// steps backwards delivers cycles that are never evaluated, and nothing else
+// would say so.
+func TestDuplicateCycleIsWarnedAbout(t *testing.T) {
+	ev, cap, clk := newCapturingEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
+	clk.advance(time.Second)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
+	if recs := cap.at(slog.LevelWarn, "alert.source_excluded"); len(recs) != 0 {
+		t.Fatalf("got %d warnings for an advancing stream, want 0", len(recs))
+	}
+
+	stepped := cycleAt(clk, "tokyo-1", 0)
+	stepped.Time = stepped.Time.Add(-time.Second)
+	ev.OnCycle(ctx, stepped)
+
+	recs := cap.at(slog.LevelWarn, "alert.source_excluded")
+	if len(recs) != 1 {
+		t.Fatalf("got %d warnings, want 1", len(recs))
+	}
+	if got := attr(recs[0], "reason"); got != reasonDuplicate {
+		t.Errorf("warning reason %q, want %q", got, reasonDuplicate)
+	}
+}
+
+// The rate-limit map is keyed by source, and slaves churn across a long-lived
+// master. The freshness window doubles as the eviction rule, so a source that
+// stopped being excluded must not hold a slot forever.
+func TestExclusionRecordsAreEvicted(t *testing.T) {
+	ev, _, clk := newCapturingEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+	window := alertFreshness(time.Minute)
+
+	for _, src := range []string{"edge-1", "edge-2", "edge-3"} {
+		lagging := lossyCycle(src, 100)
+		lagging.Time = clk.t.Add(-window - time.Second)
+		ev.OnCycle(ctx, lagging)
+	}
+	if got := len(ev.excluded); got != 3 {
+		t.Fatalf("got %d recorded exclusions, want 3", got)
+	}
+
+	// Those three are gone from the fleet; a fourth arrives a window later.
+	clk.advance(window)
+	lagging := lossyCycle("edge-4", 100)
+	lagging.Time = clk.t.Add(-window - time.Second)
+	ev.OnCycle(ctx, lagging)
+	if got := len(ev.excluded); got != 1 {
+		t.Fatalf("got %d recorded exclusions after the window, want 1", got)
+	}
+}
+
+// OnCycle runs once per target goroutine plus the cluster ingest handler, so
+// the exclusion bookkeeping is reached concurrently. It takes its own lock,
+// never nested inside the state lock.
+func TestConcurrentOnCycleIsRaceFree(t *testing.T) {
+	ev, cap, clk := newCapturingEvaluator(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+	window := alertFreshness(time.Minute)
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 25 {
+				c := lossyCycle(fmt.Sprintf("edge-%d", i), 100)
+				if j%2 == 0 {
+					c.Time = clk.t.Add(-window - time.Second)
+				} else {
+					c.Time = clk.t.Add(-time.Duration(j) * time.Millisecond)
+				}
+				ev.OnCycle(ctx, c)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(cap.at(slog.LevelWarn, "alert.source_excluded")) == 0 {
+		t.Fatal("no exclusion was reported, so the concurrent path was never reached")
+	}
+}
