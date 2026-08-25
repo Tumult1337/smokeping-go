@@ -884,6 +884,14 @@ func resolveTimeParam(s string, def, now time.Time) (time.Time, error) {
 	if s == "" {
 		return def, nil
 	}
+	// A whole decimal integer is unix seconds whatever its sign; a leading
+	// sign only starts a duration when something follows the digits, which is
+	// what separates "-1" from "-1h". Deciding on the sign alone made every
+	// signed unix second a 400, and reading the unsigned form as an instant
+	// while reading "-0" as an offset would be two grammars for one syntax.
+	if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return time.Unix(ts, 0), nil
+	}
 	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "+") {
 		d, err := parseRelativeDuration(s)
 		if err != nil {
@@ -894,11 +902,7 @@ func resolveTimeParam(s string, def, now time.Time) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
 	}
-	ts, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("%q is not RFC3339, unix seconds, or a duration like -1h", s)
-	}
-	return time.Unix(ts, 0), nil
+	return time.Time{}, fmt.Errorf("%q is not RFC3339, unix seconds, or a duration like -1h", s)
 }
 
 // Upper bounds for the "d"/"w" units below. time.Duration is int64 nanoseconds,

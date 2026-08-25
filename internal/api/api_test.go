@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1811,11 +1812,13 @@ func TestTimestampOutsideStorableRangeIsRejected(t *testing.T) {
 	}
 
 	// The inclusive edges of the DateTime64(3) domain, and the pre-epoch
-	// instant `?t=-1` resolves to, are ordinary requests.
+	// instant `at=-1` names, are ordinary requests. The last is the literal a
+	// caller sends: the RFC3339 equivalent it used to carry is a different
+	// input, and it passed for a year while `at=-1` itself returned 400.
 	for _, path := range []string{
 		"/api/v1/targets/core/gw/hops?at=1900-01-01T00:00:00Z",
 		"/api/v1/targets/core/gw/hops?at=2299-12-31T23:59:59.999Z",
-		"/api/v1/targets/core/gw/hops?at=1969-12-31T23:59:59.000Z",
+		"/api/v1/targets/core/gw/hops?at=-1",
 	} {
 		t.Run(path, func(t *testing.T) {
 			code, body := do(t, h, http.MethodGet, path)
@@ -1852,5 +1855,169 @@ func TestHopsAtFormsAndWindow(t *testing.T) {
 	}
 	if reader.queries != 0 {
 		t.Errorf("reader ran %d queries for a rejected at", reader.queries)
+	}
+}
+
+// A leading sign starts two different grammars: `-1h` is an offset from now,
+// `-1` is a unix instant one second before the epoch, and the README documents
+// both forms on `from`, `to` and `at`. Routing every signed value into the
+// duration parser made every signed unix second a 400. Each case below is the
+// literal string a caller puts on the wire — the RFC3339 equivalent is a
+// different input and cannot fail first for this bug.
+func TestSignedUnixSecondsResolveAsInstants(t *testing.T) {
+	instants := map[string]time.Time{
+		"-1":            time.Unix(-1, 0),
+		"-86400":        time.Unix(-86400, 0),
+		"%2B1":          time.Unix(1, 0),
+		"-0":            time.Unix(0, 0),
+		"%2B0":          time.Unix(0, 0),
+		"%2B1775001600": time.Unix(1775001600, 0),
+	}
+	for raw, want := range instants {
+		t.Run("at="+raw, func(t *testing.T) {
+			reader := &stubReader{}
+			h := newTestServer(t, withReader(reader))
+			code, body := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops?at="+raw)
+			if code != http.StatusOK {
+				t.Fatalf("status=%d body=%s, want 200", code, body)
+			}
+			if got := reader.lastAt.UTC(); !got.Equal(want.UTC()) {
+				t.Fatalf("at=%s resolved to %s, want %s", raw, got, want.UTC())
+			}
+		})
+	}
+
+	// from/to on a range endpoint, asserted through the window the handler
+	// echoes back rather than through a duplicate of its own parse.
+	for _, tc := range []struct{ from, to string }{
+		{"-86400", "-3600"},
+		{"%2B1775001600", "%2B1775005200"},
+		{"-3600", "%2B60"},
+	} {
+		t.Run("cycles?from="+tc.from+"&to="+tc.to, func(t *testing.T) {
+			h := newTestServer(t, withReader(&stubReader{}))
+			var got struct {
+				From time.Time `json:"from"`
+				To   time.Time `json:"to"`
+			}
+			doJSON(t, h, "GET", "/api/v1/targets/core/gw/cycles?from="+tc.from+"&to="+tc.to, &got)
+			wantFrom, _ := strconv.ParseInt(strings.TrimPrefix(tc.from, "%2B"), 10, 64)
+			wantTo, _ := strconv.ParseInt(strings.TrimPrefix(tc.to, "%2B"), 10, 64)
+			if !got.From.Equal(time.Unix(wantFrom, 0)) || !got.To.Equal(time.Unix(wantTo, 0)) {
+				t.Fatalf("echoed %s..%s, want %s..%s", got.From.UTC(), got.To.UTC(),
+					time.Unix(wantFrom, 0).UTC(), time.Unix(wantTo, 0).UTC())
+			}
+		})
+	}
+}
+
+// The other half of the same precedence rule: a signed value carrying a unit
+// is still an offset from now, and must not be read as a unix second.
+func TestSignedDurationsStayRelative(t *testing.T) {
+	for raw, want := range map[string]time.Duration{
+		"-1h":    -time.Hour,
+		"%2B30m": 30 * time.Minute,
+		"-7d":    -7 * 24 * time.Hour,
+		"-1w":    -7 * 24 * time.Hour,
+		"-90s":   -90 * time.Second,
+	} {
+		t.Run("at="+raw, func(t *testing.T) {
+			reader := &stubReader{}
+			h := newTestServer(t, withReader(reader))
+			before := time.Now()
+			code, body := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops?at="+raw)
+			if code != http.StatusOK {
+				t.Fatalf("status=%d body=%s, want 200", code, body)
+			}
+			if drift := reader.lastAt.Sub(before.Add(want)); drift < 0 || drift > 5*time.Second {
+				t.Fatalf("at=%s resolved to %s, want ~%s (drift %s)", raw, reader.lastAt.UTC(), before.Add(want).UTC(), drift)
+			}
+		})
+	}
+
+	h := newTestServer(t, withReader(&stubReader{}))
+	var got struct {
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
+	}
+	before := time.Now()
+	doJSON(t, h, "GET", "/api/v1/targets/core/gw/cycles?from=-1h&to=%2B30m", &got)
+	if drift := got.From.Sub(before.Add(-time.Hour)); drift < 0 || drift > 5*time.Second {
+		t.Fatalf("from=-1h echoed %s, want ~%s", got.From.UTC(), before.Add(-time.Hour).UTC())
+	}
+	if drift := got.To.Sub(before.Add(30 * time.Minute)); drift < 0 || drift > 5*time.Second {
+		t.Fatalf("to=+30m echoed %s, want ~%s", got.To.UTC(), before.Add(30*time.Minute).UTC())
+	}
+}
+
+// Reading a signed value as an instant hands ValidQueryTime a whole new way to
+// reach outside the storable range, so the guard has to bind the signed form
+// exactly as it binds RFC3339: both inclusive edges are ordinary requests and
+// one second past either is a 400 that never reaches the reader.
+func TestSignedUnixSecondsStayInsideTheStorableRange(t *testing.T) {
+	minSec, maxSec := storage.MinQueryTime.Unix(), storage.MaxQueryTime.Unix()
+	for _, tc := range []struct {
+		at   string
+		want int
+	}{
+		{strconv.FormatInt(minSec, 10), http.StatusOK},
+		{strconv.FormatInt(minSec-1, 10), http.StatusBadRequest},
+		{strconv.FormatInt(maxSec, 10), http.StatusOK},
+		{strconv.FormatInt(maxSec+1, 10), http.StatusBadRequest},
+		{"-99999999999", http.StatusBadRequest},
+	} {
+		t.Run("at="+tc.at, func(t *testing.T) {
+			reader := &stubReader{}
+			h := newTestServer(t, withReader(reader))
+			code, body := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops?at="+tc.at)
+			if code != tc.want {
+				t.Fatalf("status=%d body=%s, want %d", code, body, tc.want)
+			}
+			if tc.want == http.StatusBadRequest && reader.queries != 0 {
+				t.Fatalf("reader ran %d queries for a refused instant", reader.queries)
+			}
+		})
+	}
+}
+
+// A bare `+` in a query value is a space to net/http's own parser, so the
+// plus-prefixed forms above only reach the handler percent-encoded. Pinned so
+// the 400 is understood as the encoding rule it is, not as a parse bug.
+func TestBarePlusInAQueryValueIsRefused(t *testing.T) {
+	code, _ := do(t, newTestServer(t, withReader(&stubReader{})), http.MethodGet,
+		"/api/v1/targets/core/gw/hops?at=+1775001600")
+	if code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400 — an unencoded + arrives as a leading space", code)
+	}
+}
+
+// Reading a signed value as an instant is a new way to name a window edge, so
+// the window caps have to bind it exactly as they bind RFC3339 — a 400 years
+// wide span expressed in signed unix seconds is refused before the read, not
+// waved through as a relative offset the parser never resolved.
+func TestSignedUnixSecondsStillObeyTheWindowCaps(t *testing.T) {
+	span := "from=" + strconv.FormatInt(storage.MinQueryTime.Unix(), 10) +
+		"&to=" + strconv.FormatInt(storage.MaxQueryTime.Unix(), 10)
+	// The refusal must name the cap. A parse error is also a 400, so a status
+	// check alone would pass on the very code that never resolved the window.
+	for path, want := range map[string]string{
+		"/api/v1/targets/core/gw/rtts?" + span:                        "rtts window limited to 24h",
+		"/api/v1/targets/core/gw/http?" + span:                        "http window limited to 7d",
+		"/api/v1/targets/core/gw/hops/timeline?source=master&" + span: "hops/timeline window limited to 7d",
+		"/api/v1/targets/core/gw/cycles?step=raw&" + span:             "step=raw is limited to windows the raw tier covers",
+	} {
+		t.Run(path, func(t *testing.T) {
+			reader := &stubReader{}
+			code, body := do(t, newTestServer(t, withReader(reader)), http.MethodGet, path)
+			if code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", code, body)
+			}
+			if !strings.Contains(string(body), want) {
+				t.Fatalf("body=%s, want the cap refusal %q", body, want)
+			}
+			if reader.queries != 0 {
+				t.Fatalf("reader ran %d queries for a refused window", reader.queries)
+			}
+		})
 	}
 }

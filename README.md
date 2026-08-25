@@ -259,7 +259,11 @@ loss.
 | GET | `/api/v1/targets/{group}/{name}/hops/timeline?from&to&source` | Per-hop loss history (window ≤7d, `source` required) |
 
 `from` / `to` accept RFC3339, unix seconds, or relative durations like
-`-24h`, and `at` on `/hops` takes the same forms. Give `at` as RFC3339 or
+`-24h`, and `at` on `/hops` takes the same forms. A value that is a whole
+decimal integer is unix seconds whatever its sign, so `-1` is one second before
+the epoch and only a trailing unit (`-1h`, `-7d`) makes a signed value a
+relative offset; a `+`-prefixed value must be sent percent-encoded as `%2B`,
+since a bare `+` in a query string decodes to a space. Give `at` as RFC3339 or
 RFC3339Nano when the cycle you mean is not on a whole second: the unix form
 is integer-only, `at` resolves the *nearest* cycle rather than an exact one,
 and at a sub-2s cadence a second names more than one. An absolute timestamp
