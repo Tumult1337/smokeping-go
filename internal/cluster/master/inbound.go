@@ -7,6 +7,7 @@ import (
 
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/scheduler"
 )
 
 // ingestBatch turns each wire-format CyclePayload back into a scheduler.Cycle
@@ -73,9 +74,27 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 			duplicates++
 			continue
 		}
-		cycle := p.ToCycle(target)
-		s.sink.OnCycle(sinkCtx, cycle)
+		s.deliver(sinkCtx, p.ToCycle(target), batch.Source, key, p.Time.UnixNano())
 		accepted++
 	}
 	return accepted, duplicates
+}
+
+// deliver hands one cycle to the fanout, releasing the window slot admit
+// reserved if the call never returns. The reservation is taken first because
+// it is what makes two copies arriving at once resolve to one delivery;
+// releasing it on the way out is what keeps a measurement no sink took from
+// being remembered as delivered, since the repair copy would then be refused.
+// It reaches as far as the fanout and no further: OnCycle reports nothing, so
+// a row the writer drops on a full channel is delivered as far as this can
+// see.
+func (s *Server) deliver(ctx context.Context, cycle scheduler.Cycle, source, key string, nano int64) {
+	delivered := false
+	defer func() {
+		if !delivered {
+			s.dedup.forget(source, key, nano)
+		}
+	}()
+	s.sink.OnCycle(ctx, cycle)
+	delivered = true
 }

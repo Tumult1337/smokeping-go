@@ -271,3 +271,101 @@ func TestDedupInternTableStaysWithinTheWindow(t *testing.T) {
 		t.Error("intern table empty; interning is not happening at all")
 	}
 }
+
+// panicFirstSink refuses the first cycle the way a sink that never took it
+// would: by not returning at all.
+type panicFirstSink struct {
+	recordingSink
+	panicked bool
+}
+
+func (p *panicFirstSink) OnCycle(ctx context.Context, c scheduler.Cycle) {
+	if !p.panicked {
+		p.panicked = true
+		panic("sink refused the cycle")
+	}
+	p.recordingSink.OnCycle(ctx, c)
+}
+
+// The window is spent by a delivery, not by the intent to deliver: a cycle no
+// sink took must leave its identity unrecorded, or the redelivery the slave
+// sends to repair it is discarded as a copy and the measurement is lost for
+// good.
+func TestIngestReleasesTheWindowWhenDeliveryNeverCompletes(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	store := config.NewStore("", &config.Config{
+		Cluster: &config.Cluster{Token: "tok"},
+		Targets: []config.Group{{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}}},
+	})
+	sink := &panicFirstSink{}
+	srv := NewServer(log, store, NewRegistry(log), sink, nil)
+
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{{
+		Time: time.Now().UTC(), Group: "g", Name: "t", Sent: 5,
+	}}}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("first ingest returned; the fixture must fail the delivery")
+			}
+		}()
+		srv.ingestBatch(nil, batch)
+	}()
+
+	if n, dup := srv.ingestBatch(nil, batch); n != 1 || dup != 0 {
+		t.Fatalf("redelivery: accepted=%d duplicate=%d, want 1/0", n, dup)
+	}
+	if got := sink.len(); got != 1 {
+		t.Errorf("sink saw %d cycles, want the repair copy", got)
+	}
+}
+
+// Releasing a reservation must not turn it into a read-then-write: two copies
+// of one batch arriving at once still resolve to a single delivery.
+func TestConcurrentRedeliveryIsDeliveredOnce(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	store := config.NewStore("", &config.Config{
+		Cluster: &config.Cluster{Token: "tok"},
+		Targets: []config.Group{{Group: "g", Targets: []config.Target{{Name: "t", Probe: "icmp"}}}},
+	})
+	sink := &recordingSink{}
+	srv := NewServer(log, store, NewRegistry(log), sink, nil)
+
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{{
+		Time: time.Now().UTC(), Group: "g", Name: "t", Sent: 5,
+	}}}
+
+	var mu sync.Mutex
+	total := 0
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n, _ := srv.ingestBatch(nil, batch)
+			mu.Lock()
+			total += n
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if total != 1 {
+		t.Errorf("accepted %d copies of one identity, want 1", total)
+	}
+	if got := sink.len(); got != 1 {
+		t.Errorf("sink saw %d cycles, want 1", got)
+	}
+}
+
+// forget runs after admit, but the window between them is a Sweep away from
+// being gone: releasing a reservation whose window no longer exists is a
+// no-op, not a nil map dereference.
+func TestForgetOnAMissingWindowIsANoop(t *testing.T) {
+	d := newCycleDedup()
+	d.forget("edge-1", "g/t", 1)
+	if !d.admit("edge-1", "g/t", 1) {
+		t.Error("identity was refused after a forget that recorded nothing")
+	}
+}

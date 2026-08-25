@@ -71,9 +71,10 @@ func (w *sourceWindow) admit(target string, nano int64) bool {
 	return true
 }
 
-// cycleDedup makes cluster ingestion idempotent. It sits at the ingest
-// boundary, upstream of the fanout, so the storage writer and the alert
-// evaluator are both covered by one guard.
+// cycleDedup admits each measurement into the fanout once. It sits at the
+// ingest boundary, upstream of the fanout, so the storage writer and the alert
+// evaluator are both covered by one guard; what a sink does with a cycle it
+// was handed is past the guarantee, since OnCycle reports nothing back.
 type cycleDedup struct {
 	mu       sync.Mutex
 	clock    uint64
@@ -100,6 +101,19 @@ func (d *cycleDedup) admit(source, target string, nano int64) bool {
 	}
 	w.used = d.clock
 	return w.admit(target, nano)
+}
+
+// forget releases an identity this window reserved for a delivery that never
+// completed. The ring keeps the slot as a tombstone: eviction deletes a key
+// that is already gone, which costs a no-op rather than a scan.
+func (d *cycleDedup) forget(source, target string, nano int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	w, ok := d.bySource[source]
+	if !ok {
+		return
+	}
+	delete(w.seen, cycleID{target: target, nano: nano})
 }
 
 // evictLRU drops the least recently used window. Reached only past

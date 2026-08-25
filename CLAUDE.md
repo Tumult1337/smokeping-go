@@ -566,7 +566,7 @@ Key points a reader can't derive from a single file:
   (`isRefusal`, the one place a new semantic sentinel is declared).
   `maxCycleCounterKeys` (1024) bounds the same read's counters lookup.
 
-- **Ingest is idempotent; local probing needs no guard.** Cluster delivery
+- **Ingest admits each measurement once; local probing needs no guard.** Cluster delivery
   is at-least-once — `PushSink.Requeue` resends any batch whose ack was lost
   to a 5xx or a network error — and all four tables are plain `MergeTree`
   (`ReplicatedMergeTree` in CH-cluster mode), neither of which deduplicates.
@@ -579,6 +579,17 @@ Key points a reader can't derive from a single file:
   cluster path is deliberate: a locally probed cycle reaches the fanout once
   with no retry path behind it, so a guard there would add a window with
   nothing to catch.
+
+  **What is guarded is admission to the fanout, not storage.** The window slot
+  is *reserved* before delivery, because that is what collapses two copies
+  arriving at once into one delivery, and `cycleDedup.forget` *releases* it
+  again if `Sink.OnCycle` never returns — an identity remembered for a cycle no
+  sink took would refuse the very redelivery that repairs it. It cannot reach
+  further than that: `OnCycle` returns nothing, so a row the writer then drops
+  on a full channel is indistinguishable here from one it queued, and the
+  redelivery that would have refilled it is still classified as a copy. Closing
+  that needs an acceptance signal the `Sink` interface does not have; the
+  `writer_drops` counter on `/api/v1/health` is what surfaces it meanwhile.
 
   **Identity is `(source, group, name, timestamp)`.** `source` is the map
   level above, and it is the authenticated `X-Slave-Name` `ingestBatch`
