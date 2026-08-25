@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -304,5 +305,28 @@ func TestRegistryDuplicateRejectionLogsOnce(t *testing.T) {
 	}
 	if got := countLogLines(&buf); got != 2 {
 		t.Fatalf("after 5 repeated duplicate heartbeats: got %d log lines, want 2 (still)", got)
+	}
+}
+
+// Version and advertise are free strings off the wire — the header form is
+// bounded only by net/http's 1 MiB header cap — and the registry keeps both
+// per slave (advertise inside the log-dedup key even when ParseAdvertise
+// rejects it). Refusing the entry keeps the registry's footprint a function
+// of the fleet size, not of what a token holder chooses to send.
+func TestRegistryRefusesOversizedFields(t *testing.T) {
+	reg := NewRegistry(slog.New(slog.DiscardHandler))
+	big := strings.Repeat("v", maxSlaveFieldLen+1)
+
+	if reg.Touch("edge-1", big, "10.0.0.5:5000", "") {
+		t.Error("oversized version accepted")
+	}
+	if reg.Touch("edge-2", "", "10.0.0.5:5000", big) {
+		t.Error("oversized advertise accepted")
+	}
+	if reg.Has("edge-1") || reg.Has("edge-2") {
+		t.Error("refused slave stored anyway")
+	}
+	if !reg.Touch("edge-3", strings.Repeat("v", maxSlaveFieldLen), "10.0.0.5:5000", "10.44.0.2") {
+		t.Error("a version at the limit was refused")
 	}
 }

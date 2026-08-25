@@ -100,8 +100,18 @@ const maxRegisteredSlaves = 512
 // identity, not just /register. advertise is the raw slave-reported health
 // address; an empty or rejected value simply leaves the slave out of the
 // health mesh without blocking registration.
+// maxSlaveFieldLen bounds the free strings a slave asks the registry to keep
+// per entry. Both arrive as headers, where only net/http's 1 MiB cap limits
+// them, and both are retained — advertise inside the log-dedup key even when
+// ParseAdvertise rejects it. The longest legal advertise is a 45-byte IPv6
+// text form and a version is a release tag, so 256 is ~5x either.
+const maxSlaveFieldLen = 256
+
 func (r *Registry) Touch(name, version, addr, advertise string) bool {
 	if name == "" {
+		return false
+	}
+	if len(version) > maxSlaveFieldLen || len(advertise) > maxSlaveFieldLen {
 		return false
 	}
 

@@ -334,6 +334,11 @@ Key points a reader can't derive from a single file:
   only via the hourly 24h `Sweep`) — the registry is the list of legal
   labels, so its size is the cardinality bound. Refusing at the ceiling
   never evicts a registered slave, and `/register` answers 503 there.
+  `Touch` also refuses a version or advertise longer than
+  `maxSlaveFieldLen` (256): both are free strings arriving as headers,
+  bounded only by net/http's 1 MiB cap, and both are retained per entry —
+  advertise inside the log-dedup key even when `ParseAdvertise` rejects
+  it.
   This is a cardinality and data-integrity bound, **not** authentication:
   the cluster token is shared, so any registered slave can still claim
   any other registered slave's name. That is accepted, not overlooked.
