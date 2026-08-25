@@ -464,15 +464,20 @@ Key points a reader can't derive from a single file:
   validated. `parseHopAddr` is now the single reading both `validate` and
   `ToCycle` take: `MaxHopAddrLen` (302) bounds the whole encoded value
   *before* `ParseAddr` sees it, and a zone must be shaped like the interface
-  name or decimal index Go fills one from — `MaxHopZoneLen` (256, the widest
-  interface name any supported platform reports: `IFNAMSIZ`−1 = 15 on Linux,
-  macOS and the BSDs, `IF_MAX_STRING_SIZE` = 256 on Windows, against 10
-  digits for an `int32` index) and no ASCII control byte, `%` or `/` — the
-  characters no OS can name an interface and that RFC 6874 requires escaping
-  in this same text form. `MaxHopAddrLen` is that ceiling plus RFC 4291
-  §2.2 form 3, the longest textual address `ParseAddr` accepts (45 bytes).
-  `fe80::1%eth0` and `fe80::1%3` both still pass, which is the point: a
-  refused hop address is a refused batch.
+  name or decimal index Go fills one from. `MaxHopZoneLen` is twice
+  `maxInterfaceNameLen` (15 — `IFNAMSIZ`−1 on Linux, macOS and the BSDs, the
+  only platforms this binary ships for, against 10 digits for an `int32`
+  index), the same headroom `MaxHopsPerCycle` takes over its own producer.
+  It is not wider **because `hop_addr`'s width is what turns
+  `clickhouse.maxHopRows` — a bound derived in rows — into a byte ceiling on
+  an unauthenticated `/hops`**: at 30 the worst case is 485,280 × 76 B ≈
+  36.9 MB, where a zone of 256 would have made it ≈146 MB. The character
+  class refuses ASCII control bytes, `%` and `/` — what no OS can name an
+  interface, and what RFC 6874 requires escaping in this same text form.
+  `MaxHopAddrLen` (76) is the zone ceiling plus RFC 4291 §2.2 form 3, the
+  longest textual address `ParseAddr` accepts (45 bytes). `fe80::1%eth0` and
+  `fe80::1%3` both still pass, which is the point: a refused hop address is a
+  refused batch.
 
   **The hop bound is derived from the producer, not picked.**
   `config.MaxHopRowsPerCycle` = `MaxTraceRounds` (10) × `MaxTraceTTL` (30)

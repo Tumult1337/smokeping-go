@@ -470,11 +470,11 @@ func TestHopAddrZoneIsBounded(t *testing.T) {
 
 	// Every shape internal/probe can put in a zone: Go fills one from
 	// net.Interface.Name, or the decimal interface index when the name is
-	// unknown.
+	// unknown. 2147483647 is the widest an int32 index gets.
 	accepted := []string{
 		"fe80::1%eth0", "fe80::1%3", "fe80::1%2147483647",
 		"fe80::1%enp0s31f6", "fe80::1%eth0.100", "fe80::1%br-1a2b3c",
-		"fe80::1%wg0", "fe80::1%Local Area Connection 2",
+		"fe80::1%wg0", "fe80::1%veth1a2b3c4", "fe80::1%tailscale0",
 		"fe80::1%" + maxZone,
 		"::ffff:10.0.0.9%eth0",
 	}
@@ -587,5 +587,27 @@ func TestMaxSampleRTTCoversEveryConfigurableInterval(t *testing.T) {
 	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{c}}
 	if err := batch.Validate(now); err != nil {
 		t.Fatalf("a cycle at the largest configurable interval was refused: %v", err)
+	}
+}
+
+// The zone bound multiplies the byte ceiling on an unauthenticated /hops:
+// clickhouse.maxHopRows is derived in rows, so hop_addr's width is what turns
+// it into a response size. It must sit above what any platform this binary
+// ships for can emit, and no further.
+func TestHopZoneBoundIsSizedForTheShippedPlatforms(t *testing.T) {
+	// IFNAMSIZ is 16 on Linux, macOS and the BSDs, so an interface name is at
+	// most 15 bytes; Go's fallback zone is a decimal int32 interface index.
+	const ifNameMax = 15
+	if longest := len("2147483647"); ifNameMax < longest {
+		t.Fatalf("a decimal int32 index is %d bytes, wider than the name ceiling %d", longest, ifNameMax)
+	}
+	if cluster.MaxHopZoneLen < ifNameMax {
+		t.Errorf("MaxHopZoneLen %d is below the producer ceiling %d", cluster.MaxHopZoneLen, ifNameMax)
+	}
+	// Twice the producer's ceiling is the headroom convention this package
+	// already uses for MaxHopsPerCycle. Past that the bound stops being
+	// derived and starts inflating the /hops response cap.
+	if cluster.MaxHopZoneLen > 2*ifNameMax {
+		t.Errorf("MaxHopZoneLen %d exceeds twice the producer ceiling %d", cluster.MaxHopZoneLen, 2*ifNameMax)
 	}
 }

@@ -76,13 +76,13 @@ Two operator-visible consequences:
 `netip.ParseAddr` accepts a zone of any length, so a registered slave could put
 `fe80::1%<megabytes of text>` in a hop's `ip` and have it stored in
 `probe_hop.hop_addr` and served by an unauthenticated `/hops`. Ingest now
-bounds the complete encoded address at 302 bytes and requires a zone to be
+bounds the complete encoded address at 76 bytes and requires a zone to be
 shaped like an interface name or index. Real link-local hops
 (`fe80::1%eth0`, `fe80::1%3`) are unaffected.
 
 Rows written before this release are not rewritten. If you suspect one was
 planted, `probe_hop` rows outlive only their TTL, so either wait it out or
-delete by `length(hop_addr) > 302` in ClickHouse.
+delete by `length(hop_addr) > 76` in ClickHouse.
 
 ## An interval above 71m34.967295s is now refused at load
 

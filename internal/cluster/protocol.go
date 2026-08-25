@@ -99,13 +99,16 @@ const (
 	// reports 0 when the request never completed, so [0, 999] is the producer's
 	// whole range.
 	maxHTTPStatus = 999
-	// MaxHopZoneLen bounds an address's zone. netip.ParseAddr accepts any
-	// non-empty zone, but the producer fills one only from net.Interface.Name
-	// or — when the name is unknown — the decimal interface index, so the
-	// ceiling is the widest interface name a supported platform reports:
-	// IFNAMSIZ-1 = 15 on Linux, macOS and the BSDs, IF_MAX_STRING_SIZE = 256
-	// on Windows, against 10 digits for an int32 index.
-	MaxHopZoneLen = 256
+	// maxInterfaceNameLen is the producer's ceiling for a zone: Go fills one
+	// from net.Interface.Name, or the decimal interface index when the name is
+	// unknown, and IFNAMSIZ is 16 on every platform this binary ships for
+	// (Linux, macOS, the BSDs) against 10 digits for an int32 index.
+	maxInterfaceNameLen = 15
+	// MaxHopZoneLen is twice that, the same headroom MaxHopsPerCycle takes
+	// over its own producer ceiling. It is not wider because hop_addr's width
+	// is what turns clickhouse.maxHopRows — a bound derived in rows — into a
+	// byte ceiling on an unauthenticated /hops.
+	MaxHopZoneLen = 2 * maxInterfaceNameLen
 	// maxIPv6TextLen is RFC 4291 section 2.2 form 3, the longest textual
 	// address netip.ParseAddr accepts: six groups of four hex digits, five
 	// colons, and a dotted-quad tail.
