@@ -1771,3 +1771,51 @@ func TestGetHopsTimelineRequiresASource(t *testing.T) {
 		t.Fatalf("lastSource = %q, want master", r.lastSource)
 	}
 }
+
+// A finite unix second between JavaScript's date limit and MaxInt64 parsed
+// fine and then wrapped: time.Unix(1e16, 0).UnixMilli() is negative, so the
+// centre ClickHouse received sat in the opposite epoch direction from the one
+// asked for. Reject an instant no probe row can carry, before any conversion.
+func TestTimestampOutsideStorableRangeIsRejected(t *testing.T) {
+	h := newTestServer(t, withReader(&stubReader{}))
+
+	rejected := []string{
+		"/api/v1/targets/core/gw/hops?at=10000000000000000",
+		"/api/v1/targets/core/gw/hops?at=9999-12-31T23:59:59Z",
+		"/api/v1/targets/core/gw/hops?at=1899-12-31T23:59:59.999Z",
+		"/api/v1/targets/core/gw/cycles?from=-1h&to=10000000000000000",
+		// from and to both out of range and correctly ordered, so the
+		// to-after-from check cannot stand in for the range guard.
+		"/api/v1/targets/core/gw/cycles?from=10000000000000000&to=10000000000000001",
+		"/api/v1/targets/core/gw/rtts?from=10000000000000000&to=10000000000000001",
+		"/api/v1/targets/core/gw/http?from=10000000000000000&to=10000000000000001",
+		"/api/v1/targets/core/gw/hops/timeline?source=&from=10000000000000000&to=10000000000000001",
+	}
+	for _, path := range rejected {
+		t.Run(path, func(t *testing.T) {
+			reader := &stubReader{}
+			code, body := do(t, newTestServer(t, withReader(reader)), http.MethodGet, path)
+			if code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", code, body)
+			}
+			if reader.queries != 0 {
+				t.Fatalf("reader ran %d queries; the guard must fire before the read", reader.queries)
+			}
+		})
+	}
+
+	// The inclusive edges of the DateTime64(3) domain, and the pre-epoch
+	// instant `?t=-1` resolves to, are ordinary requests.
+	for _, path := range []string{
+		"/api/v1/targets/core/gw/hops?at=1900-01-01T00:00:00Z",
+		"/api/v1/targets/core/gw/hops?at=2299-12-31T23:59:59.999Z",
+		"/api/v1/targets/core/gw/hops?at=1969-12-31T23:59:59.000Z",
+	} {
+		t.Run(path, func(t *testing.T) {
+			code, body := do(t, h, http.MethodGet, path)
+			if code != http.StatusOK {
+				t.Fatalf("status=%d body=%s, want 200", code, body)
+			}
+		})
+	}
+}

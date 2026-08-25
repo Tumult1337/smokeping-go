@@ -1200,3 +1200,35 @@ func TestCachingReader_HopsAt_KeysOnTheRequestedCycle(t *testing.T) {
 		t.Fatalf("sub-second pin got %v, want its own entry", res.Hops)
 	}
 }
+
+// The pin key must be exactly as fine as the query it fronts, in both
+// directions. The reader resolves `at` to the millisecond, so two pins inside
+// one millisecond issue the same query and must share the entry — and keying
+// in nanoseconds also calls UnixNano outside its defined range, which
+// ValidQueryTime's domain reaches.
+func TestCachingReader_HopsAt_KeysAtTheResolutionTheReaderHas(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &atEchoReader{}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+	ref := newRef("g", "t")
+
+	first := now.Add(-time.Hour).Add(5 * time.Second)
+	for _, at := range []time.Time{first, first.Add(100 * time.Microsecond)} {
+		if _, err := c.QueryHopsAt(context.Background(), ref, at, 30*time.Minute, QueryFilter{}); err != nil {
+			t.Fatalf("at %s: %v", at, err)
+		}
+	}
+	if got := inner.calls.Load(); got != 1 {
+		t.Fatalf("inner calls: got %d, want 1 — the two pins name one millisecond", got)
+	}
+
+	// The far end of the addressable range keys without wrapping.
+	far := MaxQueryTime.Add(-time.Hour)
+	if _, err := c.QueryHopsAt(context.Background(), ref, far, 30*time.Minute, QueryFilter{}); err != nil {
+		t.Fatalf("at %s: %v", far, err)
+	}
+	if got := inner.calls.Load(); got != 2 {
+		t.Fatalf("inner calls: got %d, want 2", got)
+	}
+}

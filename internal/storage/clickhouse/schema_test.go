@@ -49,3 +49,19 @@ func TestSchemaHopAnnotationColumns(t *testing.T) {
 		}
 	}
 }
+
+// storage.MinQueryTime/MaxQueryTime are the DateTime64(3) domain. Widening the
+// scale (DateTime64(6), say) or dropping to DateTime moves that domain, so the
+// bound stops describing what the column can hold.
+func TestSchemaTimestampColumnsPinTheQueryTimeDomain(t *testing.T) {
+	decl := regexp.MustCompile(`(?m)^\s*timestamp\s+(\S+)`)
+	found := decl.FindAllStringSubmatch(SchemaDDL(""), -1)
+	if len(found) != 4 {
+		t.Fatalf("found %d timestamp column declarations, want one per table", len(found))
+	}
+	for _, m := range found {
+		if m[1] != "DateTime64(3," {
+			t.Errorf("timestamp declared %q; storage.MaxQueryTime is derived from DateTime64(3)", m[1])
+		}
+	}
+}

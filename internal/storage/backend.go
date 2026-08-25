@@ -34,6 +34,24 @@ type Reader interface {
 	QueryOverview(ctx context.Context, from, to time.Time, targets []config.TargetRef) ([]OverviewSourceRow, error)
 }
 
+// MinQueryTime and MaxQueryTime are the DateTime64(3) domain every probe
+// table's timestamp column carries, and so the widest instant a query can
+// name. ClickHouse does not refuse an epoch outside it: fromUnixTimestamp64Milli
+// wraps, and Go's UnixMilli wraps first and in the other direction, so an
+// unbounded parse hands the server a centre in the opposite epoch direction
+// from the one requested. Derived from the column type, not from retention,
+// which is per-install and re-appliable at any restart.
+var (
+	MinQueryTime = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC)
+	MaxQueryTime = time.Date(2299, 12, 31, 23, 59, 59, int(999*time.Millisecond), time.UTC)
+)
+
+// ValidQueryTime reports whether t names an instant probe storage can address.
+// Callers must apply it before any UnixMilli/UnixNano conversion.
+func ValidQueryTime(t time.Time) bool {
+	return !t.Before(MinQueryTime) && !t.After(MaxQueryTime)
+}
+
 // PickCycleStep returns the toStartOfInterval width for cycle queries.
 // Tiers: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h, >180d 1d. The
 // ladder targets ~500–1000 buckets per window so point density stays

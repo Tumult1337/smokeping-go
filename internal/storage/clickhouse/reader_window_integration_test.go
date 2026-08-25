@@ -242,3 +242,56 @@ func TestIntegrationLatestSinceFloorIsMillisecondExact(t *testing.T) {
 		t.Fatalf("a row 400ms below the floor survived it: %+v", res.Hops)
 	}
 }
+
+// The API's query-time bound is derived from the DateTime64(3) domain rather
+// than picked, so this pins the derivation against the server that defines it:
+// each edge round-trips exactly, and one millisecond outside wraps to an
+// instant hundreds of years from the one asked for.
+func TestIntegrationQueryTimeRangeMatchesClickHouse(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	roundTrip := func(ms int64) string {
+		t.Helper()
+		var s string
+		q := "SELECT toString(" + dtMilli + ")"
+		if err := r.conn.QueryRow(ctx, q, ms).Scan(&s); err != nil {
+			t.Fatalf("round trip %d: %v", ms, err)
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{"min", storage.MinQueryTime, "1900-01-01 00:00:00.000"},
+		{"max", storage.MaxQueryTime, "2299-12-31 23:59:59.999"},
+	} {
+		if got := roundTrip(tc.at.UnixMilli()); got != tc.want {
+			t.Errorf("%s: %s round-tripped as %s, want %s", tc.name, tc.at.UTC(), got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+	}{
+		{"below min", storage.MinQueryTime.Add(-time.Millisecond)},
+		{"above max", storage.MaxQueryTime.Add(time.Millisecond)},
+	} {
+		got := roundTrip(tc.at.UnixMilli())
+		if want := tc.at.UTC().Format("2006-01-02 15:04:05.000"); got == want {
+			t.Errorf("%s: %s round-tripped intact; the domain is wider than the bound claims", tc.name, want)
+		}
+	}
+}

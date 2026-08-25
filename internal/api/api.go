@@ -469,7 +469,7 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 	if atStr := r.URL.Query().Get("at"); atStr != "" {
 		at, perr := parseTimeParam(atStr, time.Time{}, time.Now())
 		if perr != nil {
-			writeErr(w, http.StatusBadRequest, "invalid at: expected RFC3339, unix seconds, or duration like -1h")
+			writeErr(w, http.StatusBadRequest, "invalid at: "+perr.Error())
 			return
 		}
 		res, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute, filter)
@@ -848,12 +848,12 @@ func parseRange(w http.ResponseWriter, r *http.Request, defaultSpan time.Duratio
 	now := time.Now()
 	from, err := parseTimeParam(q.Get("from"), now.Add(-defaultSpan), now)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid from: expected RFC3339, unix seconds, or duration like -1h")
+		writeErr(w, http.StatusBadRequest, "invalid from: "+err.Error())
 		return time.Time{}, time.Time{}, false
 	}
 	to, err := parseTimeParam(q.Get("to"), now, now)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid to: expected RFC3339, unix seconds, or duration like -1h")
+		writeErr(w, http.StatusBadRequest, "invalid to: "+err.Error())
 		return time.Time{}, time.Time{}, false
 	}
 	if !to.After(from) {
@@ -864,8 +864,23 @@ func parseRange(w http.ResponseWriter, r *http.Request, defaultSpan time.Duratio
 }
 
 // parseTimeParam accepts RFC3339, a unix timestamp, or a relative duration
-// like "-1h" (interpreted from `now`). Empty returns the default.
+// like "-1h" (interpreted from `now`). Empty returns the default. Every branch
+// is bounded to storage's addressable range before the caller can convert it:
+// a finite unix second past that range fits an int64 and then wraps in
+// UnixMilli, putting the instant storage sees in the opposite epoch direction.
 func parseTimeParam(s string, def, now time.Time) (time.Time, error) {
+	t, err := resolveTimeParam(s, def, now)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !storage.ValidQueryTime(t) {
+		return time.Time{}, fmt.Errorf("timestamp %s is outside the storable range %s..%s",
+			t.UTC().Format(time.RFC3339), storage.MinQueryTime.Format("2006"), storage.MaxQueryTime.Format("2006"))
+	}
+	return t, nil
+}
+
+func resolveTimeParam(s string, def, now time.Time) (time.Time, error) {
 	if s == "" {
 		return def, nil
 	}
@@ -881,7 +896,7 @@ func parseTimeParam(s string, def, now time.Time) (time.Time, error) {
 	}
 	ts, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("not rfc3339, duration, or unix: %q", s)
+		return time.Time{}, fmt.Errorf("%q is not RFC3339, unix seconds, or a duration like -1h", s)
 	}
 	return time.Unix(ts, 0), nil
 }

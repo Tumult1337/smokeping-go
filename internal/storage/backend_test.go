@@ -93,3 +93,32 @@ func TestPickHopStepNeverRunsAheadOfTheCadence(t *testing.T) {
 		}
 	}
 }
+
+// The query-time bound is the DateTime64(3) domain, so its edges must be the
+// exact epoch-millisecond values that domain spans — a bound picked one step
+// wide would hand ClickHouse a value fromUnixTimestamp64Milli wraps.
+func TestQueryTimeRangeIsTheDateTime64Domain(t *testing.T) {
+	if got := MinQueryTime.UnixMilli(); got != -2208988800000 {
+		t.Errorf("MinQueryTime = %d ms, want 1900-01-01T00:00:00.000Z", got)
+	}
+	if got := MaxQueryTime.UnixMilli(); got != 10413791999999 {
+		t.Errorf("MaxQueryTime = %d ms, want 2299-12-31T23:59:59.999Z", got)
+	}
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{"below min", MinQueryTime.Add(-time.Millisecond), false},
+		{"min", MinQueryTime, true},
+		{"epoch", time.Unix(0, 0), true},
+		{"pre-epoch", time.Unix(-1, 0), true},
+		{"max", MaxQueryTime, true},
+		{"above max", MaxQueryTime.Add(time.Millisecond), false},
+		{"int64 seconds that wrap UnixMilli", time.Unix(10000000000000000, 0), false},
+	} {
+		if got := ValidQueryTime(tc.at); got != tc.want {
+			t.Errorf("%s: ValidQueryTime(%s) = %v, want %v", tc.name, tc.at.UTC(), got, tc.want)
+		}
+	}
+}

@@ -130,8 +130,8 @@ type hopsCacheKey struct {
 	kind                hopsKind
 	group, name, source string
 	// fromUnix/toUnix carry the timeline window in seconds and, for the hopsAt
-	// kind, the pinned instant in nanoseconds with the window width; both zero
-	// for latest.
+	// kind, the pinned instant in milliseconds with the window width; both
+	// zero for latest.
 	fromUnix, toUnix int64
 	// latestSinceUnix is the freshness floor for the latest kind, floored to
 	// cacheKeyToQuantum — the same quantized instant the inner query runs
@@ -367,20 +367,21 @@ func (c *CachingReader) QueryLatestHops(ctx context.Context, ref config.TargetRe
 }
 
 func (c *CachingReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f QueryFilter) (HopsResult, error) {
-	// `at` keys exactly, in nanoseconds: it names one cycle, and the read
-	// returns that cycle's path and its round counters, so any quantization
-	// hands a click the neighbouring cycle's answer. Quantizing the query to
-	// match instead would move the ±window/2 centre and return a cycle nobody
-	// asked for. The pin comes from a chart or heatmap row, so a repeat of the
-	// same pin — the refresh tick, a remount — reproduces the key byte for
-	// byte; only two distinct cycles miss, which is what they must do.
+	// `at` keys exactly, at the millisecond the backend resolves it to: it
+	// names one cycle, and the read returns that cycle's path and its round
+	// counters, so any coarser quantization hands a click the neighbouring
+	// cycle's answer. Quantizing the query to match instead would move the
+	// ±window/2 centre and return a cycle nobody asked for. UnixNano is
+	// undefined past 2262 and ValidQueryTime admits instants beyond it; the
+	// pin comes from a chart or heatmap row, so a repeat of the same pin —
+	// the refresh tick, a remount — reproduces the key byte for byte.
 	// `window` is part of the key so an unusual override doesn't collide.
 	key := hopsCacheKey{
 		kind:     hopsKindAt,
 		group:    ref.Group,
 		name:     ref.Target.Name,
 		source:   f.Source,
-		fromUnix: at.UnixNano(),
+		fromUnix: at.UnixMilli(),
 		toUnix:   int64(window / time.Second),
 	}
 	return c.fetchHops(ctx, key, c.ttlFor(at), func(ctx context.Context) (HopsResult, error) {
