@@ -330,8 +330,9 @@ const maxHopTimelineBuckets = 7*24*60/15 + 1
 // the 2h raw tier holds at most 144,000 of one source's rows.
 const maxHopTimelineRows = maxHopTimelineBuckets * maxHopTTLs
 
-// hopRowCap and hopTimelineRowCap are the two constants above, lowered by
-// tests so a refusal can be driven without materialising the real row count.
+// hopRowCap is maxHopRows and hopTimelineRowCap is maxHopTimelineRows, held
+// as vars so a test can lower one and drive a refusal without materialising
+// the real row count.
 var (
 	hopRowCap         = maxHopRows
 	hopTimelineRowCap = maxHopTimelineRows
