@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -471,5 +472,62 @@ func TestCycleCountersRefuseTooManyKeys(t *testing.T) {
 	}
 	if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops[:maxCycleCounterKeys]); err != nil {
 		t.Fatalf("a read exactly at the key cap was refused: %v", err)
+	}
+}
+
+// A DateTime64(3) bound rendered from a time.Time reaches the server truncated
+// to whole seconds, which moves a window edge by up to a second in whichever
+// direction admits the wrong rows — and the wrongness is invisible without a
+// live server, since the query still parses and still returns rows. Every
+// timestamp predicate must therefore go through dtMilli, and no reader may
+// bind a time.Time at all.
+func TestReaderBindsEveryTimestampAsMilliseconds(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	from := time.Date(2026, 4, 1, 0, 0, 0, 900_000_000, time.UTC)
+	to := from.Add(24 * time.Hour)
+	f := storage.QueryFilter{Source: "edge-1", Step: 15 * time.Minute, LatestSince: from}
+
+	calls := map[string]func(*Reader) error{
+		"QueryCycles raw": func(r *Reader) error {
+			_, err := r.QueryCycles(context.Background(), ref, from, to, storage.QueryFilter{Source: "edge-1"})
+			return err
+		},
+		"QueryCycles step": func(r *Reader) error { _, err := r.QueryCycles(context.Background(), ref, from, to, f); return err },
+		"QueryRTTs":        func(r *Reader) error { _, err := r.QueryRTTs(context.Background(), ref, from, to, f); return err },
+		"QueryHTTPSamples": func(r *Reader) error {
+			_, err := r.QueryHTTPSamples(context.Background(), ref, from, to, f)
+			return err
+		},
+		"QueryLatestHops": func(r *Reader) error { _, err := r.QueryLatestHops(context.Background(), ref, f); return err },
+		"QueryHopsAt": func(r *Reader) error {
+			_, err := r.QueryHopsAt(context.Background(), ref, from, 30*time.Minute, f)
+			return err
+		},
+		"QueryHopsTimeline": func(r *Reader) error {
+			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, f)
+			return err
+		},
+		"QueryOverview": func(r *Reader) error {
+			_, err := r.QueryOverview(context.Background(), from, to, []config.TargetRef{ref})
+			return err
+		},
+	}
+	rawBound := regexp.MustCompile(`timestamp\s*(>=|<=|>|<|=)\s*\?`)
+
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			conn := &recordConn{}
+			if err := call(&Reader{conn: conn}); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if m := rawBound.FindString(conn.query); m != "" {
+				t.Errorf("%s binds a timestamp predicate directly (%q), not through %s:%s", name, m, dtMilli, conn.query)
+			}
+			for i, a := range conn.args {
+				if ts, ok := a.(time.Time); ok {
+					t.Errorf("%s: arg %d is a time.Time (%s); the driver renders it at whole-second precision", name, i, ts)
+				}
+			}
+		})
 	}
 }

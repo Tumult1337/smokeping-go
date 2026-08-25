@@ -60,6 +60,12 @@ func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to
 	return r.queryCyclesBucketed(ctx, ref, from, to, f.Source, step)
 }
 
+// dtMilli renders one DateTime64(3) predicate bound. Every timestamp bound in
+// this package goes through it because clickhouse-go renders a bound
+// time.Time at whole-second precision, which moves a window edge by up to a
+// second in whichever direction admits the wrong rows.
+const dtMilli = "fromUnixTimestamp64Milli(?, 'UTC')"
+
 // sourceFilter builds the optional source-predicate clause and its bound
 // argument. Returns ("", nil) when no filter is wanted — the caller's
 // WHERE clause then has a static shape so CH can use the ORDER BY's
@@ -85,9 +91,9 @@ SELECT timestamp, source,
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
-  AND timestamp >= ? AND timestamp < ?` + srcClause + `
+  AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + srcClause + `
 ORDER BY timestamp`
-	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from.UnixMilli(), to.UnixMilli()}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query cycles raw: %w", err)
@@ -188,10 +194,10 @@ SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
-  AND timestamp >= ? AND timestamp < ?%s
+  AND timestamp >= `+dtMilli+` AND timestamp < `+dtMilli+`%s
 GROUP BY bucket_ts, source
 ORDER BY bucket_ts, source`, int(step.Seconds()), srcClause)
-	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from.UnixMilli(), to.UnixMilli()}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query cycles bucketed: %w", err)
@@ -255,9 +261,9 @@ SELECT timestamp, rtt_ms, seq
 FROM probe_rtt
 WHERE target_id = ?
   AND target_group = ?
-  AND timestamp >= ? AND timestamp < ?` + srcClause + `
+  AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + srcClause + `
 ORDER BY timestamp, seq`
-	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from.UnixMilli(), to.UnixMilli()}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query rtts: %w", err)
@@ -283,9 +289,9 @@ SELECT timestamp, source, rtt_ms, status, seq, error
 FROM probe_http
 WHERE target_id = ?
   AND target_group = ?
-  AND timestamp >= ? AND timestamp < ?` + srcClause + `
+  AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + srcClause + `
 ORDER BY timestamp, seq`
-	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
+	args := append([]any{ref.Target.Name, ref.Group, from.UnixMilli(), to.UnixMilli()}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query http: %w", err)
@@ -374,7 +380,7 @@ func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f st
 	// CTE emitted, which are already at or after the cutoff.
 	freshClause := ""
 	if !f.LatestSince.IsZero() {
-		freshClause = " AND timestamp >= ?"
+		freshClause = " AND timestamp >= " + dtMilli
 	}
 	// Latest cycle PER SOURCE, not a single global max(timestamp). Without
 	// GROUP BY source, the CTE returns whichever source happened to flush
@@ -403,7 +409,7 @@ ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	args := []any{ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
 	if !f.LatestSince.IsZero() {
-		args = append(args, f.LatestSince)
+		args = append(args, f.LatestSince.UnixMilli())
 	}
 	args = append(args, ref.Target.Name, ref.Group)
 	args = append(args, srcArgs...)
@@ -427,17 +433,17 @@ func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.
 	// of one. With argMin we pin per-source and let the IN-list join
 	// pull only those rows.
 	//
-	// The centre travels as epoch milliseconds because the driver renders a
-	// bound time.Time at whole-second precision, and a centre rounded off the
-	// cycle it names leaves a neighbouring cycle nearer than that cycle.
+	// Centre and both window edges are dtMilli bounds: a centre rounded off
+	// the cycle it names leaves a neighbouring cycle nearer than that cycle,
+	// and edges rounded the other way make that neighbour the only candidate.
 	q := `
 WITH nearest AS (
   SELECT source,
-         argMin(timestamp, abs(dateDiff('millisecond', timestamp, fromUnixTimestamp64Milli(?, 'UTC')))) AS ts
+         argMin(timestamp, abs(dateDiff('millisecond', timestamp, ` + dtMilli + `))) AS ts
   FROM probe_hop
   WHERE target_id = ?
     AND target_group = ?` + srcClause + `
-    AND timestamp >= ? AND timestamp < ?
+    AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + `
   GROUP BY source
 )
 SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
@@ -452,7 +458,7 @@ ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	//              outer — target id+group, optional source.
 	args := []any{at.UnixMilli(), ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
-	args = append(args, at.Add(-half), at.Add(half))
+	args = append(args, at.Add(-half).UnixMilli(), at.Add(half).UnixMilli())
 	args = append(args, ref.Target.Name, ref.Group)
 	args = append(args, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
@@ -494,16 +500,14 @@ func (r *Reader) queryCycleCounters(ctx context.Context, ref config.TargetRef, h
 	if len(keys) > maxCycleCounterKeys {
 		return nil, storage.ErrHopsTruncated
 	}
-	// Milliseconds, not time.Time: the driver renders a bound time.Time to
-	// second precision, so an exact DateTime64(3) comparison silently matches
-	// nothing. The range bound is redundant with the IN set and exists so the
-	// primary key still prunes.
+	// The range bound is redundant with the IN set and exists so the primary
+	// key still prunes.
 	pairs := make([]string, len(keys))
 	first, last := keys[0].Time.UnixMilli(), keys[0].Time.UnixMilli()
 	tuples := make([]any, 0, 2*len(keys))
 	for i, k := range keys {
 		ms := k.Time.UnixMilli()
-		pairs[i] = "(?, fromUnixTimestamp64Milli(?))"
+		pairs[i] = "(?, " + dtMilli + ")"
 		tuples = append(tuples, k.Source, ms)
 		first = min(first, ms)
 		last = max(last, ms)
@@ -517,8 +521,8 @@ SELECT source, timestamp, any(sent), any(lost), any(loss_pct)
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
-  AND timestamp >= fromUnixTimestamp64Milli(?)
-  AND timestamp <= fromUnixTimestamp64Milli(?)
+  AND timestamp >= ` + dtMilli + `
+  AND timestamp <= ` + dtMilli + `
   AND (source, timestamp) IN (` + strings.Join(pairs, ", ") + `)
 GROUP BY source, timestamp
 LIMIT ` + strconv.Itoa(len(keys))
@@ -662,10 +666,10 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?
   AND source = ?
-  AND timestamp >= ? AND timestamp < ?
+  AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + `
 GROUP BY bucket_ts, source, ttl
 ORDER BY bucket_ts, ttl` + hopRowLimit(hopTimelineRowCap)
-	rows, err := r.conn.Query(ctx, q, ref.Target.Name, ref.Group, source, from, to)
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, ref.Group, source, from.UnixMilli(), to.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("query hops grid: %w", err)
 	}

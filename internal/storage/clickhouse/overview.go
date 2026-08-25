@@ -61,7 +61,7 @@ SELECT
 FROM (
   SELECT
     target_group, target_id, source,
-    intDiv(toUInt32(timestamp) - toUInt32(toDateTime(?)), ?)  AS bucket_idx,
+    intDiv(toUInt32(timestamp) - ?, ?)                        AS bucket_idx,
     avg(loss_pct)                                             AS b_loss_avg,
     max(loss_pct)                                             AS b_loss_max,
     quantilesExactWeighted(0.5)(rtt_median_us, toUInt64(sent - lost))[1] / 1000.0  AS b_median,
@@ -70,17 +70,17 @@ FROM (
     sum(toUInt64(sent - lost))                                AS b_recv_total,
     max(timestamp)                                            AS b_last_seen
   FROM probe_cycle
-  WHERE timestamp >= ? AND timestamp < ?
+  WHERE timestamp >= `+dtMilli+` AND timestamp < `+dtMilli+`
     AND (target_group, target_id) IN (%s)
   GROUP BY target_group, target_id, source, bucket_idx
 )
 GROUP BY target_group, target_id, source`, inClause)
 
 	// Arg order matches the placeholders top-to-bottom in the query:
-	// inner intDiv(from), inner bucketSec, outer WHERE from, outer WHERE to,
-	// then each (group, name) pair.
+	// inner intDiv origin (whole seconds — bucket_idx counts seconds), inner
+	// bucketSec, outer WHERE from, outer WHERE to, then each (group, name) pair.
 	args := make([]any, 0, 4+len(targets)*2)
-	args = append(args, from, bucketSec, from, to)
+	args = append(args, from.Unix(), bucketSec, from.UnixMilli(), to.UnixMilli())
 	for _, t := range targets {
 		args = append(args, t.Group, t.Target.Name)
 	}

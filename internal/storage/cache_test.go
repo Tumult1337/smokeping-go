@@ -1189,10 +1189,8 @@ func TestCachingReader_HopsAt_KeysOnTheRequestedCycle(t *testing.T) {
 	}
 
 	// The decorator is generic over Reader and may not assume how finely the
-	// one underneath resolves `at`. Today's driver renders a bound time.Time
-	// to whole seconds, so the CH reader cannot separate these two — the key
-	// still must, or a driver that gains sub-second binding reinstates the
-	// defect silently.
+	// one underneath resolves `at`; the CH reader separates these two, and a
+	// key coarser than the query it fronts serves one pin's path for another.
 	sub := first.Add(500 * time.Millisecond)
 	res, err := c.QueryHopsAt(context.Background(), ref, sub, 30*time.Minute, QueryFilter{})
 	if err != nil {
