@@ -967,8 +967,8 @@ func TestGetHopsKeepsOrdinaryTargetIntact(t *testing.T) {
 // call sites in getHops and getHopsTimeline, so each needs its own coverage.
 //
 // Unlike /hops, /hops/timeline redacts every non-empty address, not just the
-// apparent terminal one — queryHopsBucketed's GROUP BY makes "terminal" an
-// ambiguous notion within a bucket (see redactAllHopAddresses). Both
+// apparent terminal one — a grid row's address is the worst-loss cycle's
+// responder, so "terminal" names nothing (see redactAllHopAddresses). Both
 // addresses here must come back as the sentinel, never blank and never the
 // real value.
 func TestGetHopsTimelineRedactsHealthTarget(t *testing.T) {
@@ -982,7 +982,7 @@ func TestGetHopsTimelineRedactsHealthTarget(t *testing.T) {
 	var body struct {
 		Hops []hopTimelineDTO `json:"hops"`
 	}
-	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops/timeline", &body)
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops/timeline?source=tokyo-1", &body)
 
 	if len(body.Hops) != 2 {
 		t.Fatalf("got %d hops, want 2: %+v", len(body.Hops), body.Hops)
@@ -1010,7 +1010,7 @@ func TestGetHopsTimelineKeepsOrdinaryTargetIntact(t *testing.T) {
 	var body struct {
 		Hops []hopTimelineDTO `json:"hops"`
 	}
-	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline", &body)
+	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline?source=master", &body)
 
 	if len(body.Hops) != 2 {
 		t.Fatalf("got %d hops, want 2: %+v", len(body.Hops), body.Hops)
@@ -1070,11 +1070,12 @@ func TestRedactTerminalHopPerTimestamp(t *testing.T) {
 }
 
 // TestRedactAllHopAddressesClosesIntraBucketLeak proves the intra-bucket case
-// redactTerminalHops cannot close: queryHopsBucketed groups by (bucket_ts,
-// source, ttl, hop_addr), so a single (source, bucket) pair can carry more
-// than one row at the *same* ttl with different addresses (a mid-bucket
-// route change), and a longer trace than whichever row happens to sit at the
-// apparent maximum index. A positional "blank only the max index" pass —
+// redactTerminalHops cannot close. It guards the property rather than a live
+// row shape: queryHopsGrid now emits one row per (slot, ttl), so the two rows
+// at the same ttl below are no longer producible, but the redaction may not
+// depend on that — the shapes it still produces carry a longer trace than
+// whichever row sits at the apparent maximum index all the same. A positional
+// "blank only the max index" pass —
 // exactly what redactTerminalHops does — leaves every other row's address
 // intact, including one carrying the slave's real address at the same ttl
 // as a still-shorter trace. redactAllHopAddresses must not have this gap:
@@ -1127,8 +1128,8 @@ func TestReadEndpointWindowCaps(t *testing.T) {
 		{"rtts far past the cap", "/api/v1/targets/core/gw/rtts?from=-3000d", http.StatusBadRequest},
 		{"http at the cap", "/api/v1/targets/core/gw/http?from=-7d", http.StatusOK},
 		{"http past the cap", "/api/v1/targets/core/gw/http?from=-8d", http.StatusBadRequest},
-		{"hops timeline at the cap", "/api/v1/targets/core/gw/hops/timeline?from=-7d", http.StatusOK},
-		{"hops timeline past the cap", "/api/v1/targets/core/gw/hops/timeline?from=-8d", http.StatusBadRequest},
+		{"hops timeline at the cap", "/api/v1/targets/core/gw/hops/timeline?source=master&from=-7d", http.StatusOK},
+		{"hops timeline past the cap", "/api/v1/targets/core/gw/hops/timeline?source=master&from=-8d", http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1241,7 +1242,7 @@ func TestHopsTimelineEchoesResolvedStep(t *testing.T) {
 				StepSec int64 `json:"step_sec"`
 			}
 			doJSON(t, h, http.MethodGet,
-				"/api/v1/targets/core/gw/hops/timeline?from=-"+span.String(), &body)
+				"/api/v1/targets/core/gw/hops/timeline?source=master&from=-"+span.String(), &body)
 
 			want := int64(storage.PickHopStep(span) / time.Second)
 			if body.StepSec != want {
@@ -1252,7 +1253,7 @@ func TestHopsTimelineEchoesResolvedStep(t *testing.T) {
 	// The raw tier must report 0 rather than omitting the field, so the client
 	// can tell "no bucketing" from "server did not say".
 	h := newTestServer(t, withReader(&stubReader{}))
-	_, raw := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops/timeline?from=-1h")
+	_, raw := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops/timeline?source=master&from=-1h")
 	if !strings.Contains(string(raw), `"step_sec":0`) {
 		t.Fatalf("raw tier must serialise step_sec:0 explicitly, got %s", raw)
 	}
@@ -1386,7 +1387,7 @@ func TestGetHopsTimelineClearsAnnotationsForHealthTarget(t *testing.T) {
 	var body struct {
 		Hops []hopTimelineDTO `json:"hops"`
 	}
-	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops/timeline", &body)
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops/timeline?source=tokyo-1", &body)
 	for _, h := range body.Hops {
 		if h.IP != hopAddrSentinel {
 			t.Fatalf("address not sentinelized: %+v", h)
@@ -1412,7 +1413,7 @@ func TestGetHopsCarriesAnnotationsForOrdinaryTarget(t *testing.T) {
 		t.Fatalf("/hops lost an annotation field:\n%s", raw)
 	}
 
-	rawTL := doRaw(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline")
+	rawTL := doRaw(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline?source=master")
 	if !strings.Contains(rawTL, `"Unreach":"admin-prohibited"`) {
 		t.Fatalf("/hops/timeline lost Unreach:\n%s", rawTL)
 	}
@@ -1616,7 +1617,7 @@ func TestTruncatedHopReadIsARequestError(t *testing.T) {
 	paths := []string{
 		"/api/v1/targets/core/gw/hops",
 		"/api/v1/targets/core/gw/hops?at=1774000000",
-		"/api/v1/targets/core/gw/hops/timeline?from=-24h",
+		"/api/v1/targets/core/gw/hops/timeline?source=master&from=-24h",
 	}
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
@@ -1722,5 +1723,40 @@ func TestGetHopsTargetLossLeaksNoAddressForHealthTarget(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"Sent":10`) || !strings.Contains(string(raw), `"LossCount":1`) {
 		t.Fatalf("health target lost its cycle counters, which carry no address: %s", raw)
+	}
+}
+
+// /hops/timeline serves one probe origin per request. Without that admission
+// the row count carries a factor — the number of sources with rows in the
+// window — that nothing in the config or the schema bounds, and no ceiling
+// derived from the grid can hold. The heatmap already draws one canvas per
+// source and fetches each separately, so the cost is a refusal on a hand-made
+// request, not on the UI.
+func TestGetHopsTimelineRequiresASource(t *testing.T) {
+	now := time.Now()
+	r := &stubReader{hops: []storage.HopPoint{{Source: "master", Time: now, Index: 1, IP: "203.0.113.1"}}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	code, body := do(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline")
+	if code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400 for a source-less timeline", code, body)
+	}
+	if r.queries != 0 {
+		t.Fatalf("the refused request still ran %d queries", r.queries)
+	}
+
+	// Present but empty names the untagged pre-cluster origin, which is a
+	// source like any other — the reader matches it exactly.
+	var served struct {
+		Hops []hopTimelineDTO `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline?source=", &served)
+	if r.lastSource != "" {
+		t.Fatalf("lastSource = %q, want the untagged origin", r.lastSource)
+	}
+
+	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline?source=master", &served)
+	if r.lastSource != "master" {
+		t.Fatalf("lastSource = %q, want master", r.lastSource)
 	}
 }

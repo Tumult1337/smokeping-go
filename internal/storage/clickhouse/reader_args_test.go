@@ -188,10 +188,10 @@ func TestReaderQueriesOrderForTheirConsumer(t *testing.T) {
 }
 
 // Every hop read buffers its whole result set into a []storage.HopPoint on an
-// unauthenticated endpoint, and hop_addr is a slave-supplied string that
-// widens queryHopsBucketed's GROUP BY without bound. Each path carries a
-// LIMIT one past the cap, so the row set a single GET can force is finite and
-// reaching the cap is still distinguishable from ending on it.
+// unauthenticated endpoint. Each path carries a LIMIT one past its own cap —
+// the pinned reads' and the timeline's are derived from different bounds — so
+// the row set a single GET can force is finite and reaching the cap is still
+// distinguishable from ending on it.
 func TestHopQueriesCarryRowLimit(t *testing.T) {
 	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
@@ -215,14 +215,44 @@ func TestHopQueriesCarryRowLimit(t *testing.T) {
 			return err
 		},
 	}
-	want := "LIMIT " + strconv.Itoa(maxHopRows+1)
+	caps := map[string]int{
+		"QueryLatestHops":            maxHopRows,
+		"QueryHopsAt":                maxHopRows,
+		"QueryHopsTimeline/raw":      maxHopTimelineRows,
+		"QueryHopsTimeline/bucketed": maxHopTimelineRows,
+	}
 	for name, call := range calls {
 		conn := &recordConn{}
 		if err := call(&Reader{conn: conn}); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+		want := "LIMIT " + strconv.Itoa(caps[name]+1)
 		if !strings.Contains(conn.query, want) {
 			t.Errorf("%s: query has no %q:\n%s", name, want, conn.query)
+		}
+	}
+}
+
+// The timeline's ceiling is a product of bounds, not a number picked against a
+// typical read: one origin per request, one row per (grid slot, ttl), the grid
+// no wider than the window cap divided by the step ladder's floor, and ttl a
+// UInt8 column ingest refuses to exceed. Every real 7d read has to sit under
+// it by construction, so a step ladder that ever returns a finer width than
+// the endpoint's window can afford must fail here rather than at a refusal.
+func TestHopTimelineGridFitsItsRowCap(t *testing.T) {
+	if maxHopTimelineRows != maxHopTimelineBuckets*maxHopTTLs {
+		t.Fatalf("maxHopTimelineRows = %d, want the grid product %d",
+			maxHopTimelineRows, maxHopTimelineBuckets*maxHopTTLs)
+	}
+	const window = 7 * 24 * time.Hour // the endpoint's own cap
+	for span := time.Minute; span <= window; span += 11 * time.Minute {
+		step := storage.PickHopStep(span)
+		if step == 0 {
+			continue // raw: one slot per cycle, bounded by the walk's 50ms spacing
+		}
+		if slots := int(span/step) + 1; slots > maxHopTimelineBuckets {
+			t.Fatalf("span %s at step %s needs %d slots, over the %d the cap is derived from",
+				span, step, slots, maxHopTimelineBuckets)
 		}
 	}
 }
@@ -241,19 +271,16 @@ func TestQueryLatestHopsBoundsFutureRows(t *testing.T) {
 	}
 }
 
-// The cap was first sized against two responder addresses per
-// (bucket, source, ttl). A 7d/15m timeline read off the deployed six-source
-// fleet holds four, so a 30-TTL path fits in 485k rows and the old 300k sat
-// under a shape the probe produces on its own.
-func TestMaxHopRowsClearsTheWidestLegitimateTimeline(t *testing.T) {
+// A pinned hop read returns one cycle per source, and cluster ingest refuses a
+// cycle carrying more than 600 hop rows, so the ceiling has to clear that
+// product across every source name the master's registry admits at once.
+func TestMaxHopRowsClearsEverySourcesPinnedCycle(t *testing.T) {
 	const (
-		buckets    = 7*24*4 + 2 // 7d, the endpoint's window cap, at the 15m tier plus a partial bucket each end
-		ttls       = 30         // the TTL walk's own ceiling
-		sources    = 6          // the deployed reference fleet
-		responders = 4          // most distinct addresses one (bucket, source, ttl) held over 7d
+		rowsPerCycle      = 600 // cluster.MaxHopsPerCycle, twice the producer's own 300
+		registeredSources = 512 // master's maxRegisteredSlaves
 	)
-	if want := buckets * ttls * sources * responders; maxHopRows < want {
-		t.Fatalf("maxHopRows = %d, under the %d rows a legitimate 7d timeline holds", maxHopRows, want)
+	if want := rowsPerCycle * registeredSources; maxHopRows < want {
+		t.Fatalf("maxHopRows = %d, under the %d rows a full fleet's pinned read holds", maxHopRows, want)
 	}
 }
 
@@ -293,9 +320,9 @@ func (c *countConn) Query(_ context.Context, query string, _ ...any) (driver.Row
 // the cap so reaching it is distinguishable from ending on it.
 func TestHopReadsRefuseATruncatedResult(t *testing.T) {
 	const cap = 4
-	orig := hopRowCap
-	hopRowCap = cap
-	t.Cleanup(func() { hopRowCap = orig })
+	origPinned, origTimeline := hopRowCap, hopTimelineRowCap
+	hopRowCap, hopTimelineRowCap = cap, cap
+	t.Cleanup(func() { hopRowCap, hopTimelineRowCap = origPinned, origTimeline })
 
 	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
 	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)

@@ -105,7 +105,8 @@ Key points a reader can't derive from a single file:
   **Window caps.** The binary ships no auth, so on every endpoint that
   returns unbucketed rows the window cap is the only bound on an
   anonymous request's scan: `/rtts` 24h (`api.maxRTTWindow`), `/http`
-  and `/hops/timeline` 7d, and `?step=raw` on `/cycles` bounded by
+  and `/hops/timeline` 7d (plus one probe origin per request — see the
+  hop row caps below), and `?step=raw` on `/cycles` bounded by
   `storage.PickCycleStep(span) == 0` rather than a second copy of the
   2h threshold, so widening the raw tier widens the override with it.
   `/rtts` is tighter than its 7d siblings because `probe_rtt` stores a
@@ -138,8 +139,11 @@ Key points a reader can't derive from a single file:
   the `GROUP BY` so each (bucket, source) tuple stays a distinct row —
   without it, master/slave data would be mixed together with `any(source)`
   picking an arbitrary label and the UI would lose per-source bands.
-  Bucketed hop queries additionally keep `hop_addr` in the `GROUP BY` so
-  a path flap returns one row per distinct address seen in the bucket.
+  Hop timeline queries are the exception: `queryHopsGrid` groups by
+  `(slot, source, ttl)` only, so a path flap folds into one row carrying
+  the address of the slot's worst-loss cycle — the row the heatmap
+  already picked out of the per-responder set and drew. Per-responder
+  rows survive on `/hops?at=`, which pins one cycle and needs no grid.
 
 - **Retention:** per-table TTL set at bootstrap from
   `storage.clickhouse.retention.{cycle,rtt,hop,http}_days` (defaults
@@ -221,8 +225,8 @@ Key points a reader can't derive from a single file:
   cached, admitted and refused with the hops rather than as an uncached
   point query on every cache hit. The wire field is `target_loss`, a
   sibling array of `hops` named for the quantity rather than the row so it
-  cannot be read as a hop field. `/hops/timeline` carries none: a bucketed
-  row spans many cycles. Absent key or missing source renders as unknown,
+  cannot be read as a hop field. `/hops/timeline` carries none: a grid
+  slot spans whatever cycles fell in it. Absent key or missing source renders as unknown,
   never 0% — an old server pairs with a new UI during a rolling upgrade.
 
   **An echo reply counts as the target's only if its peer is the resolved
@@ -488,31 +492,54 @@ Key points a reader can't derive from a single file:
   outage delivers cycles far younger — while a row past the shortest
   default retention (14d) is written already expired.
 
-  `clickhouse.maxHopRows` (485,280) is on every hop read. `hop_addr` is
-  slave-supplied text that widens `queryHopsBucketed`'s `GROUP BY` per
-  distinct value, and each read buffers its whole result into a
-  `[]storage.HopPoint` for an unauthenticated GET. The value is
-  674 buckets × 30 TTLs × 6 sources × 4 addresses: the 7d window cap at
-  the 15m tier plus a partial bucket each end, the TTL walk's own
-  ceiling, the deployed fleet, and the most distinct addresses one
-  (bucket, source, ttl) held over 7d there — four, not the two this cap
-  was first sized against, which put it at 300k, under a shape the probe
-  produces by itself. A real 7d read of one target on that fleet is
-  41,017 rows.
+  **Every hop read carries a row cap, and each cap is a product of real
+  limits rather than a number sized against a typical read** — twice now
+  a cap picked that way sat under output the probe produces by itself.
+  Each read buffers its whole result into a `[]storage.HopPoint` for an
+  unauthenticated GET, so the ceiling is what stands between one GET and
+  the process's memory.
 
-  It is a memory ceiling, not a legitimacy one: a wider fleet or a busier
-  fabric exceeds it, and no memory-safe number does not. That is why
-  reaching it is reported. Hop reads order oldest-first, so the prefix a
-  silent truncation left was missing the newest history and rendered as a
-  probe that had stopped — served as 200 on the endpoint an operator
-  opens during an incident. Every hop query asks for `maxHopRows + 1` via
-  `hopRowLimit()` — one var so a new hop read cannot inherit the
-  unbounded shape by omission — and `hopRowsWithinCap` refuses the whole
-  result with `storage.ErrHopsTruncated`, which the API maps to 400 with
-  the remedy rather than the 502 that blames the backend or the 503 that
-  invites an identical retry. A flag on a 200 was rejected: `CachingReader`
-  would cache and re-serve the partial set, and an error is the
-  fail-closed default for a consumer that has not heard of the flag.
+  `clickhouse.maxHopRows` (485,280) covers the two pinned reads,
+  `QueryLatestHops` and `QueryHopsAt`. They return one cycle per source,
+  and cluster ingest refuses a cycle carrying more than
+  `MaxHopsPerCycle` (600) hop rows, so the cap clears 808 sources —
+  above the 512 live names `maxRegisteredSlaves` admits at once.
+
+  `clickhouse.maxHopTimelineRows` (172,288) covers `/hops/timeline`, and
+  is `maxHopTimelineBuckets × maxHopTTLs`: the endpoint caps its window
+  at 7d and `PickHopStep` never buckets finer than 15m past 24h, so the
+  grid is at most 673 slots wide, and `probe_hop.ttl` is `UInt8` with
+  ingest refusing an index outside `[0, 255]`, so it is at most 256 rows
+  deep. **Both other factors are removed rather than estimated**:
+  responders fold into one row per `(slot, ttl)` (see the storage
+  bullet), and the source count — the one factor neither the config nor
+  the schema bounds, 512 registered slaves × their history — is admitted
+  instead, one probe origin per request. `source` is therefore *required*
+  on `/hops/timeline`; an empty value is the untagged pre-cluster origin,
+  and a missing one is a 400. The heatmap already fetches and draws one
+  canvas per source, so the UI never sends the request that is refused.
+  The raw tier (≤2h, one slot per cycle) is inside the same ceiling
+  without a bucket ladder to lean on: `probe` walks one TTL per 50ms and
+  the scheduler runs one cycle per (source, target) at a time, so 2h of
+  one origin's hop rows is at most 144,000. On the bucketed tier no
+  schema-legal result can reach the cap at all, which is the point — the
+  refusal is an assertion about the data, not a policy about the query.
+
+  Reaching either cap is reported, never trimmed. Hop reads order
+  oldest-first, so the prefix a silent truncation left was missing the
+  newest history and rendered as a probe that had stopped — served as 200
+  on the endpoint an operator opens during an incident. Every hop query
+  asks for `cap + 1` via `hopRowLimit(cap)` so a new hop read cannot
+  inherit the unbounded shape by omission, and `hopRowsWithinCap` refuses
+  the whole result with `storage.ErrHopsTruncated`, which the API maps to
+  400 with the remedy rather than the 502 that blames the backend or the
+  503 that invites an identical retry. A flag on a 200 was rejected:
+  `CachingReader` would cache and re-serve the partial set, and an error
+  is the fail-closed default for a consumer that has not heard of the
+  flag. `CachingReader` also refuses to answer it from an expired entry:
+  a refusal is deterministic, only a success bumps an entry's expiry, and
+  serving stale on one turned the refusal into a 200 that never ended
+  (`isRefusal`, the one place a new semantic sentinel is declared).
   `maxCycleCounterKeys` (1024) bounds the same read's counters lookup.
 
 - **Slave push buffer + auth:** `slave.PushSink` is a fixed 600-cycle
@@ -605,9 +632,11 @@ Key points a reader can't derive from a single file:
   zone-stripped), because `hop_addr` is slave-supplied text and
   `::ffff:10.0.0.1` / `2001:0db8::0001` / `fe80::1%eth0` would otherwise
   each split a row from its own mate; text the parser rejects keeps its
-  exact bytes as its identity. `/hops/timeline` buckets across
-  `(bucket_ts, source, ttl, hop_addr)`, so no rule identifies a terminal
-  row and every non-empty `IP` there is replaced with the sentinel
+  exact bytes as its identity. `/hops/timeline` returns one row per
+  `(slot, ttl)` whose address is the slot's worst-loss cycle's responder,
+  so no rule identifies a terminal row — a slot's deepest row can be a
+  silent hop with the slave's own address sitting above it — and every
+  non-empty `IP` there is replaced with the sentinel
   `"redacted"` instead — not `""`, because the heatmap reads `IP` as a
   did-this-hop-reply flag; its DTO does not carry `target_reply` at all,
   since a field with no consumer on an unauthenticated endpoint is pure

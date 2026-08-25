@@ -306,31 +306,53 @@ ORDER BY timestamp, seq`
 	return out, rows.Err()
 }
 
-// maxHopRows bounds the rows one hop read buffers into a []storage.HopPoint;
-// hop_addr is slave-supplied text that widens queryHopsBucketed's GROUP BY per
-// distinct value, so an unauthenticated GET has no other ceiling.
+// maxHopRows bounds a pinned hop read. QueryLatestHops and QueryHopsAt return
+// one cycle per source, and cluster ingest refuses a cycle carrying more than
+// 600 hop rows, so the cap clears 808 sources — above the 512 live names the
+// master's registry admits at once.
 const maxHopRows = 485_280
 
-// hopRowCap is maxHopRows, lowered by tests so the refusal below can be driven
-// without materialising half a million rows.
-var hopRowCap = maxHopRows
+// maxHopTTLs is the ttl column's whole domain: probe_hop stores it as UInt8
+// and cluster ingest refuses an index outside [0, 255], so nothing a source
+// can push puts more distinct TTLs on one grid slot.
+const maxHopTTLs = 256
+
+// maxHopTimelineBuckets is the widest grid /hops/timeline can ask for: the
+// endpoint caps the window at 7d and storage.PickHopStep never buckets finer
+// than 15m past 24h, plus one slot for a `from` that is off the grid.
+const maxHopTimelineBuckets = 7*24*60/15 + 1
+
+// maxHopTimelineRows is that grid's whole product, and the timeline's ceiling:
+// one probe origin per request, one row per (slot, ttl). A bucketed read
+// cannot reach it — the product is the ceiling of a schema-legal result, not
+// an estimate of a typical one. Neither can a raw read: probe walks one TTL
+// per 50ms and the scheduler runs one cycle per (source, target) at a time, so
+// the 2h raw tier holds at most 144,000 of one source's rows.
+const maxHopTimelineRows = maxHopTimelineBuckets * maxHopTTLs
+
+// hopRowCap and hopTimelineRowCap are the two constants above, lowered by
+// tests so a refusal can be driven without materialising the real row count.
+var (
+	hopRowCap         = maxHopRows
+	hopTimelineRowCap = maxHopTimelineRows
+)
 
 // hopRowLimit is appended to every hop query rather than declared per query,
 // so a new hop read cannot inherit the unbounded shape by omission. It asks
 // for one row past the cap so reaching it is distinguishable from ending on it.
-func hopRowLimit() string {
-	return fmt.Sprintf("\nLIMIT %d", hopRowCap+1)
+func hopRowLimit(cap int) string {
+	return fmt.Sprintf("\nLIMIT %d", cap+1)
 }
 
 // hopRowsWithinCap refuses a result that reached the cap instead of returning
 // its prefix. Hop reads order oldest-first, so a truncated path history is
 // missing its newest rows and reads as a probe that stopped — an
 // incident-shaped lie on the endpoint an operator opens during an incident.
-func hopRowsWithinCap(out []storage.HopPoint, err error) ([]storage.HopPoint, error) {
+func hopRowsWithinCap(cap int, out []storage.HopPoint, err error) ([]storage.HopPoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(out) > hopRowCap {
+	if len(out) > cap {
 		return nil, storage.ErrHopsTruncated
 	}
 	return out, nil
@@ -376,7 +398,7 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM latest)
-ORDER BY source, ttl` + hopRowLimit()
+ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	// args layout: CTE filter (target id+group, opt source, opt freshness), outer filter (target id+group, opt source).
 	args := []any{ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
@@ -421,7 +443,7 @@ FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?` + srcClause + `
   AND (source, timestamp) IN (SELECT source, ts FROM nearest)
-ORDER BY source, ttl` + hopRowLimit()
+ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	// args layout: CTE — `at` (the centre), target id+group, optional source, from, to;
 	//              outer — target id+group, optional source.
 	args := []any{at, ref.Target.Name, ref.Group}
@@ -571,85 +593,71 @@ func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 		p.Sent = int64(sent)
 		out = append(out, p)
 	}
-	return hopRowsWithinCap(out, rows.Err())
+	return hopRowsWithinCap(hopRowCap, out, rows.Err())
 }
 
 func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) (storage.HopsResult, error) {
-	step := f.Step
-	var hops []storage.HopPoint
-	var err error
-	if step == 0 {
-		hops, err = r.queryHopsRaw(ctx, ref, from, to, f.Source)
-	} else {
-		hops, err = r.queryHopsBucketed(ctx, ref, from, to, f.Source, step)
-	}
+	hops, err := r.queryHopsGrid(ctx, ref, from, to, f.Source, f.Step)
 	if err != nil {
 		return storage.HopsResult{}, err
 	}
-	// No Cycles: a bucketed row spans many cycles, so there is no single
-	// cycle whose counters it could carry.
+	// No Cycles: a grid slot spans whatever cycles fell in it, so there is no
+	// single cycle whose counters it could carry.
 	return storage.HopsResult{Hops: hops}, nil
 }
 
-func (r *Reader) queryHopsRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.HopPoint, error) {
-	srcClause, srcArgs := sourceFilter(source)
-	q := `
-SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
-       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
-       loss_pct, lost, sent
-FROM probe_hop
-WHERE target_id = ?
-  AND target_group = ?
-  AND timestamp >= ? AND timestamp < ?` + srcClause + `
-ORDER BY timestamp, ttl` + hopRowLimit()
-	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
-	rows, err := r.conn.Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("query hops raw: %w", err)
+// queryHopsGrid reads the heatmap's grid: one row per (slot, ttl) for one
+// probe origin, where a slot is a bucket when step > 0 and a single cycle
+// otherwise. Both dimensions and the origin are bounded, which is what makes
+// maxHopTimelineRows a ceiling that can be derived rather than guessed.
+//
+// Responders inside a slot fold into the row of the cycle that lost most —
+// the row the heatmap already picked out of the per-responder rows and drew,
+// discarding the rest. Ties between responders resolve arbitrarily, as they
+// did client-side. The per-responder breakdown lives on /hops?at=, which pins
+// one cycle and needs no grid.
+//
+// max(loss_pct) preserves brief 100%-loss spikes that the slot average
+// (sum(lost)/sum(sent)) dilutes — at a 5-min bucket with 10 per-cycle rows, a
+// single 100%-loss cycle averages to 10% and disappears against the heatmap's
+// loss palette. The heatmap colors cells by this max so the spike survives.
+//
+// Aliases use `avg_loss_pct` / `max_loss_pct` (not `loss_pct`) to avoid
+// shadowing the underlying `loss_pct` column: a select-list alias of
+// `loss_pct` would make `max(loss_pct)` aggregate the alias (an aggregate
+// itself) and ClickHouse rejects "aggregate function inside aggregate
+// function" with a 500.
+//
+// max(unreach) surfaces any annotation in the slot because the empty string
+// loses to every label; between two distinct labels the lexicographically
+// larger wins, which is acceptable since they are vanishingly rare and equally
+// alarming.
+func (r *Reader) queryHopsGrid(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
+	slot := "timestamp"
+	if step > 0 {
+		slot = fmt.Sprintf("toStartOfInterval(timestamp, INTERVAL %d SECOND)", int(step.Seconds()))
 	}
-	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
-	return scanHopRows(rows)
-}
-
-func (r *Reader) queryHopsBucketed(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
-	srcClause, srcArgs := sourceFilter(source)
-	// max(loss_pct) preserves brief 100%-loss spikes that the bucket-average
-	// (sum(lost)/sum(sent)) dilutes — at a 5-min bucket with 10 per-cycle
-	// rows, a single 100%-loss cycle averages to 10% and disappears against
-	// the heatmap's loss palette. The heatmap colors cells by this max so
-	// the spike survives bucketing.
-	//
-	// Aliases use `avg_loss_pct` / `max_loss_pct` (not `loss_pct`) to avoid
-	// shadowing the underlying `loss_pct` column: a select-list alias of
-	// `loss_pct` would make `max(loss_pct)` aggregate the alias (an aggregate
-	// itself) and ClickHouse rejects "aggregate function inside aggregate
-	// function" with a 500.
-	//
-	// max(unreach) surfaces any annotation in the bucket because the empty
-	// string loses to every label; between two distinct labels the
-	// lexicographically larger wins, which is acceptable since they are
-	// vanishingly rare and equally alarming.
-	q := fmt.Sprintf(`
-SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND) AS bucket_ts,
-       source                                            AS src,
+	q := `
+SELECT ` + slot + ` AS bucket_ts,
+       source                                              AS src,
        ttl,
-       hop_addr,
-       max(unreach)                                      AS unreach,
-       sum(sent)                                         AS total_sent,
-       sum(lost)                                         AS total_lost,
+       argMax(hop_addr, loss_pct)                          AS hop_addr,
+       max(unreach)                                        AS unreach,
+       sum(sent)                                           AS total_sent,
+       sum(lost)                                           AS total_lost,
        if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS avg_loss_pct,
-       max(loss_pct)                                     AS max_loss_pct,
-       argMax(timestamp, loss_pct)                       AS worst_ts
+       max(loss_pct)                                       AS max_loss_pct,
+       argMax(timestamp, loss_pct)                         AS worst_ts
 FROM probe_hop
 WHERE target_id = ?
   AND target_group = ?
-  AND timestamp >= ? AND timestamp < ?%s
-GROUP BY bucket_ts, source, ttl, hop_addr
-ORDER BY bucket_ts, source, ttl%s`, int(step.Seconds()), srcClause, hopRowLimit())
-	args := append([]any{ref.Target.Name, ref.Group, from, to}, srcArgs...)
-	rows, err := r.conn.Query(ctx, q, args...)
+  AND source = ?
+  AND timestamp >= ? AND timestamp < ?
+GROUP BY bucket_ts, source, ttl
+ORDER BY bucket_ts, ttl` + hopRowLimit(hopTimelineRowCap)
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, ref.Group, source, from, to)
 	if err != nil {
-		return nil, fmt.Errorf("query hops bucketed: %w", err)
+		return nil, fmt.Errorf("query hops grid: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck // rows.Err() returned below captures any close-time error
 	var out []storage.HopPoint
@@ -671,5 +679,5 @@ ORDER BY bucket_ts, source, ttl%s`, int(step.Seconds()), srcClause, hopRowLimit(
 		p.WorstTime = worstTs
 		out = append(out, p)
 	}
-	return hopRowsWithinCap(out, rows.Err())
+	return hopRowsWithinCap(hopTimelineRowCap, out, rows.Err())
 }

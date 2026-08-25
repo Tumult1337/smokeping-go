@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getHopsTimeline, type HopPoint } from "./api";
-import { lossColor, lossTextColor } from "./palette";
-import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
+import { lossColor } from "./palette";
 import { cycleAtSec } from "./chartUtils";
 
 // The heatmap's chrome colours all live as CSS custom properties in styles.css
@@ -60,16 +59,14 @@ interface Props {
   // Highlighted cycle column (unix seconds) — rendered as a vertical marker
   // in every per-source heatmap.
   selectedSec?: number;
-  // Filter to a single source. When set, only that source's heatmap is
-  // requested and the collapsible UI is skipped (one section, no chevron).
-  source?: string;
+  // The probe origin this heatmap draws. Required: /hops/timeline serves one
+  // origin per request, and "" is the untagged pre-cluster origin, not "all".
+  source: string;
 }
 
-// Per-hop packet-loss heatmap over a time window. With one source (filtered
-// view or single-origin target) renders a single heatmap. With N sources
-// renders N stacked collapsible heatmaps — each sized to that source's own
-// hop count, each click forwarding the owning source. Pairs with the
-// per-source split in HopsTable.
+// Per-hop packet-loss heatmap over a time window for one probe origin. The
+// stacking across origins lives in MtrSection, which renders one of these per
+// source — matching the endpoint, which serves one origin per request.
 export function MtrHeatmap({
   targetId,
   refreshTick,
@@ -112,12 +109,6 @@ export function MtrHeatmap({
     return () => controller.abort();
   }, [targetId, refreshTick, fromSec, toSec, source]);
 
-  // Group hops by source, preserving first-seen order. Each group becomes
-  // one per-source heatmap with its own hop set.
-  const groups = useMemo(() => groupBySource(hops ?? []), [hops]);
-
-  const { collapsed, toggle: toggleCollapsed } = useCollapsedSources();
-
   if (err && (hops === null || hops.length === 0)) return <div className="error">{err}</div>;
   if (hops === null) return <div className="empty">Loading MTR history…</div>;
   if (toSec - fromSec > 7 * 24 * 3600) {
@@ -125,76 +116,18 @@ export function MtrHeatmap({
   }
   if (hops.length === 0) return <div className="empty">No MTR cycles in range</div>;
 
-  // Single-source: render the canvas directly, no collapse chrome.
-  if (groups.length === 1) {
-    return (
-      <>
-        <PathHeatmap
-          source={groups[0].source}
-          hops={groups[0].hops}
-          fromSec={fromSec}
-          toSec={toSec}
-          stepSec={stepSec}
-          selectedSec={selectedSec}
-          onPick={onCyclePick}
-          stale={err != null}
-        />
-        <HeatmapLegend />
-      </>
-    );
-  }
-
-  // Multi-source: stacked collapsible sections. Each section's chevron +
-  // heading row is clickable to expand/collapse; expanded shows that
-  // source's heatmap (only that source's hops, not the union).
   return (
     <>
-      <div className="mtr-heatmap-stack">
-      {groups.map((g) => {
-        const isCollapsed = collapsed.has(g.source);
-        const worstLoss = g.hops.reduce((m, h) => {
-          const w = (h as { MaxLossPct?: number }).MaxLossPct ?? h.LossPct;
-          return w > m ? w : m;
-        }, 0);
-        const hopCount = countDistinct(g.hops);
-        return (
-          <div key={g.source || "(unspecified)"} className="mtr-heatmap-source">
-            <button
-              type="button"
-              className="mtr-heatmap-heading"
-              aria-expanded={!isCollapsed}
-              onClick={() => toggleCollapsed(g.source)}
-            >
-              <span className="mtr-heatmap-chevron">{isCollapsed ? "▶" : "▼"}</span>
-              <span className="mtr-heatmap-source-name">
-                {g.source || "(unspecified)"}
-              </span>
-              <span className="mtr-heatmap-summary">
-                {hopCount} hop{hopCount === 1 ? "" : "s"}
-                <span
-                  className="mtr-heatmap-worst"
-                  style={{ color: lossTextColor(worstLoss, "var(--text-subtle)") }}
-                >
-                  max {worstLoss.toFixed(1)}%
-                </span>
-              </span>
-            </button>
-            {!isCollapsed && (
-              <PathHeatmap
-                source={g.source}
-                hops={g.hops}
-                fromSec={fromSec}
-                toSec={toSec}
-                stepSec={stepSec}
-                selectedSec={selectedSec}
-                onPick={onCyclePick}
-                stale={err != null}
-              />
-            )}
-          </div>
-        );
-      })}
-      </div>
+      <PathHeatmap
+        source={source}
+        hops={hops}
+        fromSec={fromSec}
+        toSec={toSec}
+        stepSec={stepSec}
+        selectedSec={selectedSec}
+        onPick={onCyclePick}
+        stale={err != null}
+      />
       <HeatmapLegend />
     </>
   );

@@ -1191,21 +1191,94 @@ func TestReaderQueryHopsTimelineRawAndBucketed(t *testing.T) {
 	pts, err := hopsTimeline(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "tht"}, Group: "g"},
 		start.Add(-time.Hour), start.Add(48*time.Hour),
-		storage.QueryFilter{Step: 15 * time.Minute},
+		storage.QueryFilter{Source: "master", Step: 15 * time.Minute},
 	)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	// Same bucket (within 15m): ttl=1 collapses to 1 row (stable addr).
-	// ttl=2 has two distinct addrs in the same bucket: expect 2 rows.
-	var ttl2 int
+	// One row per (bucket, ttl), responders folded in: the grid slot is what
+	// the heatmap draws, and a second row for the same slot was only ever
+	// collapsed again client-side. ttl=2 flapped, so its row is the address of
+	// the worst-loss cycle in the bucket, carrying that cycle's max.
+	var flapped []storage.HopPoint
 	for _, p := range pts {
 		if p.Index == 2 {
-			ttl2++
+			flapped = append(flapped, p)
 		}
 	}
-	if ttl2 != 2 {
-		t.Fatalf("expected 2 rows for ttl=2 (path flap), got %d (full: %+v)", ttl2, pts)
+	if len(flapped) != 1 {
+		t.Fatalf("expected 1 row for ttl=2, got %d (full: %+v)", len(flapped), pts)
+	}
+	if flapped[0].IP != "10.0.0.99" {
+		t.Fatalf("ttl=2 row kept %q, want the worst-loss responder 10.0.0.99", flapped[0].IP)
+	}
+	if flapped[0].Sent != 6 || flapped[0].LossCount != 1 {
+		t.Fatalf("ttl=2 row = %d sent %d lost, want the bucket's whole TTL: 6 sent 1 lost", flapped[0].Sent, flapped[0].LossCount)
+	}
+	if flapped[0].MaxLossPct < 33 || flapped[0].MaxLossPct > 34 {
+		t.Fatalf("ttl=2 MaxLossPct = %v, want the flapped cycle's own 33.3%%", flapped[0].MaxLossPct)
+	}
+	if !flapped[0].WorstTime.Equal(start.Add(5 * time.Minute).Truncate(time.Millisecond)) {
+		t.Fatalf("ttl=2 WorstTime = %s, want the lossy cycle", flapped[0].WorstTime)
+	}
+}
+
+// The timeline serves one probe origin per request: the source predicate is
+// unconditional, so an empty filter names the untagged pre-cluster origin
+// rather than every source. Without that the row count carries a factor
+// nothing bounds.
+func TestReaderQueryHopsTimelinePinsOneSource(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ref := config.TargetRef{Target: config.Target{Name: "onesource"}, Group: "g"}
+	start := time.Now().UTC().Add(-time.Hour)
+	for _, src := range []string{"master", "slave-a"} {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time: start, Target: ref, Source: src, Sent: 3,
+			Hops: []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: []time.Duration{time.Millisecond}}},
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	for name, f := range map[string]storage.QueryFilter{
+		"raw":      {Source: "slave-a"},
+		"bucketed": {Source: "slave-a", Step: 15 * time.Minute},
+	} {
+		pts, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), f)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(pts) != 1 || pts[0].Source != "slave-a" {
+			t.Fatalf("%s: got %+v, want slave-a's row alone", name, pts)
+		}
+	}
+	for name, f := range map[string]storage.QueryFilter{
+		"raw":      {},
+		"bucketed": {Step: 15 * time.Minute},
+	} {
+		pts, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), f)
+		if err != nil {
+			t.Fatalf("%s untagged: %v", name, err)
+		}
+		if len(pts) != 0 {
+			t.Fatalf("%s: an empty source matched %d tagged rows, want the untagged origin alone", name, len(pts))
+		}
 	}
 }
 
@@ -1270,7 +1343,7 @@ func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
 	pts, err := hopsTimeline(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "thsp"}, Group: "g"},
 		start.Add(-time.Hour), start.Add(time.Hour),
-		storage.QueryFilter{Step: 15 * time.Minute},
+		storage.QueryFilter{Source: "master", Step: 15 * time.Minute},
 	)
 	if err != nil {
 		t.Fatalf("bucketed query: %v", err)
@@ -1301,7 +1374,7 @@ func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
 	rawPts, err := hopsTimeline(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "thsp"}, Group: "g"},
 		start.Add(-time.Hour), start.Add(time.Hour),
-		storage.QueryFilter{Step: 0}, // raw
+		storage.QueryFilter{Source: "master", Step: 0}, // raw
 	)
 	if err != nil {
 		t.Fatalf("raw query: %v", err)
@@ -1540,30 +1613,30 @@ func TestIntegrationHopAnnotationsRoundTrip(t *testing.T) {
 		t.Fatalf("QueryHopsAt lost the target-reply marker: %+v", atHops)
 	}
 
-	// Path 3: raw timeline (step 0) — third select list, shared scan.
-	rawTL, err := hopsTimeline(ctx, r, ref, at.Add(-time.Hour), at.Add(time.Hour), storage.QueryFilter{})
+	// Path 3: raw timeline (step 0) — same grid select, one slot per cycle.
+	// It carries no target_reply: the timeline DTO never had a counterpart for
+	// it, and a field with no consumer on an unauthenticated endpoint is pure
+	// disclosure surface.
+	rawTL, err := hopsTimeline(ctx, r, ref, at.Add(-time.Hour), at.Add(time.Hour), storage.QueryFilter{Source: "master"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rawFound, rawMarked bool
+	var rawFound bool
 	for _, h := range rawTL {
 		if h.IP == "10.0.0.3" && h.Unreach == "admin-prohibited" {
 			rawFound = true
 		}
-		if h.IP == "192.0.2.9" && h.TargetReply {
-			rawMarked = true
+		if h.TargetReply {
+			t.Fatalf("the timeline grid carries a target-reply marker: %+v", h)
 		}
 	}
 	if !rawFound {
 		t.Fatalf("raw timeline lost the annotation: %+v", rawTL)
 	}
-	if !rawMarked {
-		t.Fatalf("raw timeline lost the target-reply marker: %+v", rawTL)
-	}
 
 	// Path 4: bucketed timeline — its own select and scan, max(unreach).
 	tl, err := hopsTimeline(ctx, r, ref, at.Add(-time.Hour), at.Add(time.Hour),
-		storage.QueryFilter{Step: 5 * time.Minute})
+		storage.QueryFilter{Source: "master", Step: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1777,17 +1850,19 @@ func TestIntegrationHopReadRefusesPastTheRowCap(t *testing.T) {
 	}
 	defer r.Close()
 
-	orig := hopRowCap
-	hopRowCap = 2
-	t.Cleanup(func() { hopRowCap = orig })
+	origPinned, origTimeline := hopRowCap, hopTimelineRowCap
+	hopRowCap, hopTimelineRowCap = 2, 2
+	t.Cleanup(func() { hopRowCap, hopTimelineRowCap = origPinned, origTimeline })
 
 	if _, err := latestHops(ctx, r, ref, storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
 		t.Fatalf("QueryLatestHops err = %v, want ErrHopsTruncated", err)
 	}
-	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
+	src := storage.QueryFilter{Source: "master"}
+	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), src); !errors.Is(err, storage.ErrHopsTruncated) {
 		t.Fatalf("QueryHopsTimeline raw err = %v, want ErrHopsTruncated", err)
 	}
-	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), storage.QueryFilter{Step: 15 * time.Minute}); !errors.Is(err, storage.ErrHopsTruncated) {
+	bucketed := storage.QueryFilter{Source: "master", Step: 15 * time.Minute}
+	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), bucketed); !errors.Is(err, storage.ErrHopsTruncated) {
 		t.Fatalf("QueryHopsTimeline bucketed err = %v, want ErrHopsTruncated", err)
 	}
 
@@ -2072,6 +2147,63 @@ func TestIntegrationCachedHopsAtSeparatesCyclesInOneMinute(t *testing.T) {
 		}
 		if len(res.Hops) > 0 && !res.Hops[0].Time.Equal(tc.at.Truncate(time.Millisecond)) {
 			t.Fatalf("%s: path pinned at %s, want %s", tc.name, res.Hops[0].Time, tc.at)
+		}
+	}
+}
+
+// The cap this replaces was 485,280 against a legitimate 606,600-row read: 674
+// buckets × 30 TTLs × 6 sources × 5 responders. Folding responders and
+// admitting one origin per request removes both of those factors, so the same
+// data fits a ceiling derived from the grid. Scaled down here — five
+// responders on one (bucket, ttl) under a cap of three — the read that was
+// refused now returns, and returns the worst-loss responder's row.
+func TestIntegrationTimelineFoldsRespondersUnderTheCap(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	w, err := NewWriter(ctx, log, cfg, 10)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	ref := config.TargetRef{Target: config.Target{Name: "ecmp"}, Group: "g"}
+	bucket := time.Now().UTC().Truncate(15 * time.Minute).Add(-26 * time.Hour)
+	for i := range 5 {
+		w.OnCycle(ctx, scheduler.Cycle{
+			Time: bucket.Add(time.Duration(i) * time.Minute), Target: ref, Source: "master", Sent: 3,
+			Hops: []probe.Hop{
+				{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: []time.Duration{time.Millisecond}},
+				{Index: 2, IP: fmt.Sprintf("10.0.1.%d", i), Sent: 3, Lost: i, RTTs: []time.Duration{2 * time.Millisecond}},
+			},
+		})
+	}
+	w.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	orig := hopTimelineRowCap
+	hopTimelineRowCap = 3
+	t.Cleanup(func() { hopTimelineRowCap = orig })
+
+	pts, err := hopsTimeline(ctx, r, ref, bucket.Add(-time.Hour), bucket.Add(time.Hour),
+		storage.QueryFilter{Source: "master", Step: 15 * time.Minute})
+	if err != nil {
+		t.Fatalf("a read that fits its grid was refused: %v", err)
+	}
+	if len(pts) != 2 {
+		t.Fatalf("got %d rows, want one per (bucket, ttl): %+v", len(pts), pts)
+	}
+	for _, p := range pts {
+		if p.Index == 2 && p.IP != "10.0.1.4" {
+			t.Fatalf("ttl=2 kept %q, want the worst-loss responder 10.0.1.4", p.IP)
 		}
 	}
 }

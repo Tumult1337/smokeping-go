@@ -86,6 +86,9 @@ func PickHopStep(span time.Duration) time.Duration {
 // lengthening Reader method signatures.
 type QueryFilter struct {
 	// Source, when non-empty, limits rows to that exact source tag value.
+	// QueryHopsTimeline is the exception: it matches Source exactly whatever
+	// its value, empty included, because it serves one probe origin per call —
+	// the source count is the one factor in its row bound that nothing limits.
 	Source string
 	// Step, when > 0, asks the backend to bucket results by this width
 	// using toStartOfInterval (or equivalent). Zero = return raw rows.

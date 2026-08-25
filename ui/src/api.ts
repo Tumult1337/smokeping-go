@@ -218,16 +218,18 @@ export function getOverview(
   return jsonGet<OverviewResponse>(`/api/v1/overview?${params}`);
 }
 
+// source is required and always sent, empty string included: the endpoint
+// serves one probe origin per request and reads an empty value as the untagged
+// pre-cluster origin, so omitting the parameter is a 400 rather than "all".
 export function getHopsTimeline(
   id: string,
   from: string,
-  to?: string,
-  source?: string,
+  to: string | undefined,
+  source: string,
   signal?: AbortSignal,
 ): Promise<HopsTimelineResponse> {
-  const params = new URLSearchParams({ from });
+  const params = new URLSearchParams({ from, source });
   if (to) params.set("to", to);
-  if (source) params.set("source", source);
   return jsonGet<HopsTimelineResponse>(
     `/api/v1/targets/${id}/hops/timeline?${params}`,
     signal,

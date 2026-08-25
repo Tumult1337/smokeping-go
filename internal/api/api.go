@@ -521,6 +521,15 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "hops/timeline window limited to 7d")
 		return
 	}
+	// One probe origin per request. The window and the step ladder bound the
+	// grid, and the ttl column bounds its other axis, but the number of sources
+	// with rows in the window is bounded by nothing — so it is admitted rather
+	// than derived. An empty value is a source too: the untagged pre-cluster
+	// origin. The heatmap already draws and fetches one canvas per source.
+	if !r.URL.Query().Has("source") {
+		writeErr(w, http.StatusBadRequest, "source is required: hops/timeline serves one probe origin per request")
+		return
+	}
 	step := storage.PickHopStep(to.Sub(from))
 	res, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{
 		Source: r.URL.Query().Get("source"),
@@ -741,11 +750,12 @@ const hopAddrSentinel = "redacted"
 // hopAddrSentinel, unlike redactTerminalHops which blanks only the
 // apparent terminal row.
 //
-// queryHopsBucketed groups by (bucket_ts, source, ttl, hop_addr), so one
-// bucket can hold multiple rows at the same ttl with different addresses
-// (a route change mid-bucket) and traces of differing length (path flaps
-// are ordinary within a 15m bucket at a 1m probe interval, per T8). There is
-// no per-row signal for "this is the terminal hop" left once cycles are
+// queryHopsGrid returns one row per (slot, ttl), and its address is whichever
+// responder the slot's worst-loss cycle saw — so a row's depth tracks no one
+// trace, slots hold traces of differing length (path flaps are ordinary within
+// a 15m bucket at a 1m probe interval, per T8), and a slot's deepest row can
+// be a silent hop while the slave's own address sits above it. There is no
+// per-row signal for "this is the terminal hop" left once cycles are
 // aggregated — the only way to find it would be comparing rows against the
 // real slave address, which is exactly the leak the Probe/Public split
 // exists to prevent. So every row is redacted here, not just the row at the
