@@ -591,7 +591,12 @@ Key points a reader can't derive from a single file:
   is *reserved* before delivery, because that is what collapses two copies
   arriving at once into one delivery, and `cycleDedup.forget` *releases* it
   again if `Sink.OnCycle` never returns — an identity remembered for a cycle no
-  sink took would refuse the very redelivery that repairs it. It cannot reach
+  sink took would refuse the very redelivery that repairs it. A released
+  identity keeps its ring slot until the ring wraps past it, and the slot
+  carries the insertion position that made it, so evicting it deletes nothing
+  a retry re-established under the same identity; the cost is that a window
+  which released *k* of its last 1024 insertions recognises 1024−*k*. It
+  cannot reach
   further than that: `OnCycle` returns nothing, so a row the writer then drops
   on a full channel is indistinguishable here from one it queued, and the
   redelivery that would have refilled it is still classified as a copy. Closing

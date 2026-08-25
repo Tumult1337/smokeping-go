@@ -503,3 +503,66 @@ func TestSweepAndIngestDoNotDeadlock(t *testing.T) {
 		t.Fatal("sweep and ingest deadlocked")
 	}
 }
+
+// A released reservation leaves its ring slot behind. Evicting that slot must
+// not delete the identity a retry re-established, or the next redelivery of a
+// batch the master already applied is admitted a second time.
+func TestReleasedSlotDoesNotEvictItsRetry(t *testing.T) {
+	d := newCycleDedup()
+	if !d.admit("edge-1", "g/t", 0) {
+		t.Fatal("first cycle refused")
+	}
+	d.forget("edge-1", "g/t", 0)
+
+	for i := range cluster.MaxCyclesPerBatch {
+		if !d.admit("edge-1", "g/t", int64(i)) {
+			t.Fatalf("retry of cycle %d refused", i)
+		}
+	}
+	for i := range cluster.MaxCyclesPerBatch {
+		if d.admit("edge-1", "g/t", int64(i)) {
+			t.Errorf("cycle %d re-admitted after its whole batch was applied", i)
+		}
+	}
+}
+
+// The same shape one cycle at a time: the stale slot must be inert whenever it
+// is evicted, not only at the end of a full batch.
+func TestReleasedSlotIsInertWhenItWrapsOut(t *testing.T) {
+	d := newCycleDedup()
+	d.admit("edge-1", "g/t", 0)
+	d.forget("edge-1", "g/t", 0)
+	if !d.admit("edge-1", "g/t", 0) {
+		t.Fatal("retry of a released identity refused")
+	}
+	// Push the released slot out of the ring without touching the retry's.
+	for i := 1; i < cluster.MaxCyclesPerBatch; i++ {
+		d.admit("edge-1", "g/t", int64(i))
+	}
+	if d.admit("edge-1", "g/t", 0) {
+		t.Error("redelivery admitted; the released slot took its retry with it")
+	}
+}
+
+// A released identity's slot now survives its own release, so one identity can
+// sit in the ring twice. The window's memory must still be the ring's.
+func TestReleasedSlotsKeepTheWindowBounded(t *testing.T) {
+	d := newCycleDedup()
+	for i := range 8 * cluster.MaxCyclesPerBatch {
+		d.admit("edge-1", "g/t", int64(i))
+		if i%2 == 0 {
+			d.forget("edge-1", "g/t", int64(i))
+			d.admit("edge-1", "g/t", int64(i))
+		}
+	}
+	w := d.bySource["edge-1"]
+	if len(w.ring) != dedupWindowPerSource {
+		t.Errorf("ring holds %d slots, want %d", len(w.ring), dedupWindowPerSource)
+	}
+	if len(w.seen) > dedupWindowPerSource {
+		t.Errorf("window remembers %d identities, over the %d slots backing it", len(w.seen), dedupWindowPerSource)
+	}
+	if len(w.names) > dedupWindowPerSource+1 {
+		t.Errorf("intern table holds %d keys, over the window", len(w.names))
+	}
+}

@@ -32,7 +32,10 @@ const dedupMaxSources = maxRegisteredSlaves
 // after an outage arrives with timestamps older than cycles already stored, and
 // every one of those is a real measurement that must still be written.
 type sourceWindow struct {
-	seen map[cycleID]struct{}
+	// seen maps an identity to the insertion position that put it in the ring,
+	// so evicting a slot a later insertion has superseded — which is what
+	// forget leaves behind — deletes nothing.
+	seen map[cycleID]uint64
 	// names interns target keys so one target's entries share one backing
 	// array rather than one per cycle, which is what keeps the window's memory
 	// scaling with distinct targets instead of with cycle rate. A window of N
@@ -41,7 +44,9 @@ type sourceWindow struct {
 	// those keys there are gone.
 	names map[string]string
 	ring  []cycleID
-	next  int
+	// inserted counts every identity ever put in the ring; position p lives in
+	// slot p%dedupWindowPerSource until p+dedupWindowPerSource overwrites it.
+	inserted uint64
 	// used is the dedup's monotonic counter at this window's last admit call,
 	// which is what picks the victim when a new source needs a slot.
 	used uint64
@@ -60,14 +65,19 @@ func (w *sourceWindow) admit(target string, nano int64) bool {
 	if _, dup := w.seen[id]; dup {
 		return false
 	}
+	pos := w.inserted
 	if len(w.ring) < dedupWindowPerSource {
 		w.ring = append(w.ring, id)
 	} else {
-		delete(w.seen, w.ring[w.next])
-		w.ring[w.next] = id
-		w.next = (w.next + 1) % dedupWindowPerSource
+		idx := pos % dedupWindowPerSource
+		evicted := w.ring[idx]
+		if at, ok := w.seen[evicted]; ok && at == pos-dedupWindowPerSource {
+			delete(w.seen, evicted)
+		}
+		w.ring[idx] = id
 	}
-	w.seen[id] = struct{}{}
+	w.seen[id] = pos
+	w.inserted = pos + 1
 	return true
 }
 
@@ -101,7 +111,7 @@ func (d *cycleDedup) admit(source, target string, nano int64) bool {
 		if len(d.bySource) >= dedupMaxSources {
 			d.evictLRU()
 		}
-		w = &sourceWindow{seen: make(map[cycleID]struct{}), names: make(map[string]string)}
+		w = &sourceWindow{seen: make(map[cycleID]uint64), names: make(map[string]string)}
 		d.bySource[source] = w
 	}
 	w.used = d.clock
@@ -109,8 +119,10 @@ func (d *cycleDedup) admit(source, target string, nano int64) bool {
 }
 
 // forget releases an identity this window reserved for a delivery that never
-// completed. The ring keeps the slot as a tombstone: eviction deletes a key
-// that is already gone, which costs a no-op rather than a scan.
+// completed. The ring keeps the slot until it wraps out, so a window that has
+// released k of its last dedupWindowPerSource insertions recognises that many
+// fewer identities — never the wrong ones, since the slot carries the position
+// that made it and a retry's own slot carries a newer one.
 func (d *cycleDedup) forget(source, target string, nano int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
