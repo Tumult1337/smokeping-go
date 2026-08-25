@@ -52,3 +52,7 @@ export function effectiveMin(p: CyclePoint): number {
 export function sourcesKey(sources: string[]): string {
   return sources.map((s) => `${s.length}:${s}`).join("|");
 }
+
+export function unixSec(iso: string): number {
+  return Math.floor(new Date(iso).getTime() / 1000);
+}

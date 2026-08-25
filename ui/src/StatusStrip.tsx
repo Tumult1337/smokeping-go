@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { colorFor, isSuccess } from "./httpStatus";
 import { paletteForSorted } from "./palette";
+import { unixSec } from "./chartUtils";
 import type { HttpPoint } from "./api";
 
 export const STATUS_STRIP_H = 7;
@@ -32,28 +33,23 @@ export function StatusStrip({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  // Group samples by source, each row sorted by time. Rows ordered by sorted
-  // source name so colours match paletteForSorted everywhere on the page.
+  // Rows ordered by sorted source name so colours match paletteForSorted
+  // everywhere on the page.
   const rows = useMemo((): Row[] => {
-    const m = new Map<string, HttpPoint[]>();
+    const m = new Map<string, { pts: HttpPoint[]; secs: number[] }>();
     for (const p of points) {
       const k = p.Source ?? "";
-      let arr = m.get(k);
-      if (!arr) m.set(k, (arr = []));
-      arr.push(p);
+      let g = m.get(k);
+      if (!g) m.set(k, (g = { pts: [], secs: [] }));
+      g.pts.push(p);
+      g.secs.push(unixSec(p.Time));
     }
-    const names = [...m.keys()].sort();
-    return names.map((source) => {
-      const arr = m
-        .get(source)!
-        .slice()
-        .sort((a, b) => new Date(a.Time).getTime() - new Date(b.Time).getTime());
-      return {
-        source,
-        ts: arr.map((p) => new Date(p.Time).getTime() / 1000),
-        statuses: arr.map((p) => p.Status),
-      };
-    });
+    // Server order is the time order: /http is ORDER BY timestamp, seq.
+    return [...m.keys()].sort().map((source) => ({
+      source,
+      ts: m.get(source)!.secs,
+      statuses: m.get(source)!.pts.map((p) => p.Status),
+    }));
   }, [points]);
 
   const palette = useMemo(

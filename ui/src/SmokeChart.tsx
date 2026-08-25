@@ -3,7 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series, type Band } from "u
 import type { CyclePoint } from "./api";
 import { PALETTE } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, sourcesKey as sourcesKeyOf } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec } from "./chartUtils";
 
 interface Props {
   points: CyclePoint[];
@@ -446,15 +446,13 @@ function buildAligned(points: CyclePoint[]): Built {
     };
   }
 
-  const bySource = new Map<string, CyclePoint[]>();
+  const bySource = new Map<string, { pts: CyclePoint[]; secs: number[] }>();
   for (const p of points) {
     const key = p.Source ?? "";
-    let arr = bySource.get(key);
-    if (!arr) {
-      arr = [];
-      bySource.set(key, arr);
-    }
-    arr.push(p);
+    let g = bySource.get(key);
+    if (!g) bySource.set(key, (g = { pts: [], secs: [] }));
+    g.pts.push(p);
+    g.secs.push(unixSec(p.Time));
   }
   const sources = [...bySource.keys()].sort();
   // Only prefix legend labels when there's something to disambiguate — a plain
@@ -462,8 +460,8 @@ function buildAligned(points: CyclePoint[]): Built {
   const prefixed = sources.length > 1;
 
   const tsSet = new Set<number>();
-  for (const [, arr] of bySource) {
-    for (const p of arr) tsSet.add(Math.floor(new Date(p.Time).getTime() / 1000));
+  for (const [, g] of bySource) {
+    for (const sec of g.secs) tsSet.add(sec);
   }
   const xs = [...tsSet].sort((a, b) => a - b);
   const xIdx = new Map<number, number>();
@@ -482,31 +480,31 @@ function buildAligned(points: CyclePoint[]): Built {
   sources.forEach((name, srcIdx) => {
     const palette = PALETTE[srcIdx % PALETTE.length];
     const cols: (number | null)[][] = PCT_KEYS.map(() => xs.map(() => null));
-    const sorted = bySource.get(name)!.slice().sort(
-      (a, b) => new Date(a.Time).getTime() - new Date(b.Time).getTime(),
-    );
-    for (const p of sorted) {
-      const i = xIdx.get(Math.floor(new Date(p.Time).getTime() / 1000));
-      if (i == null) continue;
+    // Server order is the time order: every cycles query is ORDER BY
+    // timestamp (raw) or bucket_ts, source (bucketed).
+    const { pts, secs } = bySource.get(name)!;
+    pts.forEach((p, si) => {
+      const i = xIdx.get(secs[si]);
+      if (i == null) return;
       // 100%-loss cycles have no valid RTT data; leave as null so spanGaps
       // bridges over them rather than drawing a false dip to 0ms.
-      if (p.LossPct >= 100) continue;
+      if (p.LossPct >= 100) return;
       PCT_KEYS.forEach((k, c) => {
         cols[c][i] = k === "Min" ? effectiveMin(p) : p[k];
       });
-    }
+    });
     cols.forEach((c) => data.push(c));
     series.push(...seriesFor(prefixed ? name : "", palette));
 
-    const ts = sorted.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
-    const losses = sorted.map((p) => p.LossPct);
+    const ts = secs;
+    const losses = pts.map((p) => p.LossPct);
     const hasLoss = losses.some((l) => l > 0);
     if (hasLoss) anyLoss = true;
     lossSeries.push({ source: name, ts, losses, hasLoss });
 
     // Mean of each per-cycle percentile, not a window percentile — averaging
     // p95s suppresses the isolated spikes a p95 exists to surface.
-    const valid = sorted.filter((p) => p.LossPct < 100);
+    const valid = pts.filter((p) => p.LossPct < 100);
     if (valid.length > 0) {
       const avg = (fn: (p: CyclePoint) => number) =>
         valid.reduce((s, p) => s + fn(p), 0) / valid.length;
@@ -528,7 +526,7 @@ function buildAligned(points: CyclePoint[]): Built {
 
     // Per-source y range for solo rescale.
     let srcLo = Infinity, srcHi = -Infinity;
-    for (const p of sorted) {
+    for (const p of pts) {
       if (p.LossPct >= 100) continue;
       const effMin = effectiveMin(p);
       if (effMin > 0 && effMin < srcLo) srcLo = effMin;

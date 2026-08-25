@@ -3,7 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, sourcesKey as sourcesKeyOf, windowLoss } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss } from "./chartUtils";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
@@ -521,15 +521,13 @@ function buildSources(points: CyclePoint[]): Built {
     };
   }
 
-  const bySource = new Map<string, CyclePoint[]>();
+  const bySource = new Map<string, { pts: CyclePoint[]; secs: number[] }>();
   for (const p of points) {
     const key = p.Source ?? "";
-    let arr = bySource.get(key);
-    if (!arr) {
-      arr = [];
-      bySource.set(key, arr);
-    }
-    arr.push(p);
+    let g = bySource.get(key);
+    if (!g) bySource.set(key, (g = { pts: [], secs: [] }));
+    g.pts.push(p);
+    g.secs.push(unixSec(p.Time));
   }
   const sources = [...bySource.keys()].sort();
 
@@ -537,8 +535,8 @@ function buildSources(points: CyclePoint[]): Built {
   // values stay on its own index domain inside the stack; uPlot only uses
   // the union for cursor + legend alignment.
   const tsSet = new Set<number>();
-  for (const [, arr] of bySource) {
-    for (const p of arr) tsSet.add(Math.floor(new Date(p.Time).getTime() / 1000));
+  for (const [, g] of bySource) {
+    for (const s of g.secs) tsSet.add(s);
   }
   const xs = [...tsSet].sort((a, b) => a - b);
   const xIdx = new Map<number, number>();
@@ -555,11 +553,10 @@ function buildSources(points: CyclePoint[]): Built {
 
   sources.forEach((name, srcIdx) => {
     const palette = PALETTE[srcIdx % PALETTE.length];
-    const pts = bySource.get(name)!.slice().sort(
-      (a, b) => new Date(a.Time).getTime() - new Date(b.Time).getTime(),
-    );
+    // Server order is the time order: every cycles query is ORDER BY
+    // timestamp (raw) or bucket_ts, source (bucketed).
+    const { pts, secs: ts } = bySource.get(name)!;
 
-    const ts = pts.map((p) => Math.floor(new Date(p.Time).getTime() / 1000));
     // NaN signals "no valid RTT" (100%-loss cycle) to the draw hook so it
     // skips the median tick rather than drawing it at 0ms.
     const medians = pts.map((p) => p.LossPct >= 100 ? NaN : p.Median);
