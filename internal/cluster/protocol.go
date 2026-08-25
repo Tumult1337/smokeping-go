@@ -79,10 +79,14 @@ const (
 	// MaxCyclesPerBatch bounds one POST /cycles. slave.Runner drains at most
 	// batchLimit (100) cycles per push, so this is 10× the shipped flush.
 	MaxCyclesPerBatch = 1024
-	// MaxHopsPerCycle bounds hop rows in one cycle. traceHops walks to
-	// maxTTL 30 and emits one row per (ttl, distinct responder), so this
-	// admits ~8 responders per ttl against a real ECMP fan-out of 2–4.
-	MaxHopsPerCycle = 256
+	// MaxHopsPerCycle bounds hop rows in one cycle at twice
+	// config.MaxHopRowsPerCycle — the producer's own exact ceiling, 300 rows
+	// for an mtr walk whose path diverges on all 10 rounds of all 30 TTLs.
+	// Derived rather than picked so it cannot drift back below what walkRounds
+	// legitimately emits; the doubling is headroom for a deeper walk, and the
+	// deployed 122-target/6-source/20s install runs the icmp walk, whose
+	// ceiling is 3 × 30 = 90.
+	MaxHopsPerCycle = 2 * config.MaxHopRowsPerCycle
 	// MaxRTTsPerHop bounds samples on one hop row: one per round that
 	// reached that responder, and mtr runs 10 rounds to icmp's 3.
 	MaxRTTsPerHop = 128

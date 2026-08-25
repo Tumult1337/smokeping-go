@@ -368,15 +368,28 @@ Key points a reader can't derive from a single file:
   violation is a protocol disagreement, and half-ingesting one leaves
   the two peers disagreeing about what was stored. The counts live in
   `internal/cluster/protocol.go` (`MaxCyclesPerBatch` 1024 —
-  `slave.Runner` drains 100 per push; `MaxHopsPerCycle` 256 — the walk
-  runs 30 TTLs with one row per distinct responder; `MaxRTTsPerHop` 128
-  — one per round, mtr runs 10; `MaxHTTPSamplesPerCycle` 64 —
-  `maxHTTPRequests` is 2), RTTs per cycle reuse `config.MaxPingsPerCycle`
+  `slave.Runner` drains 100 per push; `MaxHopsPerCycle` = 2 ×
+  `config.MaxHopRowsPerCycle`; `MaxRTTsPerHop` 128 — one per round, mtr
+  runs 10; `MaxHTTPSamplesPerCycle` 64 — `maxHTTPRequests` is 2), RTTs
+  per cycle reuse `config.MaxPingsPerCycle`
   so no schedule `config.Validate` accepts can be refused at ingest, and
   the counter ceilings are the storage columns' own (`probe_hop.ttl` is
   `UInt8`, every sent/lost is `UInt16` — a negative wraps rather than
   failing, so it is refused here). The deployed 122-target / 6-source /
   20s install sits at or below 10% of every one.
+
+  **The hop bound is derived from the producer, not picked.**
+  `config.MaxHopRowsPerCycle` = `MaxTraceRounds` (10) × `MaxTraceTTL` (30)
+  = 300 is `walkRounds`' exact ceiling — one row per (ttl, distinct
+  responder), and a round contributes at most one responder per TTL — and
+  `cluster.MaxHopsPerCycle` is twice it. A hand-picked 256 sat *below* the
+  producer's own maximum, so a deep ECMP path was a legitimate batch the
+  master refused. The two constants mirror `probe`'s unexported `maxRounds`
+  and `MTR.maxTTL`, which cannot assert against them at compile time the
+  way `icmpTraceSeqReserve` does (probe already imports config, and the
+  values are unexported), so `internal/config/tracebounds_test.go` parses
+  `probe/mtr.go` and fails naming the value to update. Replace it with a
+  compile-time assertion in `probe` the next time that package is open.
 
   `config.MaxFutureSkew` (5m) and `config.MaxCycleAge` (7d) live in
   `config`, not `cluster`, because the reader needs the same window: a

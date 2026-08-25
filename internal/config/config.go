@@ -486,6 +486,22 @@ const (
 	MaxPingsPerCycle = 1<<16 - icmpTraceSeqReserve
 )
 
+// TTL-walk bounds. They live here for the same reason the ICMP schedule
+// policy above does: the producer is probe and the consumer is cluster's
+// ingest bound, and config is the only package both import.
+const (
+	// MaxTraceRounds mirrors probe's maxRounds — the most rounds one MTR
+	// cycle walks. probe's icmp walk runs 3.
+	MaxTraceRounds = 10
+	// MaxTraceTTL mirrors probe's MTR.maxTTL — the deepest TTL a round walks.
+	MaxTraceTTL = 30
+	// MaxHopRowsPerCycle is walkRounds' exact ceiling: it emits one row per
+	// (ttl, distinct responder), and a round contributes at most one responder
+	// per TTL, so a path that diverges every round yields rounds × TTLs rows.
+	// A TTL nothing answered emits one row, which is inside the same product.
+	MaxHopRowsPerCycle = MaxTraceRounds * MaxTraceTTL
+)
+
 // Cycle timestamp bounds. They live here rather than in cluster because both
 // the ingest that refuses an out-of-range timestamp and the reader that must
 // keep already-stored ones off the API have to agree on the same window.

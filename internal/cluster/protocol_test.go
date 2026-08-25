@@ -2,6 +2,7 @@ package cluster_test
 
 import (
 	"encoding/json"
+	"net/netip"
 	"reflect"
 	"testing"
 	"time"
@@ -271,5 +272,48 @@ func TestCycleBatchRejectsOversizedShapes(t *testing.T) {
 	}
 	if err := real.Validate(now); err != nil {
 		t.Fatalf("a real 122-target/6-source/20s batch was rejected: %v", err)
+	}
+}
+
+// The producer's own ceiling must validate. walkRounds emits one row per
+// (ttl, distinct responder) and each round contributes at most one responder
+// per ttl, so an MTR cycle whose path diverges every round legitimately emits
+// MaxTraceRounds × MaxTraceTTL rows — 300, above the 256 the ingest bound was
+// hand-picked at. A deep ECMP fan-out is not a protocol violation.
+func TestCycleBatchAcceptsTheProducersWorstCaseHopCount(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	c := cluster.CyclePayload{Time: now, Sent: 10, LossCount: 0}
+	for ttl := 1; ttl <= config.MaxTraceTTL; ttl++ {
+		for round := range config.MaxTraceRounds {
+			c.Hops = append(c.Hops, cluster.HopDTO{
+				Index: ttl,
+				IP:    netip.AddrFrom4([4]byte{10, byte(ttl), byte(round), 1}).String(),
+				Sent:  1,
+				RTTs:  []time.Duration{time.Millisecond},
+			})
+		}
+	}
+	if len(c.Hops) != config.MaxHopRowsPerCycle {
+		t.Fatalf("fixture built %d hops, want the derived producer ceiling %d", len(c.Hops), config.MaxHopRowsPerCycle)
+	}
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{c}}
+	if err := batch.Validate(now); err != nil {
+		t.Fatalf("the producer's own worst case was refused: %v", err)
+	}
+}
+
+// The bound stays a bound: it is derived from the producer ceiling with
+// headroom, not equal to it, and one row past it is still refused.
+func TestHopBoundIsDerivedWithHeadroom(t *testing.T) {
+	if cluster.MaxHopsPerCycle <= config.MaxHopRowsPerCycle {
+		t.Fatalf("MaxHopsPerCycle %d leaves no headroom over the producer ceiling %d",
+			cluster.MaxHopsPerCycle, config.MaxHopRowsPerCycle)
+	}
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{
+		{Time: now, Hops: make([]cluster.HopDTO, cluster.MaxHopsPerCycle+1)},
+	}}
+	if err := batch.Validate(now); err == nil {
+		t.Fatal("one row past the bound was accepted")
 	}
 }
