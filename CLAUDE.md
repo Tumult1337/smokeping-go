@@ -408,15 +408,33 @@ Key points a reader can't derive from a single file:
   probe can produce and which drives `loss_pct` and every alert condition;
   any latency — cycle RTT, hop RTT, http RTT, every `stats.Summary` field,
   walked through `stats.PercentileSet` so a new percentile is covered the
-  day it is added — outside `[0, MaxSampleRTT]` (1h, under `durUS`'s
-  71m35s saturation point so an accepted value is stored as itself); an
-  `HTTPSample.Time` outside the *cycle's* window, which is otherwise a
-  second `probe_http` TTL evasion; a `Status` outside `[0, 999]`, which
-  wraps in the `UInt16` column; an `Err` past `MaxHTTPErrLen` (4096, twice
-  the de-facto URL ceiling so a maximal operator URL plus its wrapper
-  fits); and any of group / name / probe / source past
-  `config.MaxLabelLen` (256) — `Config.Validate` refuses a longer one too,
-  so a config the master accepts is always ingestable.
+  day it is added — outside `[0, config.MaxSampleRTT]`, which is exactly
+  `durUS`'s saturation point (`MaxUint32` µs, 71m34.967295s) so an accepted
+  value is stored as itself; an `HTTPSample.Time` outside the batch window,
+  the same `[now−MaxCycleAge, now+MaxFutureSkew]` the cycle is checked
+  against, which is what keeps a sample from evading `probe_http`'s TTL; a
+  `Status` outside `[0, 999]`, which wraps in the `UInt16` column; and any of
+  group / name / probe / source past `config.MaxLabelLen` (256).
+
+  **A free-text leaf is truncated at the producer, never refused at the
+  boundary.** `HTTPSample.Err` carries a `url.Error` embedding the whole
+  configured URL, and config bounds no URL's length, so no ceiling derived
+  from what a probe can emit exists — a 4096-byte wire bound turned a
+  legitimate long URL plus a connection failure into a 400, and `ErrRejected`
+  then dropped the entire batch including up to 99 unrelated cycles.
+  `probe.TruncateHTTPErr` (`probe.MaxHTTPErrLen`, 4096, cutting on a rune
+  boundary so `probe_http.error` never holds half a code point) runs in the
+  http probe before the sample exists, and again in `ToCycle` so a slave
+  predating it costs a truncated string rather than a dropped batch.
+
+  **Every config `Config.Validate` accepts is ingestable**, which is a
+  property to preserve rather than assume: it held for `MaxLabelLen` and not
+  for latency, because a cycle runs under a context whose deadline is the
+  interval and config bounded no interval. `config.MaxProbeInterval` (1h) is
+  now refused above, leaving 11m34.967295s under `MaxSampleRTT` for a
+  measurement to overshoot its own deadline. Both constants live in `config`
+  for the same reason `MaxFutureSkew` does — the producer is a schedule this
+  package validates and the consumer is cluster's ingest bound.
   Two values are **overridden** rather than bounded, because the master
   already holds the authoritative one: `ingestBatch` stamps `Source` from
   the authenticated identity and `ProbeName` from the resolved target's

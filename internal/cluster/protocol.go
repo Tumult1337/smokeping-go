@@ -94,25 +94,11 @@ const (
 	// MaxHTTPSamplesPerCycle bounds http samples in one cycle. The http
 	// probe issues at most maxHTTPRequests (2) per cycle.
 	MaxHTTPSamplesPerCycle = 64
-	// MaxSampleRTT bounds one latency value — a cycle RTT, a hop RTT, an http
-	// sample's RTT, and every stats.Summary field. Negative is not a latency,
-	// and the writer's durUS saturates at MaxUint32 microseconds (71m35s), so
-	// an hour is under the clamp: anything accepted is stored as itself rather
-	// than silently pinned to the ceiling. Every probe's timeout is bounded by
-	// the cycle interval, so a real value is milliseconds.
-	MaxSampleRTT = time.Hour
 	// maxHTTPStatus bounds probe_http.status, which is UInt16 and wraps on a
 	// larger value. net/http parses a three-digit status line and the probe
 	// reports 0 when the request never completed, so [0, 999] is the producer's
 	// whole range.
 	maxHTTPStatus = 999
-	// MaxHTTPErrLen bounds HTTPSample.Err, which lands verbatim in
-	// probe_http.error — a plain String, so this bounds row size rather than
-	// dictionary cardinality. An error reads `Get "<url>": dial tcp …`, and
-	// 4096 is twice the 2048-byte de-facto URL ceiling, so a maximal operator
-	// URL plus its wrapper fits. At MaxHTTPSamplesPerCycle that is ≤256 KiB of
-	// error text per cycle.
-	MaxHTTPErrLen = 4096
 	// MaxHopZoneLen bounds an address's zone. netip.ParseAddr accepts any
 	// non-empty zone, but the producer fills one only from net.Interface.Name
 	// or — when the name is unknown — the decimal interface index, so the
@@ -220,9 +206,6 @@ func (s HTTPSampleDTO) validate(oldest, newest time.Time) error {
 	if s.Status < 0 || s.Status > maxHTTPStatus {
 		return fmt.Errorf("status %d outside [0, %d]", s.Status, maxHTTPStatus)
 	}
-	if len(s.Err) > MaxHTTPErrLen {
-		return fmt.Errorf("err is %d bytes, limit %d", len(s.Err), MaxHTTPErrLen)
-	}
 	return boundRTTs("http sample", []time.Duration{s.RTT})
 }
 
@@ -243,8 +226,8 @@ func boundCounters(what string, sent, lost int) error {
 
 func boundRTTs(what string, rtts []time.Duration) error {
 	for i, d := range rtts {
-		if d < 0 || d > MaxSampleRTT {
-			return fmt.Errorf("%s rtt %d is %s, outside [0, %s]", what, i, d, MaxSampleRTT)
+		if d < 0 || d > config.MaxSampleRTT {
+			return fmt.Errorf("%s rtt %d is %s, outside [0, %s]", what, i, d, config.MaxSampleRTT)
 		}
 	}
 	return nil
@@ -258,8 +241,8 @@ func boundSummary(s stats.Summary) error {
 		return err
 	}
 	for _, spec := range stats.PercentileSet {
-		if d := spec.Get(s); d < 0 || d > MaxSampleRTT {
-			return fmt.Errorf("summary %s is %s, outside [0, %s]", spec.Name, d, MaxSampleRTT)
+		if d := spec.Get(s); d < 0 || d > config.MaxSampleRTT {
+			return fmt.Errorf("summary %s is %s, outside [0, %s]", spec.Name, d, config.MaxSampleRTT)
 		}
 	}
 	return nil
@@ -333,7 +316,13 @@ func (p CyclePayload) ToCycle(target config.Target) scheduler.Cycle {
 	}
 	samples := make([]probe.HTTPSample, len(p.HTTPSamples))
 	for i, s := range p.HTTPSamples {
-		samples[i] = probe.HTTPSample{Time: s.Time, RTT: s.RTT, Status: s.Status, Err: s.Err}
+		samples[i] = probe.HTTPSample{
+			Time: s.Time, RTT: s.RTT, Status: s.Status,
+			// Truncated rather than refused: Err carries a url.Error whose URL
+			// config never bounds, and refusing drops every other cycle in the
+			// batch with it.
+			Err: probe.TruncateHTTPErr(s.Err),
+		}
 	}
 	return scheduler.Cycle{
 		Time:        p.Time,

@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"log/slog"
+	"math"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -562,5 +563,40 @@ func TestValidateBoundsLabelLengths(t *testing.T) {
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("%s name of %d bytes accepted, want rejected", name, MaxLabelLen+1)
 		}
+	}
+}
+
+// A cycle's RTT cannot exceed its context deadline, which is the interval — so
+// an interval above what probe_rtt can store is a config the master accepts
+// and its own ingest bound then refuses, dropping the batch. The ceiling is
+// the storage column, and the config ceiling sits under it.
+func TestValidateRefusesAnIntervalPastTheStorableRTT(t *testing.T) {
+	if MaxProbeInterval >= MaxSampleRTT {
+		t.Fatalf("MaxProbeInterval %s leaves no headroom under MaxSampleRTT %s", MaxProbeInterval, MaxSampleRTT)
+	}
+	base := func(d time.Duration) *Config {
+		return &Config{
+			Interval: d,
+			Pings:    1,
+			Storage:  Storage{ClickHouse: ClickHouse{Addr: "ch:9000"}},
+			Probes:   map[string]Probe{"icmp": {Type: "icmp"}},
+			Targets: []Group{{Group: "g", Targets: []Target{
+				{Name: "t", Probe: "icmp", Host: "1.1.1.1"},
+			}}},
+		}
+	}
+	if err := base(MaxProbeInterval).Validate(); err != nil {
+		t.Fatalf("the largest schedulable interval was refused: %v", err)
+	}
+	if err := base(MaxProbeInterval + time.Second).Validate(); err == nil {
+		t.Fatal("an interval past the bound was accepted")
+	}
+}
+
+// MaxSampleRTT is durUS's saturation point, not a round number under it: a
+// value above it is stored as something other than itself.
+func TestMaxSampleRTTIsTheStorageSaturationPoint(t *testing.T) {
+	if got := MaxSampleRTT / time.Microsecond; got != math.MaxUint32 {
+		t.Fatalf("MaxSampleRTT is %d microseconds, want MaxUint32 (%d)", got, uint64(math.MaxUint32))
 	}
 }

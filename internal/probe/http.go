@@ -12,6 +12,7 @@ import (
 	"net/http/httptrace"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // HTTP issues a GET to Target.URL and measures time-to-first-byte. Non-2xx
@@ -117,6 +118,32 @@ func (p *HTTP) buildFamilyClient(family string) *http.Client {
 
 func (p *HTTP) Name() string { return p.name }
 
+// MaxHTTPErrLen bounds HTTPSample.Err. It is a truncation length, not a
+// legitimacy bound: url.Error embeds the whole request URL and config bounds
+// no URL's length, so no ceiling derived from what a probe can emit exists —
+// bounding it at the ingest boundary instead turned a long configured URL plus
+// a connection failure into a rejected batch. 4096 is what probe_http.error, a
+// plain String column, carries per sample; at maxHTTPRequests that is 8 KiB of
+// error text per cycle.
+const MaxHTTPErrLen = 4096
+
+// errTruncationMark tells an operator reading probe_http.error that the text
+// was cut rather than that the transport reported this much.
+const errTruncationMark = "…(truncated)"
+
+// TruncateHTTPErr bounds a probe error before it is stored or serialized,
+// cutting on a rune boundary so the column never holds half a code point.
+func TruncateHTTPErr(s string) string {
+	if len(s) <= MaxHTTPErrLen {
+		return s
+	}
+	cut := MaxHTTPErrLen - len(errTruncationMark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + errTruncationMark
+}
+
 // maxHTTPRequests caps requests per cycle. HTTP is far more expensive than a
 // ping (TLS handshake, server log entries, possible rate limits / WAF flags),
 // so we deliberately do at most a couple per interval regardless of cfg.Pings.
@@ -150,7 +177,7 @@ func (p *HTTP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		if err != nil {
 			result.LossCount++
 			lastErr = err
-			sample.Err = err.Error()
+			sample.Err = TruncateHTTPErr(err.Error())
 			slog.Debug("http probe failed", "probe", p.name, "target", t.Name, "url", t.URL, "status", status, "err", err)
 		} else {
 			result.RTTs = append(result.RTTs, rtt)

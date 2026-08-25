@@ -68,6 +68,26 @@ Two operator-visible consequences:
   longer counts twice toward `sustained`. A producer whose clock steps
   backwards is logged the same way with `reason=duplicate_cycle`.
 
+## An interval above one hour is now refused at load
+
+`interval` is capped at `config.MaxProbeInterval` (1h). A cycle runs under a
+context whose deadline is the interval, so the interval is also the largest RTT
+a probe can measure — and `probe_rtt` stores microseconds in a `UInt32`, which
+stops representing a value as itself at 71m34.967295s. An interval above the
+cap therefore produced latencies the master's own ingest refused, dropping the
+batch. Nothing else changes for the 5s–5m range every documented deployment
+uses; an install running a longer interval must lower it before upgrading,
+because `config.Load` fails rather than starting on a schedule it cannot store.
+
+## A long http error no longer rejects a batch
+
+`HTTPSample.Err` is truncated to 4096 bytes at the probe, and again at ingest
+for slaves that predate that. It used to be *refused* at 4096 — but the string
+is `Get "<url>": <cause>` and config bounds no URL's length, so a legitimate
+5 KiB URL plus a connection failure produced a 400 that permanently dropped the
+whole batch, up to 99 unrelated cycles with it. A truncated error string ends
+in `…(truncated)`.
+
 ## Schema
 
 `probe_hop` gains `unreach` (`LowCardinality(String)`) and `target_reply`

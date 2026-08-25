@@ -345,17 +345,17 @@ func TestCycleBatchRejectsHostileLeafValues(t *testing.T) {
 		"hop ip is a padded string": {Time: now, Hops: []cluster.HopDTO{{Index: 1, IP: strings.Repeat("A", 4096)}}},
 
 		"negative cycle rtt": {Time: now, RTTs: []time.Duration{-time.Millisecond}},
-		"absurd cycle rtt":   {Time: now, RTTs: []time.Duration{cluster.MaxSampleRTT + 1}},
+		"absurd cycle rtt":   {Time: now, RTTs: []time.Duration{config.MaxSampleRTT + 1}},
 		"negative hop rtt": {Time: now, Hops: []cluster.HopDTO{
 			{Index: 1, IP: "10.0.0.1", Sent: 1, RTTs: []time.Duration{-1}},
 		}},
-		"absurd summary max": {Time: now, Summary: stats.Summary{Max: cluster.MaxSampleRTT + 1}},
+		"absurd summary max": {Time: now, Summary: stats.Summary{Max: config.MaxSampleRTT + 1}},
 		"negative summary median": {Time: now, Summary: stats.Summary{
 			Median: -time.Second,
 		}},
 		"absurd summary percentile": {Time: now, Summary: func() stats.Summary {
 			var s stats.Summary
-			stats.PercentileSet[len(stats.PercentileSet)-1].Set(&s, cluster.MaxSampleRTT+1)
+			stats.PercentileSet[len(stats.PercentileSet)-1].Set(&s, config.MaxSampleRTT+1)
 			return s
 		}()},
 
@@ -370,9 +370,6 @@ func TestCycleBatchRejectsHostileLeafValues(t *testing.T) {
 		}},
 		"http status negative": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
 			{Time: now, Status: -1},
-		}},
-		"http err over the bound": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
-			{Time: now, Status: 0, Err: strings.Repeat("e", cluster.MaxHTTPErrLen+1)},
 		}},
 		"http rtt negative": {Time: now, HTTPSamples: []cluster.HTTPSampleDTO{
 			{Time: now, Status: 200, RTT: -time.Second},
@@ -543,5 +540,52 @@ func TestToCycleDropsAnOversizedZone(t *testing.T) {
 	}
 	if got := cy.Hops[1].IP; got != "fe80::1%eth0" {
 		t.Errorf("legitimate zone stored as %q, want fe80::1%%eth0", got)
+	}
+}
+
+// A free-text field must not be able to reject a batch. Err carries a
+// url.Error whose URL config never bounds, and ErrRejected drops the whole
+// batch — up to 99 unrelated valid cycles with it. It is truncated at the
+// producer and again at ingest, never refused.
+func TestOversizedHTTPErrIsTruncatedNotRejected(t *testing.T) {
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	huge := `Get "https://` + strings.Repeat("a", 64<<10) + `": dial tcp: connection refused`
+	c := cluster.CyclePayload{
+		Time: now, Group: "core", Name: "gw", Sent: 1,
+		HTTPSamples: []cluster.HTTPSampleDTO{{Time: now, Status: 0, Err: huge}},
+	}
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{c}}
+	if err := batch.Validate(now); err != nil {
+		t.Fatalf("a long error string rejected the batch: %v", err)
+	}
+	got := c.ToCycle(config.Target{Name: "gw", Probe: "http"}).HTTPSamples[0].Err
+	if len(got) > probe.MaxHTTPErrLen {
+		t.Fatalf("stored error is %d bytes, limit %d", len(got), probe.MaxHTTPErrLen)
+	}
+	if !strings.HasPrefix(got, `Get "https://aaa`) {
+		t.Fatalf("truncation dropped the head of the error: %q", got[:min(64, len(got))])
+	}
+}
+
+// The RTT bound is the storage column's, and the config ceiling sits under it,
+// so no schedule Config.Validate accepts can produce a latency ingest refuses.
+func TestMaxSampleRTTCoversEveryConfigurableInterval(t *testing.T) {
+	if config.MaxProbeInterval >= config.MaxSampleRTT {
+		t.Fatalf("an interval of %s is configurable but an rtt of %s is not ingestable",
+			config.MaxProbeInterval, config.MaxSampleRTT)
+	}
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	c := cluster.CyclePayload{
+		Time: now, Group: "core", Name: "gw", Sent: 1,
+		RTTs:    []time.Duration{config.MaxProbeInterval},
+		Summary: stats.Summary{Max: config.MaxProbeInterval},
+		Hops: []cluster.HopDTO{
+			{Index: 1, IP: "10.0.0.1", Sent: 1, RTTs: []time.Duration{config.MaxProbeInterval}},
+		},
+		HTTPSamples: []cluster.HTTPSampleDTO{{Time: now, RTT: config.MaxProbeInterval, Status: 200}},
+	}
+	batch := cluster.CycleBatch{Source: "edge-1", Cycles: []cluster.CyclePayload{c}}
+	if err := batch.Validate(now); err != nil {
+		t.Fatalf("a cycle at the largest configurable interval was refused: %v", err)
 	}
 }

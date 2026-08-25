@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/netip"
 	"net/url"
 	"os"
@@ -510,6 +511,24 @@ const (
 	MaxHopRowsPerCycle = MaxTraceRounds * MaxTraceTTL
 )
 
+// Latency bounds. They live here, like the timestamp window below, because the
+// producer of a latency is the scheduler's cycle deadline — an interval this
+// package accepts — and the consumer is cluster's ingest bound.
+const (
+	// MaxSampleRTT bounds one latency value: a cycle RTT, a hop RTT, an http
+	// sample's RTT, and every stats.Summary field. Negative is not a latency,
+	// and the ceiling is exactly where clickhouse's durUS stops storing a
+	// value as itself — MaxUint32 microseconds, 71m34.967295s.
+	MaxSampleRTT = math.MaxUint32 * time.Microsecond
+	// MaxProbeInterval is the longest schedule Validate accepts. A cycle runs
+	// under a context whose deadline is the interval, so it is also the
+	// largest RTT a probe can measure; capping it here is what keeps every
+	// config the master accepts ingestable from a slave. An hour is the
+	// largest round duration under MaxSampleRTT, leaving 11m34.967295s for
+	// the measurement to overshoot its own deadline under scheduling delay.
+	MaxProbeInterval = time.Hour
+)
+
 // Cycle timestamp bounds. They live here rather than in cluster because both
 // the ingest that refuses an out-of-range timestamp and the reader that must
 // keep already-stored ones off the API have to agree on the same window.
@@ -570,6 +589,9 @@ func ICMPPingBudget(interval time.Duration, pings int) (time.Duration, error) {
 func (c *Config) Validate() error {
 	if c.Interval <= 0 {
 		return fmt.Errorf("interval must be positive")
+	}
+	if c.Interval > MaxProbeInterval {
+		return fmt.Errorf("interval %s exceeds %s, past which a measured rtt is no longer storable", c.Interval, MaxProbeInterval)
 	}
 	if c.Pings <= 0 {
 		return fmt.Errorf("pings must be positive")
