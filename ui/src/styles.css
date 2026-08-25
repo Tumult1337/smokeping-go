@@ -125,6 +125,21 @@ body {
 .overview-th.num { text-align: right; }
 .overview-th.active { color: var(--text-dim); }
 .overview-sort-arrow { color: var(--accent); }
+/* Explicit reset, never `all: unset` — that would outrank the global
+   :focus-visible rule and delete the focus ring these buttons exist for. */
+.overview-th-btn,
+.overview-target-btn {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
 
 .overview-row td {
   padding: 8px 10px;
@@ -145,6 +160,7 @@ body {
 
 .overview-target { white-space: nowrap; max-width: 280px; overflow: hidden; }
 .overview-target-name {
+  display: block;
   font-weight: 600;
   color: var(--text);
   text-overflow: ellipsis;
@@ -152,6 +168,7 @@ body {
 }
 .overview-row.silent .overview-target-name { color: #e7a3aa; }
 .overview-target-id {
+  display: block;
   font-size: 11px;
   color: var(--text-id);
   margin-top: 1px;

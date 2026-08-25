@@ -293,10 +293,12 @@ function Th(props: {
   return (
     <th
       className={`overview-th${props.numeric ? " num" : ""}${active ? " active" : ""}`}
-      onClick={() => props.onClick(props.k)}
+      aria-sort={active ? (props.dir === "asc" ? "ascending" : "descending") : "none"}
     >
-      {props.children}
-      <span className="overview-sort-arrow">{arrow}</span>
+      <button type="button" className="overview-th-btn" onClick={() => props.onClick(props.k)}>
+        {props.children}
+        <span className="overview-sort-arrow">{arrow}</span>
+      </button>
     </th>
   );
 }
@@ -319,8 +321,17 @@ function Row({
       onClick={onPick}
     >
       <td className="overview-target">
-        <div className="overview-target-name">{label}</div>
-        <div className="overview-target-id">{row.id}</div>
+        <button
+          type="button"
+          className="overview-target-btn"
+          onClick={(e) => {
+            e.stopPropagation();
+            onPick();
+          }}
+        >
+          <span className="overview-target-name">{label}</span>
+          <span className="overview-target-id">{row.id}</span>
+        </button>
       </td>
       <td className="num">
         {row.loss_avg == null ? (
