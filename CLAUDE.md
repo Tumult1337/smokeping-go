@@ -547,9 +547,14 @@ Key points a reader can't derive from a single file:
   on `/hops/timeline`; an empty value is the untagged pre-cluster origin,
   and a missing one is a 400. The heatmap already fetches and draws one
   canvas per source, so the UI never sends the request that is refused.
-  **Every tier buckets**, so no schema-legal result reaches the cap at all,
-  which is the point — the refusal is an assertion about the data, not a
-  policy about the query. The ≤2h tier was raw and justified separately, on
+  **Every tier buckets**, so the cap is the grid's own product rather than a
+  guess: `MaxHopGridSlots` × `maxHopTTLs`, which the widest schema-legal
+  result reaches *exactly* — a 7d window starting off the 15m grid spans 673
+  slots, `ttl` is a `UInt8` whose whole domain ingest admits, and the refusal
+  is `> cap`, so that result is served rather than refused
+  (`TestIntegrationTimelineReachesItsCapExactly`). Nothing schema-legal
+  exceeds it, which is the point — the refusal is an assertion about the data,
+  not a policy about the query. The ≤2h tier was raw and justified separately, on
   `probe` walking one TTL per 50ms; a round ends at the target's own reply
   *before* it pays that spacing and config bounds no interval from below, so
   a one-hop MTR target at a 30ms interval wrote 240,000 rows into the window
@@ -577,7 +582,8 @@ Key points a reader can't derive from a single file:
   (`isRefusal`, the one place a new semantic sentinel is declared).
   `maxCycleCounterKeys` (1024) bounds the same read's counters lookup.
 
-- **Ingest admits each measurement once; local probing needs no guard.** Cluster delivery
+- **Ingest admits each measurement once per window; local probing needs no
+  guard.** Cluster delivery
   is at-least-once — `PushSink.Requeue` resends any batch whose ack was lost
   to a 5xx or a network error — and all four tables are plain `MergeTree`
   (`ReplicatedMergeTree` in CH-cluster mode), neither of which deduplicates.

@@ -81,10 +81,11 @@ func (w *sourceWindow) admit(target string, nano int64) bool {
 	return true
 }
 
-// cycleDedup admits each measurement into the fanout once. It sits at the
-// ingest boundary, upstream of the fanout, so the storage writer and the alert
-// evaluator are both covered by one guard; what a sink does with a cycle it
-// was handed is past the guarantee, since OnCycle reports nothing back.
+// cycleDedup admits each measurement into the fanout once while its identity
+// is still inside the source's window. It sits at the ingest boundary,
+// upstream of the fanout, so the storage writer and the alert evaluator are
+// both covered by one guard; what a sink does with a cycle it was handed is
+// past the guarantee, since OnCycle reports nothing back.
 type cycleDedup struct {
 	mu       sync.Mutex
 	clock    uint64

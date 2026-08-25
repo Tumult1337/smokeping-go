@@ -30,10 +30,14 @@ leaves empty columns, which the heatmap draws as history that was never
 collected.
 
 **What an operator sees.** At windows of 2h or less, cycles closer together
-than the grid now share a column, folded worst-loss-wins — the same fold the
-heatmap applied client-side before drawing. Nothing else changes: at the
-default 5m interval, and at every interval at or above 11s, the grid still
-holds one cycle per column.
+than the grid now share a column, folded worst-loss-wins. That fold is new:
+the client's own worst-loss-wins pick was across the *responders* of a single
+cycle — ECMP siblings and path flaps at one ttl — and never across cycles,
+because two cycles carried two timestamps and drew two columns. A column now
+holds however many cycles fell in its slot: usually one at an interval at or
+above the step, but the step is a whole second and the schedule is not, and
+cycles are not aligned to the grid, so a column holding two and a neighbour
+holding none is normal rather than a fault.
 
 **No config is refused.** Enforcing a minimum probe interval for hop-producing
 probes was the alternative, and it was rejected: the only value that keeps the

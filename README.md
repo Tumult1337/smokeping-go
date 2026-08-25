@@ -277,9 +277,11 @@ in front of the origin regardless. A hop read past its row cap is refused with
 `400` as well: hop rows come back oldest-first, so serving the prefix would
 hand back a path history missing its newest data with no sign of it. That cap
 binds `/hops`, which returns one cycle per source — narrow the window or add
-`source=` and the same view fits. `/hops/timeline` cannot reach its own cap:
-it buckets every tier and admits one probe origin per request, which is why
-`source` is required there rather than optional.
+`source=` and the same view fits. `/hops/timeline` cannot *exceed* its own
+cap: it buckets every tier and admits one probe origin per request, which is
+why `source` is required there rather than optional. Its cap is the widest
+grid's own row count, so the widest window reaches it exactly and is still
+served.
 
 All endpoints accept `source=<name>` to filter by probe origin in master/slave
 deployments. **`/hops/timeline` requires it**: it serves one probe origin per

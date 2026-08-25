@@ -2441,3 +2441,66 @@ VALUES (?, 'slow', 'g', 'master', ?, '10.0.0.1', '', 1, 3, 0, 0, 1000, 1000, 100
 		t.Errorf("WorstTime resolved %d hop rows, want the cycle's 3", len(atWorst))
 	}
 }
+
+// The widest grid reaches maxHopTimelineRows exactly. A 7d window whose start
+// is off the 15m grid spans MaxHopGridSlots buckets, ttl is a UInt8 that
+// cluster ingest admits the whole domain of, and the cap refuses only past
+// equality — so this result is schema-legal, is the largest one that is, and
+// is served. Prose claiming no tier can reach the cap is describing a
+// different endpoint.
+func TestIntegrationTimelineReachesItsCapExactly(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{cfg.Addr},
+		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+
+	const step = 15 * time.Minute
+	slots := storage.MaxHopGridSlots
+	// base is 15m-aligned; the window starts mid-bucket, which is what makes it
+	// span one more slot than the quotient. The last slot's row sits before the
+	// window ends, every earlier one after it begins.
+	base := time.Now().UTC().Truncate(time.Hour).Add(-storage.MaxHopTimelineWindow - time.Hour)
+	from := base.Add(step / 2)
+	to := from.Add(storage.MaxHopTimelineWindow)
+	insert := fmt.Sprintf(`
+INSERT INTO probe_hop (timestamp, target_id, target_group, source, ttl, hop_addr, unreach,
+  target_reply, sent, lost, loss_pct, rtt_min_us, rtt_max_us, rtt_mean_us, rtt_median_us)
+SELECT toDateTime64(%d, 3, 'UTC')
+         + toIntervalSecond(intDiv(number, %d) * %d)
+         + toIntervalSecond(if(intDiv(number, %d) = %d, 100, 500)),
+       'wide', 'g', 'master', toUInt8(number %% %d), '10.0.0.1', '', 0, 1, 0, 0, 1000, 1000, 1000, 1000
+FROM numbers(%d)`,
+		base.Unix(), maxHopTTLs, int(step.Seconds()), maxHopTTLs, slots-1, maxHopTTLs, slots*maxHopTTLs)
+	if err := conn.Exec(ctx, insert); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	ref := config.TargetRef{Target: config.Target{Name: "wide"}, Group: "g"}
+	if got := storage.PickHopStep(storage.MaxHopTimelineWindow, time.Second); got != step {
+		t.Fatalf("the 7d tier picks %s, not the %s this fixture is built on", got, step)
+	}
+	pts, err := hopsTimeline(ctx, r, ref, from, to, storage.QueryFilter{Source: "master", Step: step})
+	if err != nil {
+		t.Fatalf("the widest schema-legal grid was refused: %v", err)
+	}
+	if len(pts) != maxHopTimelineRows {
+		t.Fatalf("got %d rows, want the cap's own %d", len(pts), maxHopTimelineRows)
+	}
+}

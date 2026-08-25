@@ -322,9 +322,11 @@ const maxHopTTLs = 256
 const maxHopTimelineBuckets = storage.MaxHopGridSlots
 
 // maxHopTimelineRows is that grid's whole product, and the timeline's ceiling:
-// one probe origin per request, one row per (slot, ttl). No tier can reach it,
-// because every tier buckets — the product is the ceiling of a schema-legal
-// result rather than an estimate of a typical one.
+// one probe origin per request, one row per (slot, ttl). The widest window
+// reaches it exactly — 673 off-grid slots at the 15m tier, every one of the
+// ttl column's 256 values — and is served, because the refusal is past
+// equality; the product is the ceiling of a schema-legal result rather than
+// an estimate of a typical one.
 const maxHopTimelineRows = maxHopTimelineBuckets * maxHopTTLs
 
 // hopRowCap is maxHopRows and hopTimelineRowCap is maxHopTimelineRows, held
