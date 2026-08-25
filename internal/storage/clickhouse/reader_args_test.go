@@ -16,18 +16,24 @@ import (
 	"github.com/tumult/gosmokeping/internal/storage"
 )
 
-// recordConn captures the query and args of the last Query call. Every other
-// driver.Conn method panics: a reader path reaching one would be doing
-// something this test cannot reason about, and silently returning zero values
-// would let it pass.
+// recordConn captures every Query call, not only the last: a reader method
+// that issues two — the pinned hop reads pair their rows with a probe_cycle
+// counters lookup — would otherwise have its first query overwritten and
+// checked by nothing. Every other driver.Conn method panics: a reader path
+// reaching one would be doing something this test cannot reason about, and
+// silently returning zero values would let it pass.
 type recordConn struct {
 	driver.Conn
-	query string
-	args  []any
+	query   string
+	args    []any
+	queries []string
+	argSets [][]any
 }
 
 func (c *recordConn) Query(_ context.Context, query string, args ...any) (driver.Rows, error) {
 	c.query, c.args = query, args
+	c.queries = append(c.queries, query)
+	c.argSets = append(c.argSets, args)
 	return emptyRows{}, nil
 }
 
@@ -479,55 +485,222 @@ func TestCycleCountersRefuseTooManyKeys(t *testing.T) {
 // to whole seconds, which moves a window edge by up to a second in whichever
 // direction admits the wrong rows — and the wrongness is invisible without a
 // live server, since the query still parses and still returns rows. Every
-// timestamp predicate must therefore go through dtMilli, and no reader may
-// bind a time.Time at all.
+// timestamp predicate must therefore go through dtMilli, and every value bound
+// into one must already be milliseconds.
+//
+// Three false negatives an operator-count check alone left open, closed here:
+// a predicate rewritten to wrap either side in a second-precision conversion
+// (`timestamp >= toDateTime(?)`), an argument carrying unix *seconds* where the
+// placeholder wants milliseconds, and a second query issued by the same reader
+// method — the counters lookup the pinned hop reads pair their rows with.
 func TestReaderBindsEveryTimestampAsMilliseconds(t *testing.T) {
 	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
 	from := time.Date(2026, 4, 1, 0, 0, 0, 900_000_000, time.UTC)
 	to := from.Add(24 * time.Hour)
 	f := storage.QueryFilter{Source: "edge-1", Step: 15 * time.Minute, LatestSince: from}
 
-	calls := map[string]func(*Reader) error{
-		"QueryCycles raw": func(r *Reader) error {
+	calls := []struct {
+		name string
+		call func(*Reader) error
+		// hopRow makes the conn answer the first query with one probe_hop row,
+		// so the pinned reads go on to issue their counters lookup. A conn
+		// that returns nothing stops before it and leaves that query unwritten.
+		hopRow bool
+	}{
+		{name: "QueryCycles raw", call: func(r *Reader) error {
 			_, err := r.QueryCycles(context.Background(), ref, from, to, storage.QueryFilter{Source: "edge-1"})
 			return err
-		},
-		"QueryCycles step": func(r *Reader) error { _, err := r.QueryCycles(context.Background(), ref, from, to, f); return err },
-		"QueryRTTs":        func(r *Reader) error { _, err := r.QueryRTTs(context.Background(), ref, from, to, f); return err },
-		"QueryHTTPSamples": func(r *Reader) error {
+		}},
+		{name: "QueryCycles step", call: func(r *Reader) error {
+			_, err := r.QueryCycles(context.Background(), ref, from, to, f)
+			return err
+		}},
+		{name: "QueryRTTs", call: func(r *Reader) error {
+			_, err := r.QueryRTTs(context.Background(), ref, from, to, f)
+			return err
+		}},
+		{name: "QueryHTTPSamples", call: func(r *Reader) error {
 			_, err := r.QueryHTTPSamples(context.Background(), ref, from, to, f)
 			return err
-		},
-		"QueryLatestHops": func(r *Reader) error { _, err := r.QueryLatestHops(context.Background(), ref, f); return err },
-		"QueryHopsAt": func(r *Reader) error {
+		}},
+		{name: "QueryLatestHops", hopRow: true, call: func(r *Reader) error {
+			_, err := r.QueryLatestHops(context.Background(), ref, f)
+			return err
+		}},
+		{name: "QueryHopsAt", hopRow: true, call: func(r *Reader) error {
 			_, err := r.QueryHopsAt(context.Background(), ref, from, 30*time.Minute, f)
 			return err
-		},
-		"QueryHopsTimeline": func(r *Reader) error {
+		}},
+		{name: "QueryHopsTimeline", call: func(r *Reader) error {
 			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, f)
 			return err
-		},
-		"QueryOverview": func(r *Reader) error {
+		}},
+		{name: "QueryOverview", call: func(r *Reader) error {
 			_, err := r.QueryOverview(context.Background(), from, to, []config.TargetRef{ref})
 			return err
-		},
+		}},
+		// Also driven directly, for the two-key shape no single-row hop read
+		// produces: this is the one reader query whose placeholder set and
+		// argument slice both move with their input.
+		{name: "queryCycleCounters", call: func(r *Reader) error {
+			_, err := r.queryCycleCounters(context.Background(), ref, []storage.HopPoint{
+				{Source: "edge-1", Time: from, Index: 1},
+				{Source: "edge-2", Time: to, Index: 1},
+			})
+			return err
+		}},
 	}
-	rawBound := regexp.MustCompile(`timestamp\s*(>=|<=|>|<|=)\s*\?`)
 
-	for name, call := range calls {
+	// The predicate must bind through dtMilli or against the server's own
+	// clock; nothing else may sit on the right of a timestamp comparison.
+	tsPredicate := regexp.MustCompile(`timestamp\s*(?:>=|<=|>|<|=)\s*`)
+	// Every fixture instant carries 900ms and lives inside this window, so a
+	// value truncated to a whole second or handed over in seconds is out of
+	// band by three orders of magnitude rather than by a rounding.
+	lo, hi := from.Add(-time.Hour).UnixMilli(), to.Add(time.Hour).UnixMilli()
+	secondsForm := map[int64]bool{}
+	for _, at := range []time.Time{from, to, from.Add(-15 * time.Minute), from.Add(15 * time.Minute)} {
+		secondsForm[at.Unix()] = true
+	}
+
+	for _, tc := range calls {
+		name := tc.name
 		t.Run(name, func(t *testing.T) {
 			conn := &recordConn{}
-			if err := call(&Reader{conn: conn}); err != nil {
+			var backing driver.Conn = conn
+			if tc.hopRow {
+				h := &hopRowConn{left: 1, at: from, src: "edge-1"}
+				conn, backing = &h.recordConn, h
+			}
+			if err := tc.call(&Reader{conn: backing}); err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
-			if m := rawBound.FindString(conn.query); m != "" {
-				t.Errorf("%s binds a timestamp predicate directly (%q), not through %s:%s", name, m, dtMilli, conn.query)
+			if len(conn.queries) == 0 {
+				t.Fatalf("%s issued no query", name)
 			}
-			for i, a := range conn.args {
-				if ts, ok := a.(time.Time); ok {
-					t.Errorf("%s: arg %d is a time.Time (%s); the driver renders it at whole-second precision", name, i, ts)
+			if tc.hopRow && len(conn.queries) != 2 {
+				t.Fatalf("%s issued %d queries, want the hop read and its counters lookup", name, len(conn.queries))
+			}
+			for qi, q := range conn.queries {
+				args := conn.argSets[qi]
+				// A conversion around either side of the comparison rounds to
+				// whole seconds just as a bound time.Time does, and no reader
+				// query has any other use for one.
+				if strings.Contains(q, "toDateTime") {
+					t.Errorf("%s query %d converts a timestamp at second precision:%s", name, qi, q)
+				}
+				for _, loc := range tsPredicate.FindAllStringIndex(q, -1) {
+					rest := q[loc[1]:]
+					if strings.HasPrefix(rest, dtMilli) || strings.HasPrefix(rest, "now()") {
+						continue
+					}
+					t.Errorf("%s query %d binds %q against %.40q, not %s:%s",
+						name, qi, q[loc[0]:loc[1]], rest, dtMilli, q)
+				}
+				for i, a := range args {
+					if ts, ok := a.(time.Time); ok {
+						t.Errorf("%s query %d: arg %d is a time.Time (%s); the driver renders it at whole-second precision", name, qi, i, ts)
+					}
+				}
+				for i := range msPlaceholders(q) {
+					if i >= len(args) {
+						t.Fatalf("%s query %d: dtMilli placeholder %d has no argument", name, qi, i)
+					}
+					v, ok := args[i].(int64)
+					if !ok {
+						t.Errorf("%s query %d: arg %d fills a dtMilli placeholder with %T, want epoch milliseconds", name, qi, i, args[i])
+						continue
+					}
+					if v < lo || v > hi || v%1000 != 900 {
+						t.Errorf("%s query %d: arg %d = %d is not the millisecond form of a fixture instant (want %d..%d ending in 900)",
+							name, qi, i, v, lo, hi)
+					}
+				}
+				for i, a := range args {
+					v, ok := a.(int64)
+					if !ok || !secondsForm[v] {
+						continue
+					}
+					// QueryOverview's bucket origin is the one instant bound in
+					// whole seconds: intDiv(toUInt32(timestamp) - ?, ?) counts
+					// seconds from `from`. Named rather than swept — it is the
+					// known UInt32-epoch limitation, not a truncated predicate.
+					if name == "QueryOverview" && v == from.Unix() {
+						continue
+					}
+					t.Errorf("%s query %d: arg %d = %d is a fixture instant in seconds, not milliseconds:%s", name, qi, i, v, q)
 				}
 			}
 		})
 	}
 }
+
+// msPlaceholders returns the zero-based positions, among all of the query's
+// placeholders, of the ones a dtMilli occurrence owns. dtMilli holds exactly
+// one `?`, so its position is the count of placeholders before it.
+func msPlaceholders(q string) map[int]struct{} {
+	out := map[int]struct{}{}
+	for pos := 0; ; {
+		i := strings.Index(q[pos:], dtMilli)
+		if i < 0 {
+			return out
+		}
+		at := pos + i
+		out[strings.Count(q[:at], "?")] = struct{}{}
+		pos = at + len(dtMilli)
+	}
+}
+
+// hopRowConn answers the first query with one probe_hop row so a pinned hop
+// read goes on to issue its counters lookup, and records both.
+type hopRowConn struct {
+	recordConn
+	left int
+	at   time.Time
+	src  string
+}
+
+func (c *hopRowConn) Query(ctx context.Context, query string, args ...any) (driver.Rows, error) {
+	if _, err := c.recordConn.Query(ctx, query, args...); err != nil {
+		return nil, err
+	}
+	if c.left == 0 {
+		return emptyRows{}, nil
+	}
+	c.left--
+	return &oneHopRow{at: c.at, src: c.src, left: 1}, nil
+}
+
+// oneHopRow fills only the two scan destinations that decide what the counters
+// lookup asks for; every other column keeps its zero value.
+type oneHopRow struct {
+	driver.Rows
+	at   time.Time
+	src  string
+	left int
+}
+
+func (r *oneHopRow) Next() bool {
+	if r.left == 0 {
+		return false
+	}
+	r.left--
+	return true
+}
+
+func (r *oneHopRow) Scan(dest ...any) error {
+	if len(dest) > 0 {
+		if p, ok := dest[0].(*time.Time); ok {
+			*p = r.at
+		}
+	}
+	if len(dest) > 1 {
+		if p, ok := dest[1].(*string); ok {
+			*p = r.src
+		}
+	}
+	return nil
+}
+
+func (*oneHopRow) Err() error   { return nil }
+func (*oneHopRow) Close() error { return nil }
