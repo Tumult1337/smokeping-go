@@ -2349,3 +2349,95 @@ FROM numbers(%d)`, from.Unix(), int(interval/time.Millisecond), cycles)
 		t.Fatalf("got %d rows, over the %d slots the grid holds", len(pts), slots)
 	}
 }
+
+// The heatmap keys a column by its bucket start and clicks through to
+// /hops?at=, which resolves the nearest cycle within half of a 30-minute
+// window. Once the probe interval floors the step above that half, the bucket
+// start is not a timestamp any cycle sits near — so a clean bucket's WorstTime
+// is the only clickable stamp it carries, and the grid must supply one whether
+// or not the bucket lost.
+func TestIntegrationCleanBucketIsOnlyReachableByItsWorstTime(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{cfg.Addr},
+		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+
+	// An hourly probe whose cycles land 40 minutes into each hourly bucket:
+	// clean, visible on the heatmap, and 25 minutes outside the reach of a
+	// click on the bucket start.
+	const (
+		interval = time.Hour
+		offset   = 40 * time.Minute
+		window   = 6 * time.Hour
+	)
+	from := time.Now().UTC().Truncate(time.Hour).Add(-window)
+	for i := range int(window / interval) {
+		ts := from.Add(time.Duration(i)*interval + offset)
+		for ttl := 1; ttl <= 3; ttl++ {
+			if err := conn.Exec(ctx, `
+INSERT INTO probe_hop (timestamp, target_id, target_group, source, ttl, hop_addr, unreach,
+  target_reply, sent, lost, loss_pct, rtt_min_us, rtt_max_us, rtt_mean_us, rtt_median_us)
+VALUES (?, 'slow', 'g', 'master', ?, '10.0.0.1', '', 1, 3, 0, 0, 1000, 1000, 1000, 1000)`,
+				ts, uint8(ttl)); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+		}
+	}
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	ref := config.TargetRef{Target: config.Target{Name: "slow"}, Group: "g"}
+	step := storage.PickHopStep(window, interval)
+	if step <= 30*time.Minute {
+		t.Fatalf("step %s: the fixture must outrun QueryHopsAt's half-window", step)
+	}
+	pts, err := hopsTimeline(ctx, r, ref, from, from.Add(window), storage.QueryFilter{Source: "master", Step: step})
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	if len(pts) == 0 {
+		t.Fatal("no grid rows")
+	}
+	for _, p := range pts {
+		if p.MaxLossPct != 0 {
+			t.Fatalf("fixture lost: MaxLossPct = %v, want a clean bucket", p.MaxLossPct)
+		}
+		if p.WorstTime.IsZero() {
+			t.Fatalf("bucket %s carries no cycle timestamp", p.Time)
+		}
+		if got := p.WorstTime.Sub(p.Time); got != offset {
+			t.Fatalf("bucket %s: WorstTime is %s into it, want %s", p.Time, got, offset)
+		}
+	}
+
+	first := pts[0]
+	atStart, err := hopsAt(ctx, r, ref, first.Time, 30*time.Minute, storage.QueryFilter{Source: "master"})
+	if err != nil {
+		t.Fatalf("hops at the bucket start: %v", err)
+	}
+	if len(atStart) != 0 {
+		t.Errorf("bucket start resolved %d hop rows; the fixture no longer proves the reach", len(atStart))
+	}
+	atWorst, err := hopsAt(ctx, r, ref, first.WorstTime, 30*time.Minute, storage.QueryFilter{Source: "master"})
+	if err != nil {
+		t.Fatalf("hops at WorstTime: %v", err)
+	}
+	if len(atWorst) != 3 {
+		t.Errorf("WorstTime resolved %d hop rows, want the cycle's 3", len(atWorst))
+	}
+}

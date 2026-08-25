@@ -144,6 +144,10 @@ Key points a reader can't derive from a single file:
   the address of the slot's worst-loss cycle — the row the heatmap
   already picked out of the per-responder set and drew. Per-responder
   rows survive on `/hops?at=`, which pins one cycle and needs no grid.
+  `worst_time` is that cycle's own timestamp, and it is what a heatmap
+  cell clicks through to whether or not the slot lost: `/hops?at=`
+  resolves the nearest cycle within ±15m, so a slot start is unreachable
+  from every cycle in it once the probe interval floors the step past 30m.
 
 - **Retention:** per-table TTL set at bootstrap from
   `storage.clickhouse.retention.{cycle,rtt,hop,http}_days` (defaults

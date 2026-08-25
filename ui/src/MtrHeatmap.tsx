@@ -355,25 +355,28 @@ function PathHeatmap({
   }
 
   // worstCycleSec maps a clicked bucket-start (unix sec, as keyed in `rows`) to
-  // the exact timestamp of the worst-loss cycle within that bucket, across the
-  // visible hops. Cells are coloured by MaxLossPct, so the bucket's first cycle
-  // is frequently clean; clicking a red cell should open the cycle that
-  // actually lost — not the earliest one (which read as "one to the left").
-  // Falls back to the bucket start when the bucket is clean or the row carries
-  // no WorstTime (raw, non-bucketed rows where WorstTime == Time anyway).
+  // the timestamp of a cycle that is actually inside that bucket: the
+  // worst-loss one across the visible hops, since cells are coloured by
+  // MaxLossPct and clicking a red cell should open the cycle that lost rather
+  // than the earliest one (which read as "one to the left"). A clean bucket
+  // takes the same path, because /hops?at= resolves the nearest cycle within
+  // ±15m and the bucket start is that far from every cycle in it once the
+  // probe interval floors the step above 30m — the cell is drawn, and clicking
+  // it opened a neighbouring bucket's cycle or nothing at all. Only a row that
+  // carries no WorstTime at all falls back to the key the column was drawn at.
   function worstCycleSec(bucketSec: number): number {
-    let bestLoss = 0;
+    let bestLoss = -1;
     let worstISO: string | undefined;
     for (const hop of visibleHops) {
       const p = rows.get(hop)?.get(bucketSec);
-      if (!p) continue;
+      if (!p?.WorstTime) continue;
       const loss = p.MaxLossPct ?? p.LossPct;
       if (loss > bestLoss) {
         bestLoss = loss;
         worstISO = p.WorstTime;
       }
     }
-    if (bestLoss > 0 && worstISO) {
+    if (worstISO) {
       const s = Math.floor(new Date(worstISO).getTime() / 1000);
       if (Number.isFinite(s)) return s;
     }
