@@ -185,9 +185,11 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
             ctx.beginPath();
             ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
             ctx.clip();
+            const laneCount = soloIdx != null ? 1 : stacks.length;
+            let lane = 0;
             for (let si = 0; si < stacks.length; si++) {
               if (soloIdx != null && si !== soloIdx) continue;
-              drawStack(u, ctx, stacks[si], hiddenRef.current);
+              drawStack(u, ctx, stacks[si], hiddenRef.current, lane++, laneCount);
             }
             ctx.restore();
           },
@@ -738,6 +740,8 @@ function drawStack(
   ctx: CanvasRenderingContext2D,
   stack: SourceStack,
   hidden: Set<string>,
+  laneIndex: number,
+  laneCount: number,
 ) {
   const { ts, bands: bandsArr, medians, losses } = stack;
   const n = ts.length;
@@ -769,8 +773,12 @@ function drawStack(
       leftEdge = (cxs[i - 1] + cx) / 2;
       rightEdge = (cx + cxs[i + 1]) / 2;
     }
-    const x = Math.floor(leftEdge);
-    const w = Math.max(1, Math.ceil(rightEdge) - x);
+    const slotX = Math.floor(leftEdge);
+    const slotW = Math.max(1, Math.ceil(rightEdge) - slotX);
+    // Sources share exact bucket-start timestamps, so a full-slot bar per
+    // source overpaints every source sorted before it.
+    const w = Math.max(1, Math.floor(slotW / laneCount));
+    const x = slotX + laneIndex * w;
 
     bandsArr[i].forEach((band, b) => {
       const pair = BAND_PAIRS[b];
