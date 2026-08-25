@@ -515,9 +515,9 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
 		return
 	}
-	// Hop data only lives in the raw bucket (no rollups). Reject windows wider
-	// than raw retention so a "1y" click doesn't try to scan 100M points.
-	if to.Sub(from) > 7*24*time.Hour {
+	// The window the grid's row bound is derived from, so it is that bound's
+	// constant rather than a second copy of 7d.
+	if to.Sub(from) > storage.MaxHopTimelineWindow {
 		writeErr(w, http.StatusBadRequest, "hops/timeline window limited to 7d")
 		return
 	}
@@ -530,7 +530,9 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "source is required: hops/timeline serves one probe origin per request")
 		return
 	}
-	step := storage.PickHopStep(to.Sub(from))
+	// The probe interval floors the step: a grid finer than the cadence that
+	// fills it leaves empty columns the heatmap draws as a stopped probe.
+	step := storage.PickHopStep(to.Sub(from), s.store.Current().Interval)
 	res, err := s.reader.QueryHopsTimeline(r.Context(), ref, from, to, storage.QueryFilter{
 		Source: r.URL.Query().Get("source"),
 		Step:   step,
@@ -563,7 +565,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 			WorstTime:  h.WorstTime,
 		}
 	}
-	// step_sec echoes the bucket width the ladder picked, 0 on the raw tier.
+	// step_sec echoes the bucket width the ladder picked, always positive.
 	// The heatmap draws one column per bucket and cannot infer that width from
 	// the rows: a window holding a single bucket carries no gap to measure, and
 	// guessing from row count paints that bucket across the whole window.

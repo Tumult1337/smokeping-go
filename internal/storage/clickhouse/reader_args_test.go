@@ -78,7 +78,7 @@ func TestReaderQueryPlaceholdersMatchArgs(t *testing.T) {
 			return err
 		},
 		"QueryHopsTimeline": func(r *Reader, f storage.QueryFilter) error {
-			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, f)
+			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, withGrid(f))
 			return err
 		},
 	}
@@ -149,7 +149,7 @@ func TestReaderQueriesOrderForTheirConsumer(t *testing.T) {
 			return err
 		}, []string{"timestamp"}},
 		{"QueryHopsTimeline", func(r *Reader, f storage.QueryFilter) error {
-			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, f)
+			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, withGrid(f))
 			return err
 		}, []string{"timestamp", "bucket_ts"}},
 		{"QueryLatestHops", func(r *Reader, f storage.QueryFilter) error {
@@ -206,8 +206,8 @@ func TestHopQueriesCarryRowLimit(t *testing.T) {
 			_, err := r.QueryHopsAt(context.Background(), ref, from, 30*time.Minute, storage.QueryFilter{})
 			return err
 		},
-		"QueryHopsTimeline/raw": func(r *Reader) error {
-			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{})
+		"QueryHopsTimeline/finest": func(r *Reader) error {
+			_, err := r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{Step: storage.MinHopStep})
 			return err
 		},
 		"QueryHopsTimeline/bucketed": func(r *Reader) error {
@@ -218,7 +218,7 @@ func TestHopQueriesCarryRowLimit(t *testing.T) {
 	caps := map[string]int{
 		"QueryLatestHops":            maxHopRows,
 		"QueryHopsAt":                maxHopRows,
-		"QueryHopsTimeline/raw":      maxHopTimelineRows,
+		"QueryHopsTimeline/finest":   maxHopTimelineRows,
 		"QueryHopsTimeline/bucketed": maxHopTimelineRows,
 	}
 	for name, call := range calls {
@@ -233,27 +233,53 @@ func TestHopQueriesCarryRowLimit(t *testing.T) {
 	}
 }
 
+// withGrid gives a filter the finest step the ladder returns, so a sweep that
+// varies every other field still reaches the timeline: it has no raw tier.
+func withGrid(f storage.QueryFilter) storage.QueryFilter {
+	if f.Step == 0 {
+		f.Step = storage.MinHopStep
+	}
+	return f
+}
+
 // The timeline's ceiling is a product of bounds, not a number picked against a
 // typical read: one origin per request, one row per (grid slot, ttl), the grid
 // no wider than the window cap divided by the step ladder's floor, and ttl a
-// UInt8 column ingest refuses to exceed. Every real 7d read has to sit under
-// it by construction, so a step ladder that ever returns a finer width than
-// the endpoint's window can afford must fail here rather than at a refusal.
+// UInt8 column ingest refuses to exceed. Every schedule config.Validate
+// accepts has to sit under it by construction — a tier exempted from that,
+// as the raw one was, is a cap sitting below what a legitimate producer emits.
 func TestHopTimelineGridFitsItsRowCap(t *testing.T) {
 	if maxHopTimelineRows != maxHopTimelineBuckets*maxHopTTLs {
 		t.Fatalf("maxHopTimelineRows = %d, want the grid product %d",
 			maxHopTimelineRows, maxHopTimelineBuckets*maxHopTTLs)
 	}
-	const window = 7 * 24 * time.Hour // the endpoint's own cap
-	for span := time.Minute; span <= window; span += 11 * time.Minute {
-		step := storage.PickHopStep(span)
-		if step == 0 {
-			continue // raw: one slot per cycle, bounded by the walk's 50ms spacing
+	intervals := []time.Duration{time.Nanosecond, 30 * time.Millisecond, time.Second, 20 * time.Second, 5 * time.Minute, config.MaxProbeInterval}
+	for span := time.Minute; span <= storage.MaxHopTimelineWindow; span += 11 * time.Minute {
+		for _, interval := range intervals {
+			step := storage.PickHopStep(span, interval)
+			if step <= 0 {
+				t.Fatalf("span %s at interval %s picked a raw grid, whose slots are the producer's cycle count", span, interval)
+			}
+			if slots := int(span/step) + 1; slots > maxHopTimelineBuckets {
+				t.Fatalf("span %s at interval %s (step %s) needs %d slots, over the %d the cap is derived from",
+					span, interval, step, slots, maxHopTimelineBuckets)
+			}
 		}
-		if slots := int(span/step) + 1; slots > maxHopTimelineBuckets {
-			t.Fatalf("span %s at step %s needs %d slots, over the %d the cap is derived from",
-				span, step, slots, maxHopTimelineBuckets)
-		}
+	}
+}
+
+// The reader is the last place that can tell a grid from a raw scan, so it
+// refuses rather than falling back to the shape whose row count is unbounded.
+func TestQueryHopsTimelineRefusesARawGrid(t *testing.T) {
+	conn := &recordConn{}
+	_, err := (&Reader{conn: conn}).QueryHopsTimeline(context.Background(),
+		config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}},
+		time.Now().Add(-time.Hour), time.Now(), storage.QueryFilter{Source: "master"})
+	if err == nil {
+		t.Fatal("a zero step was served as a raw scan")
+	}
+	if conn.query != "" {
+		t.Fatalf("a raw grid reached ClickHouse:\n%s", conn.query)
 	}
 }
 
@@ -335,8 +361,8 @@ func TestHopReadsRefuseATruncatedResult(t *testing.T) {
 		"QueryHopsAt": func(r *Reader) (storage.HopsResult, error) {
 			return r.QueryHopsAt(context.Background(), ref, from, 30*time.Minute, storage.QueryFilter{})
 		},
-		"QueryHopsTimeline raw": func(r *Reader) (storage.HopsResult, error) {
-			return r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{})
+		"QueryHopsTimeline finest": func(r *Reader) (storage.HopsResult, error) {
+			return r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{Step: storage.MinHopStep})
 		},
 		"QueryHopsTimeline bucketed": func(r *Reader) (storage.HopsResult, error) {
 			return r.QueryHopsTimeline(context.Background(), ref, from, to, storage.QueryFilter{Step: 15 * time.Minute})

@@ -1257,7 +1257,7 @@ func TestReaderQueryHopsTimelinePinsOneSource(t *testing.T) {
 	defer r.Close()
 
 	for name, f := range map[string]storage.QueryFilter{
-		"raw":      {Source: "slave-a"},
+		"finest":   {Source: "slave-a", Step: storage.MinHopStep},
 		"bucketed": {Source: "slave-a", Step: 15 * time.Minute},
 	} {
 		pts, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), f)
@@ -1269,7 +1269,7 @@ func TestReaderQueryHopsTimelinePinsOneSource(t *testing.T) {
 		}
 	}
 	for name, f := range map[string]storage.QueryFilter{
-		"raw":      {},
+		"finest":   {Step: storage.MinHopStep},
 		"bucketed": {Step: 15 * time.Minute},
 	} {
 		pts, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), f)
@@ -1369,27 +1369,28 @@ func TestReaderQueryHopsTimelineSpikePreservation(t *testing.T) {
 			got.WorstTime.UTC(), wantWorst.UTC(), got.Time.UTC())
 	}
 
-	// Raw path must mirror LossPct into MaxLossPct so the UI can read
-	// MaxLossPct uniformly without branching.
-	rawPts, err := hopsTimeline(ctx, r,
+	// The finest tier holds these 30s-apart cycles one per slot, so each row
+	// must mirror LossPct into MaxLossPct — the UI reads MaxLossPct uniformly
+	// without branching on the step.
+	finePts, err := hopsTimeline(ctx, r,
 		config.TargetRef{Target: config.Target{Name: "thsp"}, Group: "g"},
 		start.Add(-time.Hour), start.Add(time.Hour),
-		storage.QueryFilter{Source: "master", Step: 0}, // raw
+		storage.QueryFilter{Source: "master", Step: storage.MinHopStep},
 	)
 	if err != nil {
-		t.Fatalf("raw query: %v", err)
+		t.Fatalf("finest query: %v", err)
 	}
-	if len(rawPts) != 10 {
-		t.Fatalf("raw: expected 10 rows (one per cycle), got %d", len(rawPts))
+	if len(finePts) != 10 {
+		t.Fatalf("finest: expected 10 rows (one per cycle), got %d", len(finePts))
 	}
-	for _, p := range rawPts {
+	for _, p := range finePts {
 		if p.MaxLossPct != p.LossPct {
-			t.Errorf("raw row at %v: MaxLossPct=%.2f, LossPct=%.2f — raw rows must mirror",
+			t.Errorf("row at %v: MaxLossPct=%.2f, LossPct=%.2f — a single-cycle slot must mirror",
 				p.Time, p.MaxLossPct, p.LossPct)
 		}
-		// Raw rows are a single cycle, so the worst-loss cycle is themselves.
-		if !p.WorstTime.Equal(p.Time) {
-			t.Errorf("raw row at %v: WorstTime=%s, want == Time", p.Time, p.WorstTime.UTC())
+		// One cycle in the slot, so its worst cycle is inside the slot itself.
+		if p.WorstTime.Before(p.Time) || !p.WorstTime.Before(p.Time.Add(storage.MinHopStep)) {
+			t.Errorf("row at %v: WorstTime=%s, outside its own slot", p.Time, p.WorstTime.UTC())
 		}
 	}
 }
@@ -1613,11 +1614,11 @@ func TestIntegrationHopAnnotationsRoundTrip(t *testing.T) {
 		t.Fatalf("QueryHopsAt lost the target-reply marker: %+v", atHops)
 	}
 
-	// Path 3: raw timeline (step 0) — same grid select, one slot per cycle.
-	// It carries no target_reply: the timeline DTO never had a counterpart for
+	// Path 3: the finest grid — same select, roughly one slot per cycle. It
+	// carries no target_reply: the timeline DTO never had a counterpart for
 	// it, and a field with no consumer on an unauthenticated endpoint is pure
 	// disclosure surface.
-	rawTL, err := hopsTimeline(ctx, r, ref, at.Add(-time.Hour), at.Add(time.Hour), storage.QueryFilter{Source: "master"})
+	rawTL, err := hopsTimeline(ctx, r, ref, at.Add(-time.Hour), at.Add(time.Hour), storage.QueryFilter{Source: "master", Step: storage.MinHopStep})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1631,10 +1632,10 @@ func TestIntegrationHopAnnotationsRoundTrip(t *testing.T) {
 		}
 	}
 	if !rawFound {
-		t.Fatalf("raw timeline lost the annotation: %+v", rawTL)
+		t.Fatalf("the finest grid lost the annotation: %+v", rawTL)
 	}
 
-	// Path 4: bucketed timeline — its own select and scan, max(unreach).
+	// Path 4: a wider bucket, where the annotation has to survive a fold.
 	tl, err := hopsTimeline(ctx, r, ref, at.Add(-time.Hour), at.Add(time.Hour),
 		storage.QueryFilter{Source: "master", Step: 5 * time.Minute})
 	if err != nil {
@@ -1857,9 +1858,9 @@ func TestIntegrationHopReadRefusesPastTheRowCap(t *testing.T) {
 	if _, err := latestHops(ctx, r, ref, storage.QueryFilter{}); !errors.Is(err, storage.ErrHopsTruncated) {
 		t.Fatalf("QueryLatestHops err = %v, want ErrHopsTruncated", err)
 	}
-	src := storage.QueryFilter{Source: "master"}
-	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), src); !errors.Is(err, storage.ErrHopsTruncated) {
-		t.Fatalf("QueryHopsTimeline raw err = %v, want ErrHopsTruncated", err)
+	finest := storage.QueryFilter{Source: "master", Step: storage.MinHopStep}
+	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), finest); !errors.Is(err, storage.ErrHopsTruncated) {
+		t.Fatalf("QueryHopsTimeline finest err = %v, want ErrHopsTruncated", err)
 	}
 	bucketed := storage.QueryFilter{Source: "master", Step: 15 * time.Minute}
 	if _, err := hopsTimeline(ctx, r, ref, start.Add(-time.Hour), start.Add(time.Hour), bucketed); !errors.Is(err, storage.ErrHopsTruncated) {
@@ -2284,5 +2285,65 @@ func TestIntegrationTimelineRowComesFromOneResponder(t *testing.T) {
 	}
 	if p.MaxLossPct < 66 || p.MaxLossPct > 67 {
 		t.Fatalf("MaxLossPct = %v, want the worst-loss cycle's own 66.6%%", p.MaxLossPct)
+	}
+}
+
+// A one-hop MTR target at a 30ms interval writes 240,000 (timestamp, ttl) hop
+// rows into the 2h window: the walk exits at the target's own reply before it
+// ever pays the 50ms TTL spacing, and config bounds no interval from below.
+// Served raw — one grid slot per cycle — that legitimate history was refused
+// with ErrHopsTruncated, so the endpoint an operator opens during an incident
+// answered 400 for the target probed most often.
+func TestIntegrationTimelineServesAOneHopTraceAtASubSecondInterval(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{cfg.Addr},
+		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+
+	const (
+		interval = 30 * time.Millisecond
+		window   = 2 * time.Hour
+	)
+	cycles := int(window / interval)
+	to := time.Now().UTC().Truncate(time.Hour)
+	from := to.Add(-window)
+	insert := fmt.Sprintf(`
+INSERT INTO probe_hop (timestamp, target_id, target_group, source, ttl, hop_addr, unreach,
+  target_reply, sent, lost, loss_pct, rtt_min_us, rtt_max_us, rtt_mean_us, rtt_median_us)
+SELECT toDateTime64(%d, 3, 'UTC') + toIntervalMillisecond(number * %d),
+       'dense', 'g', 'master', 1, '10.0.0.1', '', 1, 1, 0, 0, 1000, 1000, 1000, 1000
+FROM numbers(%d)`, from.Unix(), int(interval/time.Millisecond), cycles)
+	if err := conn.Exec(ctx, insert); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	ref := config.TargetRef{Target: config.Target{Name: "dense"}, Group: "g"}
+	step := storage.PickHopStep(window, interval)
+	pts, err := hopsTimeline(ctx, r, ref, from, to, storage.QueryFilter{Source: "master", Step: step})
+	if err != nil {
+		t.Fatalf("a %s window of a one-hop target at a %s interval was refused: %v", window, interval, err)
+	}
+	if len(pts) == 0 {
+		t.Fatalf("no rows for %d seeded cycles", cycles)
+	}
+	if slots := int(window/step) + 1; len(pts) > slots {
+		t.Fatalf("got %d rows, over the %d slots the grid holds", len(pts), slots)
 	}
 }

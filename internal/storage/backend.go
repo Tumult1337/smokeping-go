@@ -62,23 +62,49 @@ func PickCycleStep(span time.Duration) time.Duration {
 	}
 }
 
+// MaxHopTimelineWindow is the widest window /hops/timeline serves, and the
+// first term of every row bound derived from its grid.
+const MaxHopTimelineWindow = 7 * 24 * time.Hour
+
+// MaxHopGridSlots is the widest grid any tier produces: the whole window at
+// the coarsest step the ladder returns, plus one slot for a `from` that is off
+// the grid.
+const MaxHopGridSlots = int(MaxHopTimelineWindow/(15*time.Minute)) + 1
+
+// MinHopStep is the finest step the ladder returns: ceil(2h / (MaxHopGridSlots
+// - 1)) = 10.72s, rounded up to a whole second because the query renders a
+// step in seconds.
+const MinHopStep = 11 * time.Second
+
 // PickHopStep returns the toStartOfInterval width for hop timeline queries.
-// Tiers: ≤2h raw, ≤24h 5m, >24h 15m. The 2h floor preserves per-cycle
-// granularity for the live debug view; wider windows bucket aggressively
-// because the heatmap canvas is at most ~1500 px wide — a 5-min bucket at
-// 24h yields ~288 columns × N hops × N sources, comfortably below that.
+// Tiers: ≤2h MinHopStep, ≤24h 5m, >24h 15m, never finer than interval.
+//
+// It never returns 0: a raw grid holds one slot per cycle, and nothing bounds
+// a cycle rate — config requires only a positive interval, and a one-hop MTR
+// target at 30ms puts 240,000 rows in the 2h window. Bucketing takes cycle
+// rate out of the row count, which is what makes the timeline's cap derivable
+// instead of a bet on how fast a producer runs.
+//
+// The step never goes below interval because a grid finer than the cadence
+// filling it leaves empty slots, which the heatmap draws as history that was
+// never collected.
 //
 // Lives in the storage package (not the CH reader) so the API layer can
 // pick the step from window width without importing a backend implementation.
-func PickHopStep(span time.Duration) time.Duration {
+func PickHopStep(span, interval time.Duration) time.Duration {
+	step := 15 * time.Minute
 	switch {
 	case span <= 2*time.Hour:
-		return 0
+		step = MinHopStep
 	case span <= 24*time.Hour:
-		return 5 * time.Minute
-	default:
-		return 15 * time.Minute
+		step = 5 * time.Minute
 	}
+	if interval > step {
+		// Whole seconds, the unit the query renders; flooring a value already
+		// above a whole-second step cannot land under it.
+		step = interval.Truncate(time.Second)
+	}
+	return step
 }
 
 // QueryFilter narrows a query along orthogonal dimensions. Zero value =
@@ -91,7 +117,9 @@ type QueryFilter struct {
 	// the source count is the one factor in its row bound that nothing limits.
 	Source string
 	// Step, when > 0, asks the backend to bucket results by this width
-	// using toStartOfInterval (or equivalent). Zero = return raw rows.
+	// using toStartOfInterval (or equivalent). Zero = return raw rows, which
+	// QueryHopsTimeline refuses because a slot per cycle puts the producer's
+	// cycle rate back into its row bound.
 	// The server picks Step from window width before invoking the reader.
 	Step time.Duration
 	// LatestSince, when non-zero, bounds the "current path" view
@@ -207,9 +235,9 @@ type HopPoint struct {
 	Max     float64
 	Mean    float64
 	Median  float64
-	// LossPct is the bucket-average loss when the row was bucketed, the
-	// per-cycle loss when raw. MaxLossPct is the worst single cycle within
-	// the bucket — equal to LossPct for raw rows. The heatmap colors by
+	// LossPct is the bucket-average loss. MaxLossPct is the worst single cycle
+	// within the bucket, so the two are equal in a slot holding one cycle.
+	// The heatmap colors by
 	// MaxLossPct so a brief 100% loss event inside a 5-min bucket survives
 	// instead of being averaged down to ~3% and visually disappearing.
 	LossPct    float64
@@ -217,7 +245,7 @@ type HopPoint struct {
 	LossCount  int64
 	Sent       int64
 	// WorstTime is the exact timestamp of the worst-loss cycle inside the
-	// bucket (argMax(timestamp, loss_pct)); equals Time for raw rows. Lets a
+	// bucket, read off the same row its address came from. Lets a
 	// heatmap-cell click jump to the cycle that justifies the cell's colour
 	// instead of the bucket's first (often clean) cycle — the bucket is
 	// coloured by MaxLossPct, so the first cycle is frequently not the lossy

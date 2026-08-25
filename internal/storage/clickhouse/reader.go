@@ -317,17 +317,14 @@ const maxHopRows = 485_280
 // can push puts more distinct TTLs on one grid slot.
 const maxHopTTLs = 256
 
-// maxHopTimelineBuckets is the widest grid /hops/timeline can ask for: the
-// endpoint caps the window at 7d and storage.PickHopStep never buckets finer
-// than 15m past 24h, plus one slot for a `from` that is off the grid.
-const maxHopTimelineBuckets = 7*24*60/15 + 1
+// maxHopTimelineBuckets is the widest grid /hops/timeline can ask for, and
+// storage owns it because the step ladder there is what has to fit inside it.
+const maxHopTimelineBuckets = storage.MaxHopGridSlots
 
 // maxHopTimelineRows is that grid's whole product, and the timeline's ceiling:
-// one probe origin per request, one row per (slot, ttl). A bucketed read
-// cannot reach it — the product is the ceiling of a schema-legal result, not
-// an estimate of a typical one. Neither can a raw read: probe walks one TTL
-// per 50ms and the scheduler runs one cycle per (source, target) at a time, so
-// the 2h raw tier holds at most 144,000 of one source's rows.
+// one probe origin per request, one row per (slot, ttl). No tier can reach it,
+// because every tier buckets — the product is the ceiling of a schema-legal
+// result rather than an estimate of a typical one.
 const maxHopTimelineRows = maxHopTimelineBuckets * maxHopTTLs
 
 // hopRowCap is maxHopRows and hopTimelineRowCap is maxHopTimelineRows, held
@@ -607,10 +604,9 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 	return storage.HopsResult{Hops: hops}, nil
 }
 
-// queryHopsGrid reads the heatmap's grid: one row per (slot, ttl) for one
-// probe origin, where a slot is a bucket when step > 0 and a single cycle
-// otherwise. Both dimensions and the origin are bounded, which is what makes
-// maxHopTimelineRows a ceiling that can be derived rather than guessed.
+// queryHopsGrid reads the heatmap's grid: one row per (bucket, ttl) for one
+// probe origin. Both dimensions and the origin are bounded, which is what
+// makes maxHopTimelineRows a ceiling that can be derived rather than guessed.
 //
 // Responders inside a slot fold into the row of the cycle that lost most —
 // the row the heatmap already picked out of the per-responder rows and drew,
@@ -638,10 +634,12 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 // on a responder that is not the slot's worst does not reach the timeline;
 // /hops?at= still carries every responder's own.
 func (r *Reader) queryHopsGrid(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
-	slot := "timestamp"
-	if step > 0 {
-		slot = fmt.Sprintf("toStartOfInterval(timestamp, INTERVAL %d SECOND)", int(step.Seconds()))
+	// Refused rather than served raw: a slot per cycle puts the producer's
+	// cycle rate back in the row count, which nothing bounds.
+	if step <= 0 {
+		return nil, fmt.Errorf("query hops grid: step %s is not a grid", step)
 	}
+	slot := fmt.Sprintf("toStartOfInterval(timestamp, INTERVAL %d SECOND)", int(step.Seconds()))
 	q := `
 SELECT ` + slot + ` AS bucket_ts,
        source                                              AS src,

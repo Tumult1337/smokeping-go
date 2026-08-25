@@ -1244,18 +1244,29 @@ func TestHopsTimelineEchoesResolvedStep(t *testing.T) {
 			doJSON(t, h, http.MethodGet,
 				"/api/v1/targets/core/gw/hops/timeline?source=master&from=-"+span.String(), &body)
 
-			want := int64(storage.PickHopStep(span) / time.Second)
+			want := int64(storage.PickHopStep(span, time.Minute) / time.Second)
 			if body.StepSec != want {
 				t.Fatalf("step_sec = %d, want %d for a %s window", body.StepSec, want, span)
 			}
+			if body.StepSec == 0 {
+				t.Fatalf("a %s window resolved to a raw grid, whose row count is the producer's cycle rate", span)
+			}
 		})
 	}
-	// The raw tier must report 0 rather than omitting the field, so the client
-	// can tell "no bucketing" from "server did not say".
+}
+
+// The grid is never finer than the probe interval: an empty slot renders as a
+// gap in the heatmap, which reads as a probe that stopped rather than as a
+// column the cadence could not fill. newTestServer configures a 1m interval,
+// well above the ladder's own floor for a 1h window.
+func TestHopsTimelineStepIsNeverFinerThanTheInterval(t *testing.T) {
 	h := newTestServer(t, withReader(&stubReader{}))
-	_, raw := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops/timeline?source=master&from=-1h")
-	if !strings.Contains(string(raw), `"step_sec":0`) {
-		t.Fatalf("raw tier must serialise step_sec:0 explicitly, got %s", raw)
+	var body struct {
+		StepSec int64 `json:"step_sec"`
+	}
+	doJSON(t, h, http.MethodGet, "/api/v1/targets/core/gw/hops/timeline?source=master&from=-1h", &body)
+	if body.StepSec != int64(time.Minute/time.Second) {
+		t.Fatalf("step_sec = %d, want the 60s probe interval", body.StepSec)
 	}
 }
 

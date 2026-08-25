@@ -261,7 +261,9 @@ loss.
 `from` / `to` accept RFC3339, unix seconds, or relative durations like `-24h`.
 The bucket width on `/cycles` and `/hops/timeline` is picked server-side from
 the window. Cycles ladder: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6h,
->180d 1d. Hops ladder: ≤2h raw, ≤24h 5m, >24h 15m.
+>180d 1d. Hops ladder: ≤2h 11s, ≤24h 5m, >24h 15m, and never finer than the
+configured probe interval. The hop grid has no raw tier: a slot per cycle makes
+the response size the probe's cycle rate, which nothing bounds.
 Cycles also accepts a back-compat `step=raw|1h|1d` override.
 
 The endpoints that return unbucketed rows reject windows wider than their
@@ -279,9 +281,9 @@ window or add `source=` and the same view fits.
 All endpoints accept `source=<name>` to filter by probe origin in master/slave
 deployments. `/cycles` and `/hops/timeline` echo the resolved `from`/`to` in
 the response so the UI can pin its x-axis exactly to what the server returned.
-`/hops/timeline` also echoes `step_sec`, the bucket width it picked (0 on the
-raw tier), so a client can size one bucket without inferring it from row
-spacing — which is unmeasurable when a window contains a single bucket.
+`/hops/timeline` also echoes `step_sec`, the bucket width it picked — always
+positive — so a client can size one bucket without inferring it from row
+spacing, which is unmeasurable when a window contains a single bucket.
 
 `/hops` returns `target_loss` alongside `hops`: one `{Source, Time, Sent,
 LossCount, LossPct}` per source, taken from the cycle those hop rows came from.
