@@ -419,7 +419,12 @@ want a target probed only from that location.
 
 Slaves never touch ClickHouse; they buffer up to 600 cycles in memory
 if the master goes away (drop-oldest on overflow) and re-register once
-it comes back. A 401 from the master on any cluster endpoint will exit
+it comes back — a restarted master forgets its registry, so that
+re-registration is what resumes ingest. It exists only in binaries from
+the release described in
+[`migrate-cluster-ingest-bounds.md`](migrate-cluster-ingest-bounds.md);
+an older slave stays refused until it is restarted, by which point its
+buffer has wrapped. A 401 from the master on any cluster endpoint will exit
 the slave with a non-zero status — rotate the token on both sides to
 recover.
 

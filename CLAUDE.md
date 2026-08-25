@@ -356,10 +356,16 @@ Key points a reader can't derive from a single file:
   This is a cardinality and data-integrity bound, **not** authentication:
   the cluster token is shared, so any registered slave can still claim
   any other registered slave's name. That is accepted, not overlooked.
-  A slave that gets 403 re-registers and requeues the batch rather than
-  dropping it — registration is otherwise attempted only at boot, so
-  under `cluster.pull_every` `"0"` a master restart would otherwise
-  refuse that slave for the life of its process.
+  A slave **running this binary or newer** gets 403, re-registers and
+  requeues the batch rather than dropping it; registration is otherwise
+  attempted only at boot, so under `cluster.pull_every` `"0"` — where no
+  `/config` heartbeat exists either — that path is the only thing that
+  recovers a slave after a master restart, and
+  `slave.TestSlaveRecoversFromMasterRestartWithoutConfigPull` drives that
+  exact combination end to end. A slave predating it never recovers on its
+  own and must be restarted, which is why
+  `docs/migrate-cluster-ingest-bounds.md` makes the slave upgrade
+  mandatory rather than engineering a compatibility path for it.
 
 - **Ingest bounds.** `cluster.CycleBatch.Validate` is the trust boundary
   for everything a slave puts in a batch; before it the only limit on a
