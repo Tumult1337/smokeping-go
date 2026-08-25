@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
 	"github.com/tumult/gosmokeping/internal/slavehealth"
@@ -93,7 +94,10 @@ type alertState struct {
 	// ahead holds, oldest first, the timestamps accepted while they were ahead
 	// of the master's clock. Once the clock passes one, no ordering mark
 	// separates its redelivery from a genuine cycle of the same age, so the
-	// stamps are matched exactly until pastCycle rises past them.
+	// stamps are matched exactly until pastCycle rises past them. Ordering the
+	// ahead arm against lastCycle costs every genuine cycle stamped between the
+	// master's clock and an accepted forward-dated one: those are skipped while
+	// they are still ahead, whatever their distance from it.
 	ahead []int64
 }
 
@@ -570,16 +574,30 @@ func alertFreshness(interval time.Duration) time.Duration {
 	return max(stalenessWindow(interval), config.MaxFutureSkew)
 }
 
+// aheadCeiling is the hard ceiling on that count whatever the interval, since
+// config bounds no interval from below and the derivation alone reaches ~6e11
+// entries at a 1ns schedule. An entry exists to recognise a redelivery, the
+// redelivery unit is one batch, and master.cycleDedup already holds
+// cluster.MaxCyclesPerBatch identities per source across every target that
+// source reports — so past this depth the window upstream of this one has
+// rolled too and a longer slice here catches nothing it would not have caught
+// first. 1024 int64 is 8 KiB per (target, source), reached only by a source
+// whose clock runs ahead.
+const aheadCeiling = int64(cluster.MaxCyclesPerBatch)
+
 // aheadCap bounds how many timestamps one source's state remembers as having
 // arrived ahead of the master's clock. An entry is consulted only while a
 // cycle carrying it could still be evaluated at all, so it lives for the skew
 // ingest accepts plus one freshness window, over which an honest producer
-// emits one cycle per interval per target.
+// emits one cycle per interval per target — capped at aheadCeiling, which is
+// what keeps the derivation from turning an interval nothing bounds into an
+// allocation nothing bounds.
 func aheadCap(interval time.Duration) int {
 	if interval <= 0 {
 		interval = time.Minute
 	}
-	return int((config.MaxFutureSkew+alertFreshness(interval))/interval) + 1
+	derived := int64((config.MaxFutureSkew+alertFreshness(interval))/interval) + 1
+	return int(min(derived, aheadCeiling))
 }
 
 // stalenessWindow is how long a source's last cycle stays counted, measured

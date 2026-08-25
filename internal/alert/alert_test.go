@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -2244,5 +2245,127 @@ func TestAcceptedFutureStampsAreDroppedOnceTheMarkPassesThem(t *testing.T) {
 	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 0))
 	if got := len(ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"].ahead); got != 0 {
 		t.Errorf("still tracking %d stamps the ordering mark has passed", got)
+	}
+}
+
+// newTestEvaluatorInterval is newTestEvaluatorClock with the probe interval
+// under test, which is what both aheadCap and the staleness window derive from.
+func newTestEvaluatorInterval(t *testing.T, interval time.Duration, a config.Alert) (*Evaluator, *recordingDispatcher, *fakeClock) {
+	t.Helper()
+	cfg := &config.Config{
+		Interval: interval,
+		Pings:    20,
+		Alerts:   map[string]config.Alert{"quorum-test": a},
+		Actions:  map[string]config.Action{"log": {Type: "log"}},
+	}
+	store := config.NewStore("", cfg)
+	disp := &recordingDispatcher{}
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, disp)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	return ev, disp, pinClock(ev, testBase)
+}
+
+// The cap derives from the interval and config bounds no interval from below,
+// so the derivation alone has no ceiling: a 1ns schedule asks for ~6e11 int64,
+// which slices.Contains and slices.DeleteFunc then walk on every cycle. A
+// bound with no upper limit is not a resource bound.
+func TestAheadCapHasAPracticalCeiling(t *testing.T) {
+	for _, interval := range []time.Duration{
+		time.Nanosecond, time.Microsecond, time.Millisecond, 100 * time.Millisecond,
+		time.Second, 20 * time.Second, time.Minute, config.MaxProbeInterval,
+	} {
+		got := aheadCap(interval)
+		if got < 1 {
+			t.Errorf("aheadCap(%s) = %d, which remembers nothing", interval, got)
+		}
+		if int64(got) > int64(cluster.MaxCyclesPerBatch) {
+			t.Errorf("aheadCap(%s) = %d, past the %d identities one redelivery can carry",
+				interval, got, cluster.MaxCyclesPerBatch)
+		}
+	}
+}
+
+// The ceiling must not become a bound below the producer: every interval whose
+// honest emission fits under it keeps the derived depth.
+func TestAheadCapKeepsTheDerivationBelowTheCeiling(t *testing.T) {
+	cases := []struct {
+		interval time.Duration
+		want     int
+	}{
+		{time.Minute, 11},
+		{20 * time.Second, 31},
+		{time.Second, 601},
+		{config.MaxProbeInterval, 4},
+	}
+	for _, c := range cases {
+		if got := aheadCap(c.interval); got != c.want {
+			t.Errorf("aheadCap(%s) = %d, want %d", c.interval, got, c.want)
+		}
+	}
+}
+
+// The ceiling has to reach the state, not just the helper: the evaluator reads
+// the limit once per cycle off the live config's interval.
+func TestFutureStampsStayBoundedAtASubSecondInterval(t *testing.T) {
+	ev, _, clk := newTestEvaluatorInterval(t, time.Millisecond, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	for i := range cluster.MaxCyclesPerBatch + 64 {
+		bad := lossyCycle("tokyo-1", 100)
+		bad.Time = clk.t.Add(time.Minute + time.Duration(i)*time.Nanosecond)
+		ev.OnCycle(ctx, bad)
+	}
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	for _, bySource := range ev.states {
+		for source, st := range bySource {
+			if len(st.ahead) > cluster.MaxCyclesPerBatch {
+				t.Errorf("%s tracks %d stamps ahead of the clock, past the %d ceiling",
+					source, len(st.ahead), cluster.MaxCyclesPerBatch)
+			}
+		}
+	}
+}
+
+// The ceiling must still cover a redelivery: a source whose clock runs ahead
+// requeues a whole batch, and cluster.MaxCyclesPerBatch of them is the largest
+// one the master accepts. Below that the ceiling would be a bound under its
+// own producer, applying the front of every requeued batch twice.
+func TestFullForwardDatedBatchIsRecognisedOnRedelivery(t *testing.T) {
+	ev, _, clk := newTestEvaluatorInterval(t, 100*time.Millisecond, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 2, Actions: []string{"log"},
+	})
+	ctx := context.Background()
+
+	batch := make([]scheduler.Cycle, cluster.MaxCyclesPerBatch)
+	for i := range batch {
+		c := lossyCycle("tokyo-1", 100)
+		c.Time = clk.t.Add(time.Minute + time.Duration(i)*time.Millisecond)
+		batch[i] = c
+	}
+	for _, c := range batch {
+		ev.OnCycle(ctx, c)
+	}
+
+	// Past every stamp in the batch, so the ordering arm no longer answers and
+	// the exact set is the only thing left recognising the redelivery.
+	clk.advance(2 * time.Minute)
+
+	hits := func() int {
+		ev.mu.Lock()
+		defer ev.mu.Unlock()
+		return ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"].consecHits
+	}
+	before := hits()
+	for _, c := range batch {
+		ev.OnCycle(ctx, c)
+	}
+	if after := hits(); after != before {
+		t.Errorf("redelivered batch drove consecHits %d -> %d; the ceiling is under one batch", before, after)
 	}
 }

@@ -869,7 +869,8 @@ Key points a reader can't derive from a single file:
   health-endpoint field: an API field needs a read site to be worth declaring,
   and the log is what an operator's alerting-on-alerting consumes.
 
-  **A cycle is evaluated once, in order.** `alertState.seenCycle` /
+  **A cycle is evaluated once while its identity is still held, in
+  order.** `alertState.seenCycle` /
   `lastCycle` hold whether and when a cycle was last accepted per source —
   two fields rather than one because `lastCycle`'s zero value would
   otherwise mean *admit*, and any producer stamping nothing would disable
@@ -917,9 +918,28 @@ Key points a reader can't derive from a single file:
   set at all, so the slice stays nil for every source whose clock is not
   ahead. It is bounded by `aheadCap` — the skew plus one `alertFreshness`
   window, over which an honest producer emits one cycle per interval per
-  target, so 11 entries at the 1m interval and 31 at 20s — and evicts
-  oldest-first, failing open to the pre-guard double-apply rather than to
-  silence, like both of `cycleDedup`'s own eviction paths.
+  target, so 11 entries at the 1m interval and 31 at 20s — floored at
+  `min(derived, aheadCeiling)`, because config bounds no interval from below
+  and the derivation alone asks for ~6e11 int64 at a 1ns schedule, which
+  `slices.Contains` and `slices.DeleteFunc` then walk per cycle.
+  `aheadCeiling` is `cluster.MaxCyclesPerBatch` (1024, 8 KiB of int64 per
+  target+source): an entry exists to recognise a redelivery, the redelivery
+  unit is one batch, and `master.cycleDedup` holds that many identities per
+  source *across every target it reports* — so past this depth the window
+  upstream has rolled too and a longer slice catches nothing it would not
+  have caught first.
+
+  **Two residuals, both deliberate.** Eviction is oldest-first and fails open
+  to the pre-guard double-apply rather than to silence, like both of
+  `cycleDedup`'s own eviction paths — so a stamp evicted from `ahead` while
+  still alert-fresh, and also rolled out of the 1024 identities of ingest
+  dedup, is applied a second time when the master's clock passes it. Reaching
+  that takes a token holder posting more forward-dated cycles than either
+  window holds; closing it means remembering identities without a bound,
+  which is the defect and not the fix. And ordering the ahead arm against
+  `lastCycle` skips every *genuine* cycle stamped between the master's clock
+  and an accepted forward-dated one, for as long as those stamps are
+  themselves still ahead — not merely one landing on the same nanosecond.
 
   A quorum alert also has a warm-up: it won't dispatch FIRING
   until either 2 distinct sources have reported for that target+alert or
