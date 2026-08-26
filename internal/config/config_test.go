@@ -541,6 +541,29 @@ func TestValidateRefusesUnschedulablePingCount(t *testing.T) {
 		}
 	})
 
+	t.Run("a cluster master is bound with no icmp probe defined", func(t *testing.T) {
+		// 20 pings at 4s derives a 10ms budget — fine to store standalone,
+		// unbuildable the moment the health mesh injects its icmp probe.
+		cfg := scheduleConfig(4*time.Second, 20)
+		cfg.Probes = map[string]Probe{"web": {Type: "tcp", Timeout: 2 * time.Second}}
+		cfg.Cluster = &Cluster{Token: "secret"}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("a cluster master's schedule gains the slave-health icmp probe, so this must be refused")
+		}
+		if !strings.Contains(err.Error(), "icmp schedule") {
+			t.Errorf("error %q does not name the icmp schedule", err)
+		}
+	})
+
+	t.Run("the same schedule stays legal standalone", func(t *testing.T) {
+		cfg := scheduleConfig(4*time.Second, 20)
+		cfg.Probes = map[string]Probe{"web": {Type: "tcp", Timeout: 2 * time.Second}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("no icmp probe can ever be injected without a cluster, so this must validate: %v", err)
+		}
+	})
+
 	t.Run("Load refuses it too", func(t *testing.T) {
 		body := strings.NewReplacer(`"interval": "30s"`, `"interval": "20s"`, `"pings": 10`, `"pings": 120`).Replace(minimalConfig)
 		if _, err := Load(writeTmp(t, body)); err == nil {

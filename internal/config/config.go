@@ -612,7 +612,11 @@ func (c *Config) Validate() error {
 	if err := ValidatePingCount(c.Pings); err != nil {
 		return err
 	}
-	if HasICMPProbe(c.Probes) {
+	// A cluster master's probe map gains slavehealth's icmp probe at
+	// scheduler-build time, so its schedule is bound whether or not the stored
+	// map defines one — gating on the stored map alone let a validated config
+	// become unbuildable fleet-wide at the first slave registration.
+	if HasICMPProbe(c.Probes) || (c.Cluster != nil && c.Cluster.Token != "") {
 		if _, err := ICMPPingBudget(c.Interval, c.Pings); err != nil {
 			return fmt.Errorf("icmp schedule: %w", err)
 		}
