@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"math"
@@ -470,5 +471,59 @@ func TestOnCycleSkipsNoMeasurementCycle(t *testing.T) {
 	w.OnCycle(context.Background(), cy)
 	if n := len(w.chans[tableProbeCycle]); n != 1 {
 		t.Fatalf("queued %d cycle rows for a measured cycle, want 1", n)
+	}
+}
+
+// failingConn refuses every batch, the shape of a ClickHouse that is up
+// enough to answer but not to accept — a restart, a read-only replica.
+type failingConn struct {
+	driver.Conn
+}
+
+func (failingConn) PrepareBatch(context.Context, string, ...driver.PrepareBatchOption) (driver.Batch, error) {
+	return nil, errors.New("clickhouse is down")
+}
+
+// While a flush is failing, runTable must stop draining its channel. pending's
+// cap is a flat maxRows×flushRetainFactor for all four tables, so draining
+// through it discards writerChanCap's per-table sizing exactly when it is
+// needed — at the deployed 122-target/20s shape that left probe_hop with ~33
+// seconds of backlog against probe_cycle's ~11 minutes, the imbalance the
+// per-table sizing exists to remove.
+func TestFailingFlushLeavesRowsInThePerTableBuffer(t *testing.T) {
+	const bufSize = 64
+	w := &Writer{conn: failingConn{}, log: slog.New(slog.DiscardHandler)}
+	for i := range w.chans {
+		w.chans[i] = make(chan any, bufSize)
+	}
+	const maxRows = 4
+	ctx, cancel := context.WithCancel(context.Background())
+	w.wg.Add(1)
+	go w.runTable(ctx, tableProbeCycle, maxRows, 20*time.Millisecond)
+
+	// Enough rows to outrun both maxRows and the retain cap several times.
+	for i := range bufSize {
+		w.offer(tableProbeCycle, testCycle(time.Now().Add(time.Duration(i)*time.Second)))
+	}
+
+	// Settle: several ticker periods, so the loop has failed a flush and had
+	// every chance to keep draining if it were going to.
+	deadline := time.Now().Add(5 * time.Second)
+	held, stable := len(w.chans[tableProbeCycle]), 0
+	for time.Now().Before(deadline) && stable < 20 {
+		time.Sleep(5 * time.Millisecond)
+		if n := len(w.chans[tableProbeCycle]); n == held {
+			stable++
+		} else {
+			held, stable = n, 0
+		}
+	}
+	cancel()
+	w.wg.Wait()
+
+	// The loop may take up to one pending batch before the first flush fails.
+	if want := bufSize - 2*maxRows; held < want {
+		t.Fatalf("the channel holds %d of %d rows, want at least %d — the backlog drained into pending, whose cap is the same for all four tables, so writerChanCap's per-table sizing is bypassed exactly when it matters",
+			held, bufSize, want)
 	}
 }

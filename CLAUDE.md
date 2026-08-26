@@ -121,7 +121,19 @@ Key points a reader can't derive from a single file:
   also refill the freed slot before the offered row reaches it, losing both
   and counting both drops — the incoming row is preferred over the oldest,
   not guaranteed a place; serialising the fast path costs more than the one
-  row of recency it would buy. `flushRetainFactor` is the same choice one layer up,
+  row of recency it would buy. `offer` retries the non-blocking send once
+  before evicting, which takes a slot a flusher freed in between rather
+  than spending a queued row and counting a drop that did not happen; the
+  window itself cannot close without that lock.
+  **`runTable` stops draining while a flush is failing** (a nil `src` in
+  the select), because `pending`'s cap is a flat
+  `maxRows × flushRetainFactor` for all four tables: draining through it
+  discarded the per-table sizing at exactly the moment it exists for, and
+  at the deployed shape left `probe_hop` with ~33 seconds of backlog
+  against `probe_cycle`'s ~11 minutes — worse than the imbalance the
+  sizing was added to remove. The channel cap only ever governed the case
+  where ClickHouse accepts the connection and hangs; now it governs a
+  refused one too. `flushRetainFactor` is the same choice one layer up,
   retaining a failed batch for the next tick and capping the backlog at
   `maxRows × 4` with the oldest overflow dropped and counted;
   `slave.PushSink`'s ring is the third.

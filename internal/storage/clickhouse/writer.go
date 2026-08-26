@@ -241,6 +241,16 @@ func (w *Writer) offer(table int, row any) {
 		return
 	default:
 	}
+	// A flusher may have drained a slot since that attempt; take it rather
+	// than evicting a row that no longer needs to go. The window cannot be
+	// closed without serialising the fast path, but this removes the common
+	// case, where the eviction cost a legitimately queued row and counted a
+	// drop that did not happen.
+	select {
+	case w.chans[table] <- row:
+		return
+	default:
+	}
 	select {
 	case <-w.chans[table]:
 		w.recordDrop(table)
@@ -287,10 +297,10 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 	defer ticker.Stop()
 
 	pending := make([]any, 0, maxRows)
-	// flushFailing is set while the last flush errored. It gates the
-	// size-triggered flush below so a sustained outage retries only on the
-	// ticker tick, not on every incoming row (which would fire a blocking dial
-	// per row once pending stays ≥ maxRows — a retry storm).
+	// flushFailing is set while the last flush errored. It stops this loop
+	// draining the channel and gates the size-triggered flush, so a sustained
+	// outage retries only on the ticker tick rather than firing a blocking
+	// dial per row once pending stays ≥ maxRows.
 	flushFailing := false
 	flush := func(flushCtx context.Context) {
 		if len(pending) == 0 {
@@ -328,6 +338,18 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 		pending = pending[:0]
 	}
 	for {
+		// While a flush is failing this loop stops draining. pending's cap is
+		// a flat maxRows×flushRetainFactor for all four tables, so draining
+		// through it discards writerChanCap's per-table sizing exactly when it
+		// is needed — at the deployed shape that left probe_hop with 33
+		// seconds of backlog against probe_cycle's 11 minutes, the imbalance
+		// the sizing exists to remove. A nil channel is never ready, so rows
+		// stay in the per-table buffer and offer's drop-oldest bounds them
+		// there. The ticker always fires, so the loop cannot wedge.
+		src := w.chans[table]
+		if flushFailing {
+			src = nil
+		}
 		select {
 		case <-ctx.Done():
 			// Drain the channel and then flush with a fresh context.
@@ -347,11 +369,11 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 			flush(drainCtx)
 			cancel()
 			return
-		case row := <-w.chans[table]:
+		case row := <-src:
 			pending = append(pending, row)
-			// While a flush is failing, defer to the ticker for retries so we
-			// don't dial ClickHouse on every row during an outage.
-			if len(pending) >= maxRows && !flushFailing {
+			// src is nil while a flush is failing, so this cannot fire a
+			// blocking dial per row during an outage.
+			if len(pending) >= maxRows {
 				flush(ctx)
 			}
 		case <-ticker.C:
