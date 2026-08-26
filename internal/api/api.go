@@ -467,10 +467,16 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 	var err error
 	filter := storage.QueryFilter{Source: r.URL.Query().Get("source")}
 	if atStr := r.URL.Query().Get("at"); atStr != "" {
-		at, perr := parseTimeParam(atStr, time.Time{}, time.Now())
+		at, rel, perr := parseTimeParam(atStr, time.Time{}, time.Now())
 		if perr != nil {
 			writeErr(w, http.StatusBadRequest, "invalid at: "+perr.Error())
 			return
+		}
+		// A relative `at` names no particular instant, so resolving it against
+		// a fresh clock would mint a cache key per request; an explicit stamp
+		// keeps full precision because it is what a heatmap click carries.
+		if rel {
+			at = storage.CoalesceHopsAt(at)
 		}
 		res, err = s.reader.QueryHopsAt(r.Context(), ref, at, 30*time.Minute, filter)
 	} else {
@@ -801,12 +807,12 @@ func (s *Server) resolveTarget(w http.ResponseWriter, r *http.Request) (config.T
 func parseRange(w http.ResponseWriter, r *http.Request, defaultSpan time.Duration) (time.Time, time.Time, bool) {
 	q := r.URL.Query()
 	now := time.Now()
-	from, err := parseTimeParam(q.Get("from"), now.Add(-defaultSpan), now)
+	from, _, err := parseTimeParam(q.Get("from"), now.Add(-defaultSpan), now)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid from: "+err.Error())
 		return time.Time{}, time.Time{}, false
 	}
-	to, err := parseTimeParam(q.Get("to"), now, now)
+	to, _, err := parseTimeParam(q.Get("to"), now, now)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid to: "+err.Error())
 		return time.Time{}, time.Time{}, false
@@ -823,21 +829,24 @@ func parseRange(w http.ResponseWriter, r *http.Request, defaultSpan time.Duratio
 // is bounded to storage's addressable range before the caller can convert it:
 // a finite unix second past that range fits an int64 and then wraps in
 // UnixMilli, putting the instant storage sees in the opposite epoch direction.
-func parseTimeParam(s string, def, now time.Time) (time.Time, error) {
-	t, err := resolveTimeParam(s, def, now)
+func parseTimeParam(s string, def, now time.Time) (time.Time, bool, error) {
+	t, rel, err := resolveTimeParam(s, def, now)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, false, err
 	}
 	if !storage.ValidQueryTime(t) {
-		return time.Time{}, fmt.Errorf("timestamp %s is outside the storable range %s..%s",
+		return time.Time{}, false, fmt.Errorf("timestamp %s is outside the storable range %s..%s",
 			t.UTC().Format(time.RFC3339), storage.MinQueryTime.Format("2006"), storage.MaxQueryTime.Format("2006"))
 	}
-	return t, nil
+	return t, rel, nil
 }
 
-func resolveTimeParam(s string, def, now time.Time) (time.Time, error) {
+// The bool reports that the instant was derived from `now` rather than named
+// by the caller, which is what lets a pinned read coalesce a repeated relative
+// value onto one cache entry without blunting an explicitly named stamp.
+func resolveTimeParam(s string, def, now time.Time) (time.Time, bool, error) {
 	if s == "" {
-		return def, nil
+		return def, false, nil
 	}
 	// A whole decimal integer is unix seconds whatever its sign; a leading
 	// sign only starts a duration when something follows the digits, which is
@@ -845,19 +854,19 @@ func resolveTimeParam(s string, def, now time.Time) (time.Time, error) {
 	// signed unix second a 400, and reading the unsigned form as an instant
 	// while reading "-0" as an offset would be two grammars for one syntax.
 	if ts, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return time.Unix(ts, 0), nil
+		return time.Unix(ts, 0), false, nil
 	}
 	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "+") {
 		d, err := parseRelativeDuration(s)
 		if err != nil {
-			return time.Time{}, err
+			return time.Time{}, false, err
 		}
-		return now.Add(d), nil
+		return now.Add(d), true, nil
 	}
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
+		return t, false, nil
 	}
-	return time.Time{}, fmt.Errorf("%q is not RFC3339, unix seconds, or a duration like -1h", s)
+	return time.Time{}, false, fmt.Errorf("%q is not RFC3339, unix seconds, or a duration like -1h", s)
 }
 
 // Upper bounds for the "d"/"w" units below. time.Duration is int64 nanoseconds,

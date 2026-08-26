@@ -1956,7 +1956,13 @@ func TestSignedDurationsStayRelative(t *testing.T) {
 			if code != http.StatusOK {
 				t.Fatalf("status=%d body=%s, want 200", code, body)
 			}
-			if drift := reader.lastAt.Sub(before.Add(want)); drift < 0 || drift > 5*time.Second {
+			// A relative `at` is coalesced onto the pinned read's cache
+			// quantum, so it floors backwards by up to one quantum — while a
+			// unix-second misreading would land decades away.
+			if got := reader.lastAt; !got.Equal(storage.CoalesceHopsAt(got)) {
+				t.Fatalf("at=%s resolved to %s, which is not on the cache quantum", raw, got.UTC())
+			}
+			if drift := reader.lastAt.Sub(before.Add(want)); drift < -time.Minute || drift > 5*time.Second {
 				t.Fatalf("at=%s resolved to %s, want ~%s (drift %s)", raw, reader.lastAt.UTC(), before.Add(want).UTC(), drift)
 			}
 		})
