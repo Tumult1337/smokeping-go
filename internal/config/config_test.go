@@ -364,6 +364,58 @@ func minimalValidConfig(t *testing.T) *Config {
 	}
 }
 
+// A negative retention reaches Bootstrap's ALTER TABLE ... MODIFY TTL as a
+// TTL in the past and expires the table on the next start — fail-open on a
+// data-destroying knob, so Validate refuses it instead of defaulting.
+func TestValidateBoundsRetentionDays(t *testing.T) {
+	fields := []struct {
+		name string
+		set  func(*Config, int)
+	}{
+		{"cycle_days", func(c *Config, v int) { c.Storage.ClickHouse.Retention.CycleDays = v }},
+		{"rtt_days", func(c *Config, v int) { c.Storage.ClickHouse.Retention.RTTDays = v }},
+		{"hop_days", func(c *Config, v int) { c.Storage.ClickHouse.Retention.HopDays = v }},
+		{"http_days", func(c *Config, v int) { c.Storage.ClickHouse.Retention.HTTPDays = v }},
+	}
+	for _, f := range fields {
+		t.Run(f.name+" negative", func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			f.set(cfg, -1)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("a negative retention is a TTL in the past and must be refused")
+			}
+			if !strings.Contains(err.Error(), f.name) {
+				t.Errorf("error %q does not name the field %q", err, f.name)
+			}
+		})
+		t.Run(f.name+" past the DateTime span", func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			f.set(cfg, MaxRetentionDays+1)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("a retention past the UInt32 DateTime span must be refused")
+			}
+		})
+		t.Run(f.name+" at the ceiling", func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			f.set(cfg, MaxRetentionDays)
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("the ceiling itself is representable and must validate: %v", err)
+			}
+		})
+		t.Run(f.name+" zero still defaults", func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			r := cfg.Storage.ClickHouse.Retention
+			if r.CycleDays != 365 || r.RTTDays != 14 || r.HopDays != 90 || r.HTTPDays != 14 {
+				t.Fatalf("defaults changed: %+v", r)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsReservedGroup(t *testing.T) {
 	c := minimalValidConfig(t)
 	c.Targets = append(c.Targets, Group{

@@ -100,3 +100,21 @@ with:
 > ICMP/MTR via `probe.resolveIPAddr("ip"|"ip4"|"ip6")`, `net.ResolveIPAddr`'s
 > selection with the context honored (shared `traceHops` takes family as a
 > parameter);
+
+## Retention bullet (A7)
+
+Replace:
+
+> per-table TTL set at bootstrap from
+> `storage.clickhouse.retention.{cycle,rtt,hop,http}_days` (defaults
+> 365/14/90/14).
+
+with:
+
+> per-table TTL set at bootstrap from
+> `storage.clickhouse.retention.{cycle,rtt,hop,http}_days` (defaults
+> 365/14/90/14; 0 defaults, anything else must be inside
+> `[1, config.MaxRetentionDays]` — 49710, the full span of ClickHouse's
+> UInt32-second DateTime). A negative value used to pass straight into the
+> `MODIFY TTL` Bootstrap re-emits on every start, a TTL in the past that
+> expires the whole table.

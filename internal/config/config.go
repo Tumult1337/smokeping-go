@@ -487,6 +487,13 @@ const (
 	MaxPingsPerCycle = 1<<16 - icmpTraceSeqReserve
 )
 
+// MaxRetentionDays bounds each storage.clickhouse.retention knob (days of
+// per-table TTL). Below 1 day the ALTER ... MODIFY TTL Bootstrap re-emits on
+// every start is a TTL already in the past, which expires the whole table;
+// the ceiling is the full span of ClickHouse's UInt32-second DateTime, past
+// which timestamp + INTERVAL n DAY is representable for no row at all.
+const MaxRetentionDays = math.MaxUint32 / (24 * 60 * 60)
+
 // MaxLabelLen bounds every identifier that becomes a ClickHouse
 // LowCardinality value — a group, a target name, a probe name, a cycle's
 // source. Config.Validate refuses a longer one so a config the master accepts
@@ -637,17 +644,23 @@ func (c *Config) Validate() error {
 	if ch.Username == "" {
 		ch.Username = "default"
 	}
-	if ch.Retention.CycleDays == 0 {
-		ch.Retention.CycleDays = 365
-	}
-	if ch.Retention.RTTDays == 0 {
-		ch.Retention.RTTDays = 14
-	}
-	if ch.Retention.HopDays == 0 {
-		ch.Retention.HopDays = 90
-	}
-	if ch.Retention.HTTPDays == 0 {
-		ch.Retention.HTTPDays = 14
+	for _, r := range []struct {
+		name string
+		days *int
+		def  int
+	}{
+		{"cycle_days", &ch.Retention.CycleDays, 365},
+		{"rtt_days", &ch.Retention.RTTDays, 14},
+		{"hop_days", &ch.Retention.HopDays, 90},
+		{"http_days", &ch.Retention.HTTPDays, 14},
+	} {
+		if *r.days == 0 {
+			*r.days = r.def
+			continue
+		}
+		if *r.days < 0 || *r.days > MaxRetentionDays {
+			return fmt.Errorf("storage.clickhouse.retention.%s %d is outside [1, %d]: Bootstrap re-emits it as MODIFY TTL on every start, and a TTL in the past expires the table", r.name, *r.days, MaxRetentionDays)
+		}
 	}
 	if ch.Batch.MaxRows == 0 {
 		ch.Batch.MaxRows = 1000
