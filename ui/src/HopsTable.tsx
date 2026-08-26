@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getHops, type HopPoint } from "./api";
+import { groupBySource } from "./mtrUtils";
 import { lossTextColor } from "./palette";
 
 interface Props {
@@ -93,34 +94,13 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
           key={g.source || "(unspecified)"}
           source={g.source}
           time={g.time}
-          rows={g.rows}
+          rows={g.hops}
           scale={sharedScale}
           showSourceHeading={groups.length > 1}
         />
       ))}
     </>
   );
-}
-
-interface HopsGroup {
-  source: string;
-  time: string;
-  rows: HopPoint[];
-}
-
-function groupBySource(hops: HopPoint[]): HopsGroup[] {
-  const order: string[] = [];
-  const byKey = new Map<string, HopsGroup>();
-  for (const h of hops) {
-    const existing = byKey.get(h.Source);
-    if (existing) {
-      existing.rows.push(h);
-    } else {
-      order.push(h.Source);
-      byKey.set(h.Source, { source: h.Source, time: h.Time, rows: [h] });
-    }
-  }
-  return order.map((s) => byKey.get(s)!);
 }
 
 export function HopsPath({

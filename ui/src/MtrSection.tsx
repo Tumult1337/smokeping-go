@@ -3,7 +3,7 @@ import { getHops, type CycleLoss, type HopPoint } from "./api";
 import { HopsPath } from "./HopsTable";
 import { HopsTable } from "./HopsTable";
 import { MtrHeatmap } from "./MtrHeatmap";
-import { countDistinct, useCollapsedSources } from "./mtrUtils";
+import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
 import { lossTextColor } from "./palette";
 
 interface Props {
@@ -318,29 +318,4 @@ function lossForSource(cycles: CycleLoss[] | null, source: string): number | nul
   const row = cycles.find((c) => (c.Source ?? "") === source);
   if (row == null || row.Sent <= 0) return null;
   return row.LossPct;
-}
-
-interface HopsGroup {
-  source: string;
-  time: string;
-  hops: HopPoint[];
-}
-
-function groupBySource(hops: HopPoint[]): HopsGroup[] {
-  const order: string[] = [];
-  const byKey = new Map<string, HopsGroup>();
-  for (const h of hops) {
-    // Coerce missing Source to "" so a pre-cluster (untagged) row doesn't
-    // key under undefined. Distinct from mtrUtils.groupBySource because
-    // this variant also carries the group's representative timestamp.
-    const s = h.Source ?? "";
-    const existing = byKey.get(s);
-    if (existing) {
-      existing.hops.push(h);
-    } else {
-      order.push(s);
-      byKey.set(s, { source: s, time: h.Time, hops: [h] });
-    }
-  }
-  return order.map((s) => byKey.get(s)!);
 }

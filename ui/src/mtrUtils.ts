@@ -9,6 +9,8 @@ export const COLLAPSED_SOURCES_KEY = "gosmokeping.collapsedHopSources";
 
 export interface HopsGroup {
   source: string;
+  // First row's timestamp — the representative the per-source headings show.
+  time: string;
   hops: HopPoint[];
 }
 
@@ -18,18 +20,18 @@ export interface HopsGroup {
 // a pre-cluster (untagged) write doesn't break grouping.
 export function groupBySource(hops: HopPoint[]): HopsGroup[] {
   const order: string[] = [];
-  const byKey = new Map<string, HopPoint[]>();
+  const byKey = new Map<string, HopsGroup>();
   for (const h of hops) {
     const s = h.Source ?? "";
     const existing = byKey.get(s);
     if (existing) {
-      existing.push(h);
+      existing.hops.push(h);
     } else {
       order.push(s);
-      byKey.set(s, [h]);
+      byKey.set(s, { source: s, time: h.Time, hops: [h] });
     }
   }
-  return order.map((s) => ({ source: s, hops: byKey.get(s)! }));
+  return order.map((s) => byKey.get(s)!);
 }
 
 // countDistinct returns the number of distinct hop indices in a group —
