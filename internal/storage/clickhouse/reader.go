@@ -20,6 +20,16 @@ import (
 // Reader implements storage.Reader against ClickHouse.
 type Reader struct {
 	conn driver.Conn
+	// logger is nil on the Readers tests construct directly; log() falls back
+	// so a diagnostic path can never be the thing that panics a read.
+	logger *slog.Logger
+}
+
+func (r *Reader) log() *slog.Logger {
+	if r.logger == nil {
+		return slog.Default()
+	}
+	return r.logger
 }
 
 // NewReader opens a connection. Caller must Close.
@@ -517,7 +527,7 @@ func (r *Reader) queryCycleCounters(ctx context.Context, ref config.TargetRef, h
 	// contract, so degrading the answer beats failing a path view whose rows
 	// are all present and correct.
 	if len(keys) > maxCycleCounterKeys {
-		slog.Warn("hop read exceeded its cycle-counter budget, target loss omitted for the excess",
+		r.log().Warn("hop read exceeded its cycle-counter budget, target loss omitted for the excess",
 			"target", ref.Target.Name, "group", ref.Group,
 			"sources", len(keys), "budget", maxCycleCounterKeys)
 		keys = keys[:maxCycleCounterKeys]
@@ -589,11 +599,10 @@ func cycleKeys(hops []storage.HopPoint) []storage.CycleCounters {
 	return out
 }
 
-// scanHopRows is shared by QueryLatestHops, QueryHopsAt, and the raw
-// path of QueryHopsTimeline (added in T15). Returns rows in the order
-// they came from the cursor. Raw rows are one cycle each, so MaxLossPct
-// is just a mirror of LossPct — set here so consumers can read the field
-// uniformly without branching on bucketed vs raw.
+// scanHopRows is shared by the pinned reads, QueryLatestHops and
+// QueryHopsAt; the hop timeline buckets at every tier and scans its own rows.
+// Returns them in cursor order, mirroring LossPct into MaxLossPct so a
+// consumer reads one field for a pinned cycle and a bucket alike.
 func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 	var out []storage.HopPoint
 	for rows.Next() {

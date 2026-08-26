@@ -54,6 +54,9 @@ func (p *DNS) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	// concern we leave to the OS).
 	ipNetwork := familyNetwork("ip", t.Family)
 
+	if err := ctx.Err(); err != nil {
+		return &Result{}, err
+	}
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
 	var lastErr error
 	for n := range count {

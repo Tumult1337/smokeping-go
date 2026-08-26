@@ -24,7 +24,7 @@ instead.
 | Resolution tiers | Pre-aggregated buckets `smokeping_raw` / `_5m` / `_1h` / `_1d` written by Flux tasks | Single raw `probe_cycle` table; tiering happens at query time via `toStartOfInterval` |
 | Retention | Per-bucket retention policy | Per-table TTL on the four `probe_*` tables, re-applied on every start |
 | Auth | `INFLUX_TOKEN`, org, buckets in env vars | `CH_ADDR` / `CH_DATABASE` / `CH_USERNAME` / `CH_PASSWORD` in env vars |
-| API query knob | `?resolution=auto\|raw\|5m\|1h\|1d` | `?step=raw\|1h\|1d` (back-compat override; auto-picked by default) |
+| API query knob | `?resolution=auto\|raw\|5m\|1h\|1d` | `?step=raw\|1h\|1d` (back-compat override, refused with `400` when finer than the ladder's tier for the window; auto-picked by default) |
 | Config block | `storage.backend = "influxv2"` + `storage.influxv2 { url, token, org, bucket_* }` | `storage.clickhouse { addr, database, username, password, retention, batch, cluster }` |
 | Cluster mode | n/a | `storage.clickhouse.cluster = "<name>"` → `ReplicatedMergeTree` on that CH cluster |
 | Deploy docs | `docker-compose.influxv2.yml` / `docker-compose.influxv3.yml` (deleted) | `docker-compose.yml` (host-CH) + `docs/docker-master.md` (CH-in-stack) |

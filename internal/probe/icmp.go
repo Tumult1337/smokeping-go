@@ -174,6 +174,9 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	// Each cycle uses a fresh id/base-seq to avoid cross-cycle reply confusion.
 	id := int(rand.Uint32() & 0xffff)
 	baseSeq := i.echoBaseSeq(count)
+	if err := ctx.Err(); err != nil {
+		return &Result{}, err
+	}
 	// Sent counts actual attempts, not the requested count, so that a
 	// context-cancelled mid-cycle (shutdown, reload) reports LossPct truthfully
 	// instead of e.g. 11/20 = 55% when in reality 11 of 11 attempts failed.

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
@@ -494,4 +495,61 @@ func peerNames(peers []slavehealth.Peer) []string {
 		out = append(out, p.Name)
 	}
 	return out
+}
+
+// A registered slave whose header carries an oversized field is still a live
+// slave: handleCycles ingests its batch and discards Touch's error, so the
+// only thing the refusal changed was that LastSeen stopped advancing. Sweep
+// then dropped it after 24h — with its dedup window — and its next push 403s,
+// which now exits the process. The bytes are still refused; the liveness is
+// not. A name the registry has never seen stays refused outright, because the
+// entry is what makes the name a legal ingest label.
+func TestOversizedHeaderDoesNotAgeOutALiveSlave(t *testing.T) {
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	long := strings.Repeat("x", maxSlaveFieldLen+1)
+
+	if err := r.Touch("newcomer", "v1", "10.0.0.1:1", long); !errors.Is(err, errSlaveFieldTooLong) {
+		t.Fatalf("new name with an oversized advertise: %v, want errSlaveFieldTooLong", err)
+	}
+	if r.Has("newcomer") {
+		t.Fatal("a malformed request created a registry entry, minting a legal ingest label")
+	}
+
+	if err := r.Touch("tokyo-1", "v1", "10.0.0.2:1", "10.0.0.2"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	before := r.snapshotLastSeen(t, "tokyo-1")
+
+	if err := r.Touch("tokyo-1", "v1", "10.0.0.2:1", long); !errors.Is(err, errSlaveFieldTooLong) {
+		t.Fatalf("oversized advertise: %v, want errSlaveFieldTooLong", err)
+	}
+	after := r.snapshotLastSeen(t, "tokyo-1")
+	if !after.After(before) {
+		t.Fatal("LastSeen did not advance for a slave that is registered and pushing — Sweep will drop it and its dedup window with it")
+	}
+	if got := r.snapshotAdvertise(t, "tokyo-1"); got.String() != "10.0.0.2" {
+		t.Fatalf("advertise = %s, want the last good value — the oversized bytes must not be retained", got)
+	}
+}
+
+func (r *Registry) snapshotLastSeen(t *testing.T, name string) time.Time {
+	t.Helper()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	info, ok := r.slaves[name]
+	if !ok {
+		t.Fatalf("no registry entry for %s", name)
+	}
+	return info.LastSeen
+}
+
+func (r *Registry) snapshotAdvertise(t *testing.T, name string) netip.Addr {
+	t.Helper()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	info, ok := r.slaves[name]
+	if !ok {
+		t.Fatalf("no registry entry for %s", name)
+	}
+	return info.Advertise
 }

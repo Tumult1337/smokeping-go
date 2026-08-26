@@ -276,12 +276,15 @@ the window. Cycles ladder: ≤2h raw, ≤24h 2m, ≤7d 15m, ≤30d 1h, ≤180d 6
 >180d 1d. Hops ladder: ≤2h 11s, ≤24h 5m, >24h 15m, and never finer than the
 configured probe interval. The hop grid has no raw tier: a slot per cycle makes
 the response size the probe's cycle rate, which nothing bounds.
-Cycles also accepts a back-compat `step=raw|1h|1d` override.
+Cycles also accepts a back-compat `step=raw|1h|1d` override. Each value is
+bounded by the ladder's own tier for the requested window, so an override
+finer than the tier — `raw` past 2h, `1h` past the 1h tier — is a `400`
+rather than served.
 
 The endpoints that return unbucketed rows reject windows wider than their
 retention is worth scanning, with `400`: `/rtts` at 24h, `/http` and
-`/hops/timeline` at 7d, and `step=raw` on `/cycles` beyond the ladder's own
-raw tier (2h). The bucketed `/cycles` path has no window cap — the ladder
+`/hops/timeline` at 7d, and any `step=` override on `/cycles` beyond the
+ladder's own tier for the window (`raw` past 2h, `1h` past the 1h tier). The bucketed `/cycles` path has no window cap — the ladder
 already bounds its result to roughly 500–1000 points however wide the range.
 Since the binary ships no authentication, these are what stop an anonymous
 request from turning a full-retention scan into a response; keep a rate limit

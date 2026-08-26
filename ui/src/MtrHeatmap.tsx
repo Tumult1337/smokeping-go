@@ -172,6 +172,10 @@ function PathHeatmap({
     p: HopPoint;
   } | null>(null);
 
+  // hops is replaced on every 15s refresh, so a tooltip left open describes a
+  // HopPoint that is no longer in the grid under the cursor.
+  useEffect(() => setHover(null), [hops]);
+
   // rows: hop index → (cycleSec → HopPoint).
   // cycles: distinct cycle timestamps in this source.
   // visibleHops: every hop index in the path, ascending. We render the full

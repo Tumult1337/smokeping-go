@@ -114,6 +114,11 @@ GROUP BY target_group, target_id, source`, inClause)
 		// nil so the UI renders gaps instead of zero-drops.
 		spark := make([]*float64, overviewSparkBuckets)
 		for i, idx := range sparkIx {
+			// Both arrays are conditional aggregates, so nothing in the query
+			// guarantees they came back the same length.
+			if i >= len(sparkVl) {
+				break
+			}
 			if idx >= overviewSparkBuckets {
 				continue
 			}

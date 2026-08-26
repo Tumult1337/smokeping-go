@@ -727,10 +727,11 @@ func canonHopAddr(s string) hopAddr {
 }
 
 // hopAddrSentinel replaces every non-empty hop address on /hops/timeline.
-// It must not be "": ui/src/MtrHeatmap.tsx reads HopPoint.IP purely as a
-// reply/no-reply flag (`p.IP ? lossColor(...) : noReply`), keyed separately
-// by Index, and never displays the address itself — blanking to "" would
-// make every hop render as no-reply and silently break the heatmap. It must
+// It must not be "": ui/src/MtrHeatmap.tsx also reads HopPoint.IP as a
+// reply/no-reply flag (`p.IP ? lossColor(...) : noReply`) when colouring a
+// cell, so blanking to "" would make every hop render as no-reply and
+// silently break the heatmap. Its tooltip renders the value verbatim, which
+// is what the sentinel is read as there. It must
 // also not be a real address, so any fixed, address-free string works; this
 // one is chosen to be obviously not an IP if it ever leaks into a log or a
 // debugger.

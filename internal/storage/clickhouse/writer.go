@@ -216,21 +216,9 @@ func rttMS(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
-// offer is the drop-oldest-on-overflow primitive used by OnCycle: a full
-// channel means ClickHouse is stalling, and the buffer must surface with the
-// newest rows when it recovers — the same choice the flush-retry backlog and
-// the slave push ring make. Overflow evicts and enqueues without a lock, so
-// two producers overlapping can invert one pair: the row evicted is whatever
-// the channel holds by then, which a producer that got in between may have
-// made newer than the row being offered. Strictness there would mean
-// serialising the fast path against a stall that has already cost more than
-// one row of recency; the same overlap can also refill the freed slot before
-// the offered row reaches it, which loses both rows and counts both drops, so
-// the incoming row is preferred over the oldest but not guaranteed a place.
-// Rows offered after Close are dropped immediately and
-// counted — the channel is still open at that point but its consumer
-// goroutines have exited, so a naive send would queue forever-unflushed bytes
-// with no observability.
+// offer is the drop-oldest-on-overflow primitive used by OnCycle; the
+// overflow ordering it does and does not guarantee, and why it takes no lock,
+// are in CLAUDE.md's Write buffers bullet.
 func (w *Writer) offer(table int, row any) {
 	if w.closed.Load() {
 		w.recordDrop(table)
@@ -241,11 +229,7 @@ func (w *Writer) offer(table int, row any) {
 		return
 	default:
 	}
-	// A flusher may have drained a slot since that attempt; take it rather
-	// than evicting a row that no longer needs to go. The window cannot be
-	// closed without serialising the fast path, but this removes the common
-	// case, where the eviction cost a legitimately queued row and counted a
-	// drop that did not happen.
+	// A flusher may have freed a slot since; take it rather than evicting.
 	select {
 	case w.chans[table] <- row:
 		return
@@ -338,14 +322,9 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 		pending = pending[:0]
 	}
 	for {
-		// While a flush is failing this loop stops draining. pending's cap is
-		// a flat maxRows×flushRetainFactor for all four tables, so draining
-		// through it discards writerChanCap's per-table sizing exactly when it
-		// is needed — at the deployed shape that left probe_hop with 33
-		// seconds of backlog against probe_cycle's 11 minutes, the imbalance
-		// the sizing exists to remove. A nil channel is never ready, so rows
-		// stay in the per-table buffer and offer's drop-oldest bounds them
-		// there. The ticker always fires, so the loop cannot wedge.
+		// A nil channel is never ready: while a flush is failing the backlog
+		// belongs in the per-table buffer, not in pending, whose cap is the
+		// same for all four tables.
 		src := w.chans[table]
 		if flushFailing {
 			src = nil
