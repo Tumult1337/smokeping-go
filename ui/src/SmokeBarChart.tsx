@@ -779,10 +779,20 @@ function drawStack(
     }
     const slotX = Math.floor(leftEdge);
     const slotW = Math.max(1, Math.ceil(rightEdge) - slotX);
-    // Sources share exact bucket-start timestamps, so a full-slot bar per
-    // source overpaints every source sorted before it.
-    const w = Math.max(1, Math.floor(slotW / laneCount));
-    const x = slotX + laneIndex * w;
+    // Sources share exact bucket-start timestamps, so each lane gets a
+    // partition of the slot rather than a full-slot bar overpainting its
+    // predecessors. The partition never leaves the slot: flooring a shared
+    // lane width to a 1px minimum put lane n at slotX + n even when the slot
+    // itself was narrower, drawing bars whole buckets right of the timestamp
+    // they describe. Below 1px per lane no visible partition exists, so every
+    // lane overlaps the full slot instead and the translucent fills blend.
+    const laneW = slotW / laneCount;
+    let x = slotX;
+    let w = slotW;
+    if (laneW >= 1) {
+      x = slotX + Math.round(laneIndex * laneW);
+      w = slotX + Math.round((laneIndex + 1) * laneW) - x;
+    }
 
     bandsArr[i].forEach((band, b) => {
       const pair = BAND_PAIRS[b];
