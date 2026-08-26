@@ -2521,3 +2521,44 @@ func TestPruneResetsEvaluationStateButKeepsIdentity(t *testing.T) {
 		t.Fatal("replay identity did not survive the prune")
 	}
 }
+
+// Ingest hands the evaluator a bounded sink context, and a backlog flushed
+// after an outage can spend it on earlier cycles' dispatches. The transition
+// commits before dispatch and the path is change-gated with no renotify, so
+// an expired context turned the only FIRING notification an alert would ever
+// send into silence — the first payload the endpoint saw was the resolve for
+// a page never sent. Dispatch must survive the caller's context.
+func TestTransitionStillNotifiesWhenTheIngestContextHasExpired(t *testing.T) {
+	var mu sync.Mutex
+	delivered := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		delivered++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    20,
+		Alerts:   map[string]config.Alert{"quorum-test": {Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"hook"}}},
+		Actions:  map[string]config.Action{"hook": {Type: "webhook", URL: srv.URL}},
+	}
+	store := config.NewStore("", cfg)
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, NewDispatcher(slog.New(slog.DiscardHandler), store))
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	clk := pinClock(ev, testBase)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if delivered != 1 {
+		t.Fatalf("webhook delivered %d times, want 1 — the transition committed but the notification was dropped", delivered)
+	}
+}

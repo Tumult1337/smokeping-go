@@ -321,13 +321,20 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	}
 
 	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
-	// for other targets running concurrently.
+	// for other targets running concurrently, and detached from the caller's
+	// context: the transition is committed above and dispatch is change-gated
+	// with no renotify, so an ingest deadline spent by earlier cycles in the
+	// batch dropped the only notification the alert would ever send while the
+	// state read as delivered — the first payload the endpoint then saw was
+	// the resolve for a page never sent. Each action still bounds its own
+	// delivery (the dispatcher's 10s HTTP client timeout / exec deadline).
+	dispatchCtx := context.WithoutCancel(ctx)
 	for _, ev := range toDispatch {
 		e.log.Info("alert state change",
 			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
 			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
 			"firing", ev.Firing, "live", ev.Live)
-		e.dispatcher.Dispatch(ctx, scrubHealthAddresses(ev))
+		e.dispatcher.Dispatch(dispatchCtx, scrubHealthAddresses(ev))
 	}
 }
 
