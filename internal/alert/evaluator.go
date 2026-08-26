@@ -314,11 +314,30 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		return
 	}
 
-	var toDispatch []Event
-	var skipped []time.Duration
+	toDispatch, skipped := e.evaluate(cfg, cy, now, window, aheadLimit)
 
+	if len(skipped) > 0 {
+		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
+	}
+
+	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
+	// for other targets running concurrently.
+	for _, ev := range toDispatch {
+		e.log.Info("alert state change",
+			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
+			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
+			"firing", ev.Firing, "live", ev.Live)
+		e.dispatcher.Dispatch(ctx, scrubHealthAddresses(ev))
+	}
+}
+
+// evaluate runs the per-alert state machine under e.mu, held via defer because
+// scheduler.Fanout recovers sink panics — a panic here must not leave the
+// evaluator locked forever inside a process that keeps reporting healthy.
+func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration, aheadLimit int) (toDispatch []Event, skipped []time.Duration) {
 	e.mu.Lock()
-	for _, name := range alerts {
+	defer e.mu.Unlock()
+	for _, name := range cy.Target.Target.Alerts {
 		alertCfg, ok := cfg.Alerts[name]
 		if !ok {
 			continue
@@ -433,21 +452,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			})
 		}
 	}
-	e.mu.Unlock()
-
-	if len(skipped) > 0 {
-		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
-	}
-
-	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
-	// for other targets running concurrently.
-	for _, ev := range toDispatch {
-		e.log.Info("alert state change",
-			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
-			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
-			"firing", ev.Firing, "live", ev.Live)
-		e.dispatcher.Dispatch(ctx, scrubHealthAddresses(ev))
-	}
+	return toDispatch, skipped
 }
 
 // warnExcluded reports at Warn that a source's cycles are being stored but not

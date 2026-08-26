@@ -2369,3 +2369,29 @@ func TestFullForwardDatedBatchIsRecognisedOnRedelivery(t *testing.T) {
 		t.Errorf("redelivered batch drove consecHits %d -> %d; the ceiling is under one batch", before, after)
 	}
 }
+
+// A panic inside the state machine is recovered by scheduler.Fanout, so the
+// process survives — with the evaluator's mutex held forever unless the
+// unlock is deferred, after which every cycle blocks while health reports OK.
+func TestPanicInEvaluationDoesNotHoldTheStateLock(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	// A nil bySource map panics on insert inside the critical section — the
+	// survivable shape the fanout's recover() turns into a stuck lock.
+	ev.states[aggKey{target: "core/gw", alert: "quorum-test"}] = nil
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected the seeded nil map to panic")
+			}
+		}()
+		ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", 100))
+	}()
+
+	if !ev.mu.TryLock() {
+		t.Fatal("evaluator mutex still held after a recovered panic")
+	}
+	ev.mu.Unlock()
+}
