@@ -234,21 +234,21 @@ func TestBuildRejectsUnschedulablePingBudget(t *testing.T) {
 	})
 }
 
-func swapLookupIPAddr(t *testing.T, fn func(context.Context, string) ([]net.IPAddr, error)) {
+func swapLookupIPAddr(t *testing.T, fn func(context.Context, string, string) ([]net.IP, error)) {
 	t.Helper()
-	orig := lookupIPAddrFn
-	lookupIPAddrFn = fn
-	t.Cleanup(func() { lookupIPAddrFn = orig })
+	orig := lookupIPFn
+	lookupIPFn = fn
+	t.Cleanup(func() { lookupIPFn = orig })
 }
 
 // blackholedLookup behaves like the real resolver against a dead nameserver:
 // it honors the context and otherwise takes far longer than any cycle.
-func blackholedLookup(ctx context.Context, host string) ([]net.IPAddr, error) {
+func blackholedLookup(ctx context.Context, network, host string) ([]net.IP, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-time.After(5 * time.Second):
-		return []net.IPAddr{{IP: net.IPv4(127, 0, 0, 1)}}, nil
+		return []net.IP{net.IPv4(127, 0, 0, 1)}, nil
 	}
 }
 
@@ -286,31 +286,71 @@ func TestICMPProbeHonorsCancelledContextDuringResolve(t *testing.T) {
 // filter, a bare "ip" prefers IPv4 for a hostname and falls back across
 // families rather than failing.
 func TestResolveIPAddrSelectsLikeNetResolveIPAddr(t *testing.T) {
-	v4 := net.IPAddr{IP: net.IPv4(192, 0, 2, 9)}
-	v6 := net.IPAddr{IP: net.ParseIP("2001:db8::1")}
-	swapLookupIPAddr(t, func(context.Context, string) ([]net.IPAddr, error) {
-		return []net.IPAddr{v6, v4}, nil
-	})
+	v4 := net.IPv4(192, 0, 2, 9)
+	v6 := net.ParseIP("2001:db8::1")
+	// The real resolver answers per family; a fake that ignores the network
+	// cannot tell a family-scoped query from a dual one filtered afterwards.
+	byFamily := func(_ context.Context, network, _ string) ([]net.IP, error) {
+		switch network {
+		case "ip4":
+			return []net.IP{v4}, nil
+		case "ip6":
+			return []net.IP{v6}, nil
+		default:
+			return []net.IP{v6, v4}, nil
+		}
+	}
+	swapLookupIPAddr(t, byFamily)
 	ctx := context.Background()
 
-	if got, err := resolveIPAddr(ctx, "ip4", "dual.example"); err != nil || !got.IP.Equal(v4.IP) {
+	if got, err := resolveIPAddr(ctx, "ip4", "dual.example"); err != nil || !got.IP.Equal(v4) {
 		t.Fatalf("ip4: got %v, %v", got, err)
 	}
-	if got, err := resolveIPAddr(ctx, "ip6", "dual.example"); err != nil || !got.IP.Equal(v6.IP) {
+	if got, err := resolveIPAddr(ctx, "ip6", "dual.example"); err != nil || !got.IP.Equal(v6) {
 		t.Fatalf("ip6: got %v, %v", got, err)
 	}
-	if got, err := resolveIPAddr(ctx, "ip", "dual.example"); err != nil || !got.IP.Equal(v4.IP) {
+	if got, err := resolveIPAddr(ctx, "ip", "dual.example"); err != nil || !got.IP.Equal(v4) {
 		t.Fatalf("ip must prefer IPv4 for a hostname: got %v, %v", got, err)
 	}
 
-	swapLookupIPAddr(t, func(context.Context, string) ([]net.IPAddr, error) {
-		return []net.IPAddr{v6}, nil
+	swapLookupIPAddr(t, func(_ context.Context, network, _ string) ([]net.IP, error) {
+		if network == "ip4" {
+			return nil, &net.DNSError{Err: "no such host", IsNotFound: true}
+		}
+		return []net.IP{v6}, nil
 	})
-	if got, err := resolveIPAddr(ctx, "ip", "six.example"); err != nil || !got.IP.Equal(v6.IP) {
+	if got, err := resolveIPAddr(ctx, "ip", "six.example"); err != nil || !got.IP.Equal(v6) {
 		t.Fatalf("ip must fall back to the only family: got %v, %v", got, err)
 	}
 	if _, err := resolveIPAddr(ctx, "ip4", "six.example"); err == nil {
 		t.Fatal("ip4 with only AAAA answers must fail like net.ResolveIPAddr")
+	}
+}
+
+// A pinned family must query only that family's record. Filtering a dual
+// lookup instead makes an unrelated blackholed AAAA path fail every v4-pinned
+// cycle, which reads as total loss on a target that is answering.
+func TestResolveIPAddrQueriesOnlyThePinnedFamily(t *testing.T) {
+	v4 := net.IPv4(192, 0, 2, 9)
+	var asked []string
+	swapLookupIPAddr(t, func(ctx context.Context, network, _ string) ([]net.IP, error) {
+		asked = append(asked, network)
+		if network == "ip6" {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return []net.IP{v4}, nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	got, err := resolveIPAddr(ctx, "ip4", "dual.example")
+	if err != nil || !got.IP.Equal(v4) {
+		t.Fatalf("v4-pinned resolve got %v, %v — a dead AAAA path must not reach it", got, err)
+	}
+	for _, network := range asked {
+		if network != "ip4" {
+			t.Fatalf("resolver asked for %q on a v4-pinned target, want ip4 only", network)
+		}
 	}
 }
 
@@ -319,7 +359,7 @@ func TestResolveIPAddrSelectsLikeNetResolveIPAddr(t *testing.T) {
 func TestResolveIPAddrKeepsIPv6Zone(t *testing.T) {
 	got, err := resolveIPAddr(context.Background(), "ip6", "fe80::1%eth0")
 	if err != nil {
-		t.Skipf("resolve fe80::1%%eth0: %v", err)
+		t.Fatalf("resolve fe80::1%%eth0: %v", err)
 	}
 	if got.Zone != "eth0" || !got.IP.Equal(net.ParseIP("fe80::1")) {
 		t.Fatalf("resolved to %v, want fe80::1%%eth0", got)

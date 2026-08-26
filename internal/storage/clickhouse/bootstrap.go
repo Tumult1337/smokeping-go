@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"math"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/tumult/gosmokeping/internal/config"
@@ -74,6 +76,9 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 		{"probe_hop", cfg.Retention.HopDays},
 		{"probe_http", cfg.Retention.HTTPDays},
 	} {
+		if err := ttlWithinDateTime(t.days); err != nil {
+			return fmt.Errorf("retention %s: %w", t.table, err)
+		}
 		stmt := fmt.Sprintf("ALTER TABLE %s MODIFY TTL toDateTime(timestamp) + INTERVAL %d DAY",
 			t.table, t.days)
 		if cfg.Cluster != "" {
@@ -87,6 +92,25 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 
 	return nil
 }
+
+// maxDateTime is toDateTime's own ceiling: DateTime is UInt32 seconds from the
+// epoch, so 2106-02-07 06:28:15 UTC is the last instant a TTL sum can name.
+var maxDateTime = time.Unix(math.MaxUint32, 0).UTC()
+
+// ttlWithinDateTime refuses a retention whose expiry falls outside DateTime.
+// config bounds the knob, but only against a fixed ceiling — the TTL is
+// evaluated per row, so whether the sum is representable depends on when the
+// row was written, and only a clock knows that.
+func ttlWithinDateTime(days int) error {
+	if expiry := nowFn().UTC().AddDate(0, 0, days); expiry.After(maxDateTime) {
+		return fmt.Errorf("%d days expires at %s, past DateTime's %s ceiling",
+			days, expiry.Format("2006-01-02"), maxDateTime.Format("2006-01-02"))
+	}
+	return nil
+}
+
+// nowFn is the injectable clock for ttlWithinDateTime.
+var nowFn = time.Now
 
 func tlsConfig(enabled bool) *tls.Config {
 	if !enabled {

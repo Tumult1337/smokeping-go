@@ -792,6 +792,61 @@ func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
 // writeQuorumTestConfig writes a config file with alert "quorum-test" on
 // target core/gw, matching the TargetRef built by testCycle so the alert
 // package's cycle helpers line up with a file-backed config.Store.
+// A target renamed or removed from the config leaves per-source state that
+// tally never revisits — it prunes only the key a cycle is arriving for — so
+// the entry and its ahead slice outlive the process's interest in them.
+func TestRefreshDropsStateForDepartedTargets(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeQuorumTestConfig(t, path, true)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, &recordingDispatcher{})
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	clk := pinClock(ev, testBase)
+	ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", 100))
+
+	gw := aggKey{target: "core/gw", alert: "quorum-test"}
+	health := aggKey{target: slavehealth.Group + "/tokyo-1", alert: "quorum-test"}
+	ev.mu.Lock()
+	if _, ok := ev.states[gw]; !ok {
+		t.Fatal("no state recorded for the configured target")
+	}
+	// Health targets never appear in the stored config, so the sweep must not
+	// read their absence as a departure.
+	ev.states[health] = map[string]*alertState{"master": {state: StateFiring}}
+	ev.mu.Unlock()
+
+	// Rename the target out of the config and reload.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(raw), `"name":"gw"`, `"name":"gw2"`, 1)), 0o600); err != nil {
+		t.Fatalf("rewrite config: %v", err)
+	}
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if _, ok := ev.states[gw]; ok {
+		t.Fatal("state for the departed target survived the reload")
+	}
+	if _, ok := ev.states[health]; !ok {
+		t.Fatal("health-target state was swept — it is not in the stored config by design")
+	}
+}
+
 func writeQuorumTestConfig(t *testing.T, path string, quorum bool) {
 	t.Helper()
 	alertBody := `"condition":"loss_pct > 50","sustained":1,"actions":["log"]`
@@ -2542,6 +2597,62 @@ func TestPruneResetsEvaluationStateButKeepsIdentity(t *testing.T) {
 // an expired context turned the only FIRING notification an alert would ever
 // send into silence — the first payload the endpoint saw was the resolve for
 // a page never sent. Dispatch must survive the caller's context.
+// deadlineDispatcher records the context the evaluator hands to Dispatch, which
+// is the only place the detached budget is observable.
+type deadlineDispatcher struct {
+	mu       sync.Mutex
+	deadline time.Time
+	hadOne   bool
+	seen     bool
+}
+
+func (d *deadlineDispatcher) Dispatch(ctx context.Context, _ Event) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.seen = true
+	d.deadline, d.hadOne = ctx.Deadline()
+}
+
+// Detaching dispatch from the ingest budget must not leave it unbounded:
+// context.WithoutCancel drops the deadline with the cancellation, so outbound
+// HTTP and exec work had no ceiling and could outlive shutdown.
+func TestDetachedDispatchKeepsABudget(t *testing.T) {
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    20,
+		Alerts:   map[string]config.Alert{"quorum-test": {Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"one", "two"}}},
+		Actions: map[string]config.Action{
+			"one": {Type: "log"},
+			"two": {Type: "log"},
+		},
+	}
+	store := config.NewStore("", cfg)
+	d := &deadlineDispatcher{}
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, d)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	clk := pinClock(ev, testBase)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	before := time.Now()
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.seen {
+		t.Fatal("no dispatch reached the dispatcher")
+	}
+	if !d.hadOne {
+		t.Fatal("detached dispatch context carries no deadline — outbound work is unbounded")
+	}
+	// Two actions in sequence, each bounded by actionTimeout.
+	if want := 2 * actionTimeout; d.deadline.Sub(before) > want+time.Second {
+		t.Fatalf("dispatch budget %s, want about %s for 2 actions", d.deadline.Sub(before), want)
+	}
+}
+
 func TestTransitionStillNotifiesWhenTheIngestContextHasExpired(t *testing.T) {
 	var mu sync.Mutex
 	delivered := 0

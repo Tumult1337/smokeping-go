@@ -33,9 +33,14 @@ func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
 	return &ActionDispatcher{
 		log:    log,
 		store:  store,
-		client: &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{Timeout: actionTimeout},
 	}
 }
+
+// actionTimeout bounds one action's delivery. Dispatch runs an event's
+// actions in sequence, so it is also the unit the detached dispatch budget in
+// Evaluator is a multiple of.
+const actionTimeout = 10 * time.Second
 
 func (d *ActionDispatcher) Dispatch(ctx context.Context, e Event) {
 	// Only notify when an alert enters or leaves firing — pending transitions
@@ -119,7 +124,7 @@ func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Actio
 	if a.Command == "" {
 		return
 	}
-	execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	execCtx, cancel := context.WithTimeout(ctx, actionTimeout)
 	defer cancel()
 	// Split the command on whitespace. For complex pipelines operators should
 	// wrap them in a shell script and reference that.

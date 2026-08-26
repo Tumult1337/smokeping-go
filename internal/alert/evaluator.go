@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path"
 	"slices"
 	"sync"
 	"time"
@@ -238,7 +239,39 @@ func (e *Evaluator) Refresh() error {
 		return err
 	}
 	e.pruneStaleAggregates(oldEnabled)
+	e.pruneDepartedTargets()
 	return nil
+}
+
+// pruneDepartedTargets drops per-source state for a target or alert the
+// reloaded config no longer names. tally prunes only the key a cycle is
+// arriving for, so a target renamed or removed leaves an entry — its ahead
+// slice included — that nothing revisits for the process's life. Retention is
+// otherwise load-bearing: a silent source's StateFiring is what dispatches its
+// eventual resolve, so this drops only targets that can no longer produce a
+// cycle at all. Health targets are exempt because they live outside the stored
+// config. Must be called with e.mu held.
+func (e *Evaluator) pruneDepartedTargets() {
+	cfg := e.store.Current()
+	live := make(map[string]struct{})
+	for _, g := range cfg.Targets {
+		for _, t := range g.Targets {
+			live[config.TargetRef{Group: g.Group, Target: t}.ID()] = struct{}{}
+		}
+	}
+	for key := range e.states {
+		if _, ok := cfg.Alerts[key.alert]; ok {
+			if _, ok := live[key.target]; ok {
+				continue
+			}
+			if slavehealth.IsHealthGroup(path.Dir(key.target)) {
+				continue
+			}
+		}
+		delete(e.states, key)
+		delete(e.agg, key)
+		delete(e.warmup, key)
+	}
 }
 
 func (e *Evaluator) refreshConditions() error {
@@ -343,14 +376,26 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	// state read as delivered — the first payload the endpoint then saw was
 	// the resolve for a page never sent. Each action still bounds its own
 	// delivery (the dispatcher's 10s HTTP client timeout / exec deadline).
-	dispatchCtx := context.WithoutCancel(ctx)
 	for _, ev := range toDispatch {
 		e.log.Info("alert state change",
 			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
 			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
 			"firing", ev.Firing, "live", ev.Live)
-		e.dispatcher.Dispatch(dispatchCtx, scrubHealthAddresses(ev))
+		e.dispatchDetached(ctx, ev)
 	}
+}
+
+// dispatchDetached delivers one event on a context detached from the caller's
+// but not unbounded: context.WithoutCancel drops the deadline along with the
+// cancellation, which left outbound HTTP and exec work with no ceiling at all
+// and able to outlive shutdown. Dispatch runs an event's actions in sequence
+// and each bounds itself at actionTimeout, so the event's own action count is
+// the budget.
+func (e *Evaluator) dispatchDetached(ctx context.Context, ev Event) {
+	budget := time.Duration(max(len(ev.Alert.Actions), 1)) * actionTimeout
+	dispatchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+	defer cancel()
+	e.dispatcher.Dispatch(dispatchCtx, scrubHealthAddresses(ev))
 }
 
 // evaluate runs the per-alert state machine under e.mu, held via defer because

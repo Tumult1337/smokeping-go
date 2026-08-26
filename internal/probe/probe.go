@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
+	"net/netip"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -140,10 +140,12 @@ func familyNetwork(base, family string) string {
 	}
 }
 
-// lookupIPAddrFn is the injectable seam over the resolver so tests can drive
-// a blackholed DNS lookup without one.
-var lookupIPAddrFn = func(ctx context.Context, host string) ([]net.IPAddr, error) {
-	return net.DefaultResolver.LookupIPAddr(ctx, host)
+// lookupIPFn is the injectable seam over the resolver so tests can drive a
+// blackholed DNS lookup without one. It takes the network because the
+// resolver queries only the pinned family's record: filtering a dual lookup
+// instead would make a broken AAAA path fail every v4-pinned cycle.
+var lookupIPFn = func(ctx context.Context, network, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, network, host)
 }
 
 // resolveIPAddr is net.ResolveIPAddr with the context honored: probes run
@@ -151,31 +153,44 @@ var lookupIPAddrFn = func(ctx context.Context, host string) ([]net.IPAddr, error
 // path, so a resolver call that ignores a cancelled cycle blocks shutdown and
 // every SIGHUP rebuild behind it for the resolver's own timeout.
 func resolveIPAddr(ctx context.Context, network, host string) (*net.IPAddr, error) {
-	addrs, err := lookupIPAddrFn(ctx, host)
+	noSuitable := &net.AddrError{Err: "no suitable address found", Addr: host}
+	// A literal never reaches the resolver, which is what carries a
+	// link-local zone through to the socket.
+	if a, err := netip.ParseAddr(host); err == nil {
+		ip := net.IP(a.AsSlice())
+		if !matchesFamily(network, ip) {
+			return nil, noSuitable
+		}
+		return &net.IPAddr{IP: ip, Zone: a.Zone()}, nil
+	}
+	ips, err := lookupIPFn(ctx, network, host)
 	if err != nil {
 		return nil, err
 	}
-	var match func(net.IPAddr) bool
-	switch network {
-	case "ip4":
-		match = func(a net.IPAddr) bool { return a.IP.To4() != nil }
-	case "ip6":
-		match = func(a net.IPAddr) bool { return len(a.IP) == net.IPv6len && a.IP.To4() == nil }
-	default:
-		// net.ResolveIPAddr's own preference for a bare "ip" network: the
-		// family a literal spells, IPv4 otherwise, any family as a fallback.
-		prefer6 := strings.ContainsRune(host, ':')
-		match = func(a net.IPAddr) bool { return (a.IP.To4() == nil) == prefer6 }
-	}
-	for i := range addrs {
-		if match(addrs[i]) {
-			return &addrs[i], nil
+	if network == "ip" {
+		// net.ResolveIPAddr's own preference for a bare "ip" network: IPv4
+		// where the name has one, any family otherwise.
+		for i := range ips {
+			if ips[i].To4() != nil {
+				return &net.IPAddr{IP: ips[i]}, nil
+			}
 		}
 	}
-	if network == "ip" && len(addrs) > 0 {
-		return &addrs[0], nil
+	if len(ips) == 0 {
+		return nil, noSuitable
 	}
-	return nil, &net.AddrError{Err: "no suitable address found", Addr: host}
+	return &net.IPAddr{IP: ips[0]}, nil
+}
+
+func matchesFamily(network string, ip net.IP) bool {
+	switch network {
+	case "ip4":
+		return ip.To4() != nil
+	case "ip6":
+		return len(ip) == net.IPv6len && ip.To4() == nil
+	default:
+		return true
+	}
 }
 
 func build(name string, pc config.Probe) (Probe, error) {

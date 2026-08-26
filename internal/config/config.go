@@ -489,10 +489,12 @@ const (
 
 // MaxRetentionDays bounds each storage.clickhouse.retention knob (days of
 // per-table TTL). Below 1 day the ALTER ... MODIFY TTL Bootstrap re-emits on
-// every start is a TTL already in the past, which expires the whole table;
-// the ceiling is the full span of ClickHouse's UInt32-second DateTime, past
-// which timestamp + INTERVAL n DAY is representable for no row at all.
-const MaxRetentionDays = math.MaxUint32 / (24 * 60 * 60)
+// every start is a TTL already in the past, which expires the whole table.
+// The ceiling is a sanity bound and not a derived maximum: the TTL is
+// evaluated against each row's own timestamp, so what is representable
+// depends on when the row was written, which no compile-time constant knows.
+// Bootstrap holds the real check, against a clock and the DateTime ceiling.
+const MaxRetentionDays = 36_500
 
 // MaxLabelLen bounds every identifier that becomes a ClickHouse
 // LowCardinality value — a group, a target name, a probe name, a cycle's
