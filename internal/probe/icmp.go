@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -332,43 +333,59 @@ func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 	bufp := icmpBufPool.Get().(*[]byte)
 	defer icmpBufPool.Put(bufp)
 	buf := *bufp
+	proto := 1 // ICMPv4
+	if isV6 {
+		proto = 58
+	}
+	want := peerAddr(dst)
 	for {
-		n, _, err := conn.ReadFrom(buf)
+		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) || isTimeout(err) {
 				return 0, err
 			}
 			return 0, err
 		}
-		proto := 1 // ICMPv4
-		if isV6 {
-			proto = 58
+		if matchEchoReply(buf[:n], proto, peer, isUDP, id, seq, want) {
+			return time.Since(start), nil
 		}
-		reply, err := icmp.ParseMessage(proto, buf[:n])
-		if err != nil {
-			continue
-		}
-		// An Echo Request parses to the same body as a Reply, so a spoofed
-		// request with a matching seq would read as a successful ping on the
-		// raw-socket path (UDP ping sockets are kernel-demuxed).
-		if reply.Type != ipv4.ICMPTypeEchoReply && reply.Type != ipv6.ICMPTypeEchoReply {
-			continue
-		}
-		echo, ok := reply.Body.(*icmp.Echo)
-		if !ok {
-			continue
-		}
-		// On unprivileged (UDP) sockets the kernel rewrites ID to the source
-		// port and demuxes replies per-socket, so id won't match what we sent —
-		// gate on seq only. On raw sockets the kernel delivers every ICMP echo
-		// reply to every raw socket, so a concurrent target's reply with a
-		// colliding seq would be mis-accepted; there id is the discriminator
-		// (matching sendTTL), so enforce it.
-		if echo.Seq != seq || (!isUDP && echo.ID != id) {
-			continue
-		}
-		return time.Since(start), nil
 	}
+}
+
+// matchEchoReply decides whether one received datagram is the reply to our
+// echo at (id, seq) from dst itself. Like matchDatagram it is the read path's
+// trust boundary — bytes and source address both come off the wire — and it
+// sits apart from sendOne's loop so hostile input can drive it without a
+// socket.
+func matchEchoReply(datagram []byte, proto int, peer net.Addr, isUDP bool, id, seq int, dst netip.Addr) bool {
+	reply, err := icmp.ParseMessage(proto, datagram)
+	if err != nil {
+		return false
+	}
+	// An Echo Request parses to the same body as a Reply, so a spoofed
+	// request with a matching seq would read as a successful ping on the
+	// raw-socket path (UDP ping sockets are kernel-demuxed).
+	if reply.Type != ipv4.ICMPTypeEchoReply && reply.Type != ipv6.ICMPTypeEchoReply {
+		return false
+	}
+	echo, ok := reply.Body.(*icmp.Echo)
+	if !ok {
+		return false
+	}
+	// On unprivileged (UDP) sockets the kernel rewrites ID to the source
+	// port and demuxes replies per-socket, so id won't match what we sent —
+	// gate on seq only. On raw sockets the kernel delivers every ICMP echo
+	// reply to every raw socket, so a concurrent target's reply with a
+	// colliding seq would be mis-accepted; there id is the discriminator
+	// (matching sendTTL), so enforce it.
+	if echo.Seq != seq || (!isUDP && echo.ID != id) {
+		return false
+	}
+	// Seq (and id) are visible to any on-path router, so one that answers
+	// echoes from its own address made a fully-down target read 0% loss;
+	// only a reply from the destination itself is the target's. An invalid
+	// dst matches nothing — fail closed, exactly as classifyReply does.
+	return dst.IsValid() && peerAddr(peer) == dst
 }
 
 func asUDPAddr(conn *icmp.PacketConn) (*net.UDPAddr, bool) {

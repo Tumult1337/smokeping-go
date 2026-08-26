@@ -24,3 +24,19 @@ with:
 > `Sent = cfg.Pings` on any probe error, so an unbounded count produced
 > cycles cluster ingest refuses (`sent` past its UInt16 column) and each
 > refusal dropped the slave's whole drained batch.
+
+## ICMP sockets bullet (A2)
+
+Replace:
+
+> so `sendOne` matches replies by **sequence number only**, not ID. Don't
+> "fix" this — it's correct for both socket types.
+
+with:
+
+> so `sendOne` matches replies by **sequence number only**, not ID — don't
+> "fix" that, it's correct for both socket types — plus the same
+> peer-is-the-resolved-destination check `matchDatagram` applies on the walk
+> (`matchEchoReply`, the echo read path's trust boundary): any on-path router
+> can see seq and answer from its own address, which made a fully-down target
+> read 0% loss with plausible RTTs.
