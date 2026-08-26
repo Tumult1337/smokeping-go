@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -309,7 +310,7 @@ func (c *CachingReader) fetchCycles(ctx context.Context, key cycleCacheKey, ttl 
 func (c *CachingReader) runCyclesLeader(ctx context.Context, key cycleCacheKey, ttl time.Duration, call *cycleInflight, run func(context.Context) ([]CyclePoint, error)) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryMaxDuration)
 	defer cancel()
-	pts, err := run(runCtx)
+	pts, err := recoverToError(run)(runCtx)
 
 	var stale []CyclePoint
 	c.mu.Lock()
@@ -364,6 +365,18 @@ func (c *CachingReader) QueryLatestHops(ctx context.Context, ref config.TargetRe
 	return c.fetchHops(ctx, key, cacheTTLLive, func(ctx context.Context) (HopsResult, error) {
 		return c.inner.QueryLatestHops(ctx, ref, f)
 	})
+}
+
+// CoalesceHopsAt floors a pinned instant to the cache's `to` quantum, for the
+// callers whose `at` carries no sub-minute intent of its own — the API's
+// relative form (`?at=-1h`) resolves against a fresh server clock, so left
+// unfloored it mints a new millisecond cache key per request against a
+// 16-entry LRU. Never apply it to an absolute pin: the RFC3339 form is a
+// heatmap click-through whose millisecond names one cycle (see CLAUDE.md's
+// UI time-axis contract), and the key below must stay exactly as fine as the
+// query it fronts.
+func CoalesceHopsAt(at time.Time) time.Time {
+	return time.Unix(floorUnix(at, cacheKeyToQuantum), 0).UTC()
 }
 
 func (c *CachingReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f QueryFilter) (HopsResult, error) {
@@ -498,6 +511,21 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 	return cloneHopsResult(call.result), nil
 }
 
+// recoverToError converts a panic inside a detached leader's inner query into
+// an ordinary error, so the leader still releases its inflight slot and wakes
+// its waiters instead of killing the process — the same containment
+// scheduler.Fanout gives its sinks.
+func recoverToError[T any](run func(context.Context) (T, error)) func(context.Context) (T, error) {
+	return func(ctx context.Context) (out T, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("storage: query leader panicked: %v", r)
+			}
+		}()
+		return run(ctx)
+	}
+}
+
 // cloneHopsResult copies both slices so a cached entry is never handed to a
 // caller by reference.
 func cloneHopsResult(res HopsResult) HopsResult {
@@ -521,7 +549,7 @@ func cloneHopsResult(res HopsResult) HopsResult {
 func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl time.Duration, call *hopsInflight, run func(context.Context) (HopsResult, error)) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryMaxDuration)
 	defer cancel()
-	res, err := run(runCtx)
+	res, err := recoverToError(run)(runCtx)
 
 	var stale *HopsResult
 	c.hopsMu.Lock()

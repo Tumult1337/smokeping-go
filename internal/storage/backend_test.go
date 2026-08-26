@@ -94,6 +94,25 @@ func TestPickHopStepNeverRunsAheadOfTheCadence(t *testing.T) {
 	}
 }
 
+// MinHopStep must be exactly the smallest whole-second step whose grid over
+// the finest tier's whole span fits MaxHopGridSlots — a step derived one
+// second finer overflows the grid the row cap is computed from, and one
+// coarser buys nothing.
+func TestMinHopStepIsTheSmallestStepThatFitsTheGrid(t *testing.T) {
+	if MinHopStep%time.Second != 0 {
+		t.Fatalf("MinHopStep %v is not whole seconds, the unit the query renders", MinHopStep)
+	}
+	if slots := int(finestHopTierSpan/MinHopStep) + 1; slots > MaxHopGridSlots {
+		t.Fatalf("MinHopStep %v needs %d slots over the finest tier, over the %d the cap is derived from",
+			MinHopStep, slots, MaxHopGridSlots)
+	}
+	if finer := MinHopStep - time.Second; finer > 0 {
+		if slots := int(finestHopTierSpan/finer) + 1; slots <= MaxHopGridSlots {
+			t.Fatalf("MinHopStep %v is not minimal: %v also fits in %d slots", MinHopStep, finer, slots)
+		}
+	}
+}
+
 // The query-time bound is the DateTime64(3) domain, so its edges must be the
 // exact epoch-millisecond values that domain spans — a bound picked one step
 // wide would hand ClickHouse a value fromUnixTimestamp64Milli wraps.

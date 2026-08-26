@@ -89,10 +89,14 @@ const MaxHopTimelineWindow = 7 * 24 * time.Hour
 // the grid.
 const MaxHopGridSlots = int(MaxHopTimelineWindow/(15*time.Minute)) + 1
 
-// MinHopStep is the finest step the ladder returns: ceil(2h / (MaxHopGridSlots
-// - 1)) = 10.72s, rounded up to a whole second because the query renders a
-// step in seconds.
-const MinHopStep = 11 * time.Second
+// finestHopTierSpan is the widest window the hop ladder's finest tier serves.
+const finestHopTierSpan = 2 * time.Hour
+
+// MinHopStep is the finest step the ladder returns: the smallest whole second
+// (the unit the query renders) whose grid over the finest tier's whole span
+// still fits MaxHopGridSlots, so the finest tier never needs more slots than
+// the 7d tier the row cap is derived from.
+const MinHopStep = time.Duration((int64(finestHopTierSpan/time.Second)+int64(MaxHopGridSlots)-2)/int64(MaxHopGridSlots-1)) * time.Second
 
 // PickHopStep returns the toStartOfInterval width for hop timeline queries.
 // Tiers: ≤2h MinHopStep, ≤24h 5m, >24h 15m, never finer than interval.
@@ -112,7 +116,7 @@ const MinHopStep = 11 * time.Second
 func PickHopStep(span, interval time.Duration) time.Duration {
 	step := 15 * time.Minute
 	switch {
-	case span <= 2*time.Hour:
+	case span <= finestHopTierSpan:
 		step = MinHopStep
 	case span <= 24*time.Hour:
 		step = 5 * time.Minute

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
+	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
@@ -291,29 +295,66 @@ func TestQueryHopsTimelineRefusesARawGrid(t *testing.T) {
 }
 
 // A future-dated row from a hostile slave pinned itself as that source's
-// "latest" until the lie expired. The ingest bound stops new ones; the reader
-// ceiling is what keeps rows already in the table off the endpoint.
-func TestQueryLatestHopsBoundsFutureRows(t *testing.T) {
-	conn := &recordConn{}
-	if _, err := (&Reader{conn: conn}).QueryLatestHops(context.Background(),
-		config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}, storage.QueryFilter{}); err != nil {
-		t.Fatal(err)
+// "latest" until the lie expired — and QueryHopsAt's ±window around a pin
+// near now reaches the same rows. The ingest bound stops new ones; the reader
+// ceiling is what keeps rows already in the table off both pinned reads.
+func TestPinnedHopReadsBoundFutureRows(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	calls := map[string]func(*Reader) error{
+		"QueryLatestHops": func(r *Reader) error {
+			_, err := r.QueryLatestHops(context.Background(), ref, storage.QueryFilter{})
+			return err
+		},
+		"QueryHopsAt": func(r *Reader) error {
+			_, err := r.QueryHopsAt(context.Background(), ref, time.Now(), 30*time.Minute, storage.QueryFilter{})
+			return err
+		},
 	}
-	if !strings.Contains(conn.query, "timestamp <= now() + INTERVAL") {
-		t.Errorf("no future ceiling in the latest-hops CTE:\n%s", conn.query)
+	for name, call := range calls {
+		conn := &recordConn{}
+		if err := call(&Reader{conn: conn}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(conn.queries[0], "timestamp <= now() + INTERVAL") {
+			t.Errorf("%s: no future ceiling in the pinning CTE:\n%s", name, conn.queries[0])
+		}
 	}
 }
 
 // A pinned hop read returns one cycle per source, and cluster ingest refuses a
-// cycle carrying more than 600 hop rows, so the ceiling has to clear that
-// product across every source name the master's registry admits at once.
+// cycle carrying more than cluster.MaxHopsPerCycle hop rows, so the ceiling is
+// that product across every source name the master's registry admits at once —
+// referenced from the source constants, never hand-copied, so mutating either
+// reddens this rather than leaving a literal that silently drifts under them.
 func TestMaxHopRowsClearsEverySourcesPinnedCycle(t *testing.T) {
-	const (
-		rowsPerCycle      = 600 // cluster.MaxHopsPerCycle, twice the producer's own 300
-		registeredSources = 512 // master's maxRegisteredSlaves
-	)
-	if want := rowsPerCycle * registeredSources; maxHopRows < want {
-		t.Fatalf("maxHopRows = %d, under the %d rows a full fleet's pinned read holds", maxHopRows, want)
+	if want := maxHopSources * cluster.MaxHopsPerCycle; maxHopRows != want {
+		t.Fatalf("maxHopRows = %d, want the %d rows a full fleet's pinned read holds", maxHopRows, want)
+	}
+}
+
+// maxHopSources mirrors a constant this package cannot import (master's
+// maxRegisteredSlaves is unexported), so the pin is the same source-parsing
+// guard internal/config/tracebounds_test.go uses for probe's trace bounds.
+func TestMaxHopSourcesMirrorsTheMasterRegistry(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "../../cluster/master/registry.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse master/registry.go: %v", err)
+	}
+	found := -1
+	ast.Inspect(file, func(n ast.Node) bool {
+		if v, ok := n.(*ast.ValueSpec); ok && len(v.Names) == 1 && v.Names[0].Name == "maxRegisteredSlaves" && len(v.Values) == 1 {
+			if lit, ok := v.Values[0].(*ast.BasicLit); ok && lit.Kind == token.INT {
+				found, _ = strconv.Atoi(lit.Value)
+			}
+		}
+		return true
+	})
+	if found < 0 {
+		t.Fatal("could not find maxRegisteredSlaves in master/registry.go — the mirror can no longer be checked")
+	}
+	if found != maxHopSources {
+		t.Errorf("master maxRegisteredSlaves = %d, maxHopSources = %d: update the mirror and maxHopRows follows", found, maxHopSources)
 	}
 }
 

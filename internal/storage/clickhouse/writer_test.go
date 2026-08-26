@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math"
 	"regexp"
 	"slices"
 	"strings"
@@ -24,7 +25,7 @@ import (
 // TestOfferDropsAfterClose below.
 func TestOfferDropsWhenChannelFull(t *testing.T) {
 	w := newTestWriter(t, 1) // tiny channel buffer, no consumer goroutines
-	defer w.Close() //nolint:errcheck // test cleanup
+	defer w.Close()          //nolint:errcheck // test cleanup
 
 	// First send fills the channel; the rest must be dropped immediately.
 	for i := 0; i < 10; i++ {
@@ -32,6 +33,31 @@ func TestOfferDropsWhenChannelFull(t *testing.T) {
 	}
 	if got := atomic.LoadUint64(&w.dropped[tableProbeCycle]); got != 9 {
 		t.Fatalf("expected exactly 9 drops (buffer=1, sends=10), got %d", got)
+	}
+}
+
+// A full buffer means ClickHouse is stalling, and the buffer is what the
+// operator's charts read from when the stall ends — so it must hold the
+// stall's newest rows, like the flush-retry backlog and the slave push ring,
+// not a frozen snapshot of its first minutes with the incident's tail dropped.
+func TestOfferEvictsOldestWhenFull(t *testing.T) {
+	w := newTestWriter(t, 2)
+	defer w.Close() //nolint:errcheck // test cleanup
+
+	t0 := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		w.OnCycle(context.Background(), testCycle(t0.Add(time.Duration(i)*time.Second)))
+	}
+	if got := atomic.LoadUint64(&w.dropped[tableProbeCycle]); got != 1 {
+		t.Fatalf("dropped = %d, want exactly the evicted oldest row", got)
+	}
+	var got []time.Time
+	for len(w.chans[tableProbeCycle]) > 0 {
+		got = append(got, (<-w.chans[tableProbeCycle]).(scheduler.Cycle).Time)
+	}
+	want := []time.Time{t0.Add(time.Second), t0.Add(2 * time.Second)}
+	if len(got) != len(want) || !got[0].Equal(want[0]) || !got[1].Equal(want[1]) {
+		t.Fatalf("buffer holds %v, want the newest rows %v", got, want)
 	}
 }
 
@@ -74,7 +100,7 @@ func TestCloseIsIdempotent(t *testing.T) {
 // snapshot suitable for surfacing via /api/v1/health or a metric.
 func TestDroppedReports(t *testing.T) {
 	w := newTestWriter(t, 0) // zero-buffer => every send drops
-	defer w.Close() //nolint:errcheck // test cleanup
+	defer w.Close()          //nolint:errcheck // test cleanup
 
 	w.OnCycle(context.Background(), testCycle(time.Now()))
 	w.OnCycle(context.Background(), testCycle(time.Now()))
@@ -343,14 +369,17 @@ func TestHopRTTsNotRacedBetweenFlushAndAlertDispatch(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := &Writer{log: discard, conn: &prepConn{batch: &recordBatch{}}}
+	conn := &prepConn{batch: &recordBatch{}}
+	w := &Writer{log: discard, conn: conn}
 	for i := range w.chans {
-		w.chans[i] = make(chan any, 64)
+		// Room for every row, so the flushed count below is deterministic.
+		w.chans[i] = make(chan any, 256)
 	}
 	w.wg.Add(1)
 	go w.runTable(ctx, tableProbeHop, 1, time.Millisecond)
 
-	for i := 0; i < 200; i++ {
+	const cycles = 200
+	for i := 0; i < cycles; i++ {
 		cy := testCycle(time.Now())
 		cy.Hops = []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: []time.Duration{
 			30 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond}}}
@@ -363,6 +392,58 @@ func TestHopRTTsNotRacedBetweenFlushAndAlertDispatch(t *testing.T) {
 	}
 	cancel()
 	w.wg.Wait()
+
+	// -race is the tearing detector, but the gate does not always run it — so
+	// also assert the flushed data: every row arrived, and each carries the
+	// stats of the exact three-sample slice the dispatcher was reading.
+	if got := w.Dropped()["probe_hop"]; got != 0 {
+		t.Fatalf("fixture overflowed its own buffer: %d drops", got)
+	}
+	if got := len(conn.batch.appended); got != cycles {
+		t.Fatalf("flushed %d hop rows, want %d — rows were lost between OnCycle and Send", got, cycles)
+	}
+	cols := insertColumns(t, conn.query)
+	for _, args := range conn.batch.appended {
+		byCol := map[string]any{}
+		for i, c := range cols {
+			byCol[c] = args[i]
+		}
+		if byCol["rtt_min_us"] != uint32(10000) || byCol["rtt_max_us"] != uint32(30000) ||
+			byCol["rtt_median_us"] != uint32(20000) || byCol["rtt_mean_us"] != uint32(20000) {
+			t.Fatalf("flush read torn hop RTTs: min=%v max=%v median=%v mean=%v",
+				byCol["rtt_min_us"], byCol["rtt_max_us"], byCol["rtt_median_us"], byCol["rtt_mean_us"])
+		}
+	}
+	if !conn.batch.sent {
+		t.Fatal("batch never sent")
+	}
+}
+
+// Ingest accepts an RTT of exactly 0 (cluster.boundRTTs is [0, MaxSampleRTT]),
+// and rttMS turned it into a NaN that probe_rtt stored and /rtts could not
+// JSON-encode. 0 stores as itself; a negative — which no producer emits — is
+// clamped like durUS clamps it.
+func TestRTTZeroStoresZeroNotNaN(t *testing.T) {
+	w := newTestWriter(t, 4)
+	cy := testCycle(time.Now())
+	cy.RTTs = []time.Duration{0, 5 * time.Millisecond, -time.Millisecond}
+	w.OnCycle(context.Background(), cy)
+
+	want := []float64{0, 5, 0}
+	for i, wv := range want {
+		select {
+		case raw := <-w.chans[tableProbeRTT]:
+			row := raw.(rttRow)
+			if math.IsNaN(row.rttMS) || math.IsInf(row.rttMS, 0) {
+				t.Fatalf("rtt %d queued as non-finite %v", i, row.rttMS)
+			}
+			if row.rttMS != wv {
+				t.Fatalf("rtt %d queued as %v ms, want %v", i, row.rttMS, wv)
+			}
+		default:
+			t.Fatalf("rtt %d never queued", i)
+		}
+	}
 }
 
 // Sent == 0 is no measurement, and flushCycles would store it as loss_pct 0 —

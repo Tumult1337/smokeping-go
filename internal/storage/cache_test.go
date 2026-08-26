@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1230,5 +1231,83 @@ func TestCachingReader_HopsAt_KeysAtTheResolutionTheReaderHas(t *testing.T) {
 	}
 	if got := inner.calls.Load(); got != 2 {
 		t.Fatalf("inner calls: got %d, want 2", got)
+	}
+}
+
+// panicReader panics on the two cached query paths, standing in for a driver
+// bug reached only inside a detached leader.
+type panicReader struct{ fakeReader }
+
+func (p *panicReader) QueryCycles(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) ([]CyclePoint, error) {
+	panic("boom")
+}
+func (p *panicReader) QueryHopsTimeline(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) (HopsResult, error) {
+	panic("boom")
+}
+
+// A leader goroutine is detached from every caller, so an uncontained panic
+// in it kills the process — and a contained one must still release the
+// inflight slot and wake its waiters, or the key wedges as a permanent
+// waiter queue. Repeated calls on one key prove the slot is released.
+func TestCachingReader_LeaderPanicIsContainedAndReleasesItsSlot(t *testing.T) {
+	c := NewCachingReader(&panicReader{}, 8, 8)
+	ref := newRef("g", "t")
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	from, to := now.Add(-time.Hour), now
+
+	for i := 0; i < 3; i++ {
+		_, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{})
+		if err == nil || !strings.Contains(err.Error(), "panicked") {
+			t.Fatalf("cycles call %d: err = %v, want the contained panic", i, err)
+		}
+	}
+	c.mu.Lock()
+	leaked := len(c.inflight)
+	c.mu.Unlock()
+	if leaked != 0 {
+		t.Fatalf("%d cycles inflight slots leaked after panics", leaked)
+	}
+
+	for i := 0; i < 3; i++ {
+		_, err := c.QueryHopsTimeline(context.Background(), ref, from, to, QueryFilter{Step: MinHopStep})
+		if err == nil || !strings.Contains(err.Error(), "panicked") {
+			t.Fatalf("hops call %d: err = %v, want the contained panic", i, err)
+		}
+	}
+	c.hopsMu.Lock()
+	leaked = len(c.hopsInflight)
+	c.hopsMu.Unlock()
+	if leaked != 0 {
+		t.Fatalf("%d hops inflight slots leaked after panics", leaked)
+	}
+}
+
+// The relative form of /hops?at= resolves against a fresh server clock, so
+// without coalescing an identical polled URL mints a new millisecond key per
+// request — flushing the 16-entry hops LRU that warm 7d timeline entries
+// share. CoalesceHopsAt restores one entry per 60s quantum for that form
+// while the key itself stays exactly as fine as the query (see
+// TestCachingReader_HopsAt_KeysOnTheRequestedCycle).
+func TestCachingReader_HopsAt_CoalescedRelativePinsShareOneEntry(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &atEchoReader{}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+	ref := newRef("g", "t")
+
+	base := now.Add(-time.Hour).Truncate(time.Minute).Add(10 * time.Second)
+	for _, at := range []time.Time{base, base.Add(900 * time.Millisecond), base.Add(40 * time.Second)} {
+		if _, err := c.QueryHopsAt(context.Background(), ref, CoalesceHopsAt(at), 30*time.Minute, QueryFilter{}); err != nil {
+			t.Fatalf("at %s: %v", at, err)
+		}
+	}
+	if got := inner.calls.Load(); got != 1 {
+		t.Fatalf("inner calls: got %d, want one — the three pins share a quantum", got)
+	}
+	if _, err := c.QueryHopsAt(context.Background(), ref, CoalesceHopsAt(base.Add(70*time.Second)), 30*time.Minute, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.calls.Load(); got != 2 {
+		t.Fatalf("inner calls: got %d, want a second entry for the next quantum", got)
 	}
 }

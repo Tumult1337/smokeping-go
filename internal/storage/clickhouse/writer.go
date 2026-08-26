@@ -61,24 +61,14 @@ const (
 	insertProbeHTTP = `INSERT INTO probe_http (timestamp, target_id, target_group, source, seq, rtt_ms, status, error)`
 )
 
-// flushRetainFactor bounds the backlog a table buffer keeps across failed
-// flushes. On a flush error the batch is retained for retry rather than
-// dropped, but a prolonged ClickHouse outage must not grow `pending` without
-// limit — so the retained backlog is capped at maxRows*flushRetainFactor,
-// dropping (and counting) the oldest overflow. This mirrors the drop-oldest
-// semantics of the slave push ring.
+// flushRetainFactor caps the batch retained across failed flushes at
+// maxRows*flushRetainFactor, dropping (and counting) the oldest overflow so
+// a long ClickHouse outage cannot grow `pending` without limit.
 const flushRetainFactor = 4
 
-// Channel sizing, in slots per table, bound once at startup. A flat 4096
-// everywhere equalized nothing: a cycle produces ~1 cycle row, `pings` rtt
-// rows and ~20 hop rows, so at the deployed 122-target/20s install a
-// ClickHouse stall drank 11 minutes of cycle buffer against 96 seconds of hop
-// buffer and hops died first. Scaling by rows-per-cycle equalizes
-// time-to-overflow instead. hopRowFactor is clamp-limited on purpose: 4096×32
-// is maxChanCap exactly, so any larger factor is inert, and the worst-case
-// hop cycles (90 rows for icmp's 3 rounds × 30 TTLs, 300 for MTR's 10 × 30)
-// still overflow first — drop-oldest and the drop counters are the bound
-// there, not the buffer.
+// Channel sizing scales slots by rows-per-cycle so all four tables absorb a
+// comparable ClickHouse stall; the derivation and the deliberate clamp on
+// hopRowFactor are in CLAUDE.md's "Write buffers" bullet.
 const (
 	baseChanCap   = 4096
 	maxChanCap    = 131072
@@ -215,24 +205,24 @@ type httpRow struct {
 	err                   string
 }
 
-// rttMS converts a time.Duration to milliseconds. Returns NaN for
-// zero / negative durations as a defensive guard — the current caller
-// only iterates scheduler.Cycle.RTTs, which the probes populate with
-// successful pings only (lost pings never reach this function). If
-// future schema changes start carrying per-ping loss markers through
-// this path, NaN preserves unambiguous "no response" semantics against
-// legitimate sub-millisecond readings.
+// rttMS converts a time.Duration to milliseconds for the Float64 rtt_ms
+// column, clamping negatives to 0 like durUS does; cluster ingest accepts an
+// RTT of exactly 0, and the NaN this returned for it broke /rtts' JSON
+// encoding after the 200 header was already written.
 func rttMS(d time.Duration) float64 {
-	if d <= 0 {
-		return math.NaN()
+	if d < 0 {
+		return 0
 	}
 	return float64(d) / float64(time.Millisecond)
 }
 
-// offer is the drop-on-overflow primitive used by OnCycle. Rows offered
-// after Close are dropped immediately and counted — the channel is still
-// open at that point but its consumer goroutines have exited, so a naive
-// send would queue forever-unflushed bytes with no observability.
+// offer is the drop-oldest-on-overflow primitive used by OnCycle: a full
+// channel means ClickHouse is stalling, and the buffer must surface with the
+// newest rows when it recovers — the same choice the flush-retry backlog and
+// the slave push ring make. Rows offered after Close are dropped immediately
+// and counted — the channel is still open at that point but its consumer
+// goroutines have exited, so a naive send would queue forever-unflushed bytes
+// with no observability.
 func (w *Writer) offer(table int, row any) {
 	if w.closed.Load() {
 		w.recordDrop(table)
@@ -240,7 +230,18 @@ func (w *Writer) offer(table int, row any) {
 	}
 	select {
 	case w.chans[table] <- row:
+		return
 	default:
+	}
+	select {
+	case <-w.chans[table]:
+		w.recordDrop(table)
+	default:
+	}
+	select {
+	case w.chans[table] <- row:
+	default:
+		// A concurrent producer refilled the slot the eviction freed.
 		w.recordDrop(table)
 	}
 }

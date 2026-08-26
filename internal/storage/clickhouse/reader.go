@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
@@ -276,6 +278,11 @@ ORDER BY timestamp, seq`
 		if err := rows.Scan(&p.Time, &p.RTT, &seq); err != nil {
 			return nil, err
 		}
+		// Rows this binary wrote as NaN for a 0µs RTT before rttMS clamped
+		// them; a non-finite value breaks the JSON encoder mid-response.
+		if math.IsNaN(p.RTT) || math.IsInf(p.RTT, 0) {
+			continue
+		}
 		p.Seq = int64(seq)
 		out = append(out, p)
 	}
@@ -312,11 +319,16 @@ ORDER BY timestamp, seq`
 	return out, rows.Err()
 }
 
-// maxHopRows bounds a pinned hop read. QueryLatestHops and QueryHopsAt return
-// one cycle per source, and cluster ingest refuses a cycle carrying more than
-// 600 hop rows, so the cap clears 808 sources — above the 512 live names the
-// master's registry admits at once.
-const maxHopRows = 485_280
+// maxHopSources mirrors master's unexported maxRegisteredSlaves: the registry
+// is the list of legal source labels, so its ceiling is the sources a pinned
+// read can return one cycle for, and TestMaxHopSourcesMirrorsTheMasterRegistry
+// parses the master's source and fails naming this value on drift.
+const maxHopSources = 512
+
+// maxHopRows bounds a pinned hop read at the product of its two real limits:
+// QueryLatestHops and QueryHopsAt return one cycle per source, and cluster
+// ingest refuses a cycle carrying more than MaxHopsPerCycle hop rows.
+const maxHopRows = maxHopSources * cluster.MaxHopsPerCycle
 
 // maxHopTTLs is the ttl column's whole domain: probe_hop stores it as UInt8
 // and cluster ingest refuses an index outside [0, 255], so nothing a source
@@ -388,23 +400,15 @@ func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f st
 	// all-view — the UI then renders one randomly-chosen source's latest
 	// cycle. With the per-source group the response carries one cycle per
 	// origin, matching what QueryHopsAt does for the historical-pin path.
-	q := `
-WITH latest AS (
+	cte := `
+WITH pinned AS (
   SELECT source, max(timestamp) AS ts
   FROM probe_hop
   WHERE target_id = ?
     AND target_group = ?` + srcClause + freshClause + `
     AND timestamp <= now() + INTERVAL ` + maxFutureSkewSeconds + ` SECOND
   GROUP BY source
-)
-SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
-       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
-       loss_pct, lost, sent
-FROM probe_hop
-WHERE target_id = ?
-  AND target_group = ?` + srcClause + `
-  AND (source, timestamp) IN (SELECT source, ts FROM latest)
-ORDER BY source, ttl` + hopRowLimit(hopRowCap)
+)`
 	// args layout: CTE filter (target id+group, opt source, opt freshness), outer filter (target id+group, opt source).
 	args := []any{ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
@@ -413,9 +417,25 @@ ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	}
 	args = append(args, ref.Target.Name, ref.Group)
 	args = append(args, srcArgs...)
+	return r.pinnedHopRows(ctx, ref, "query latest hops", cte, srcClause, args)
+}
+
+// pinnedHopRows is the tail both pinned reads share: the hop rows at exactly
+// the (source, ts) pairs the caller's `pinned` CTE selected, paired with those
+// cycles' own round counters.
+func (r *Reader) pinnedHopRows(ctx context.Context, ref config.TargetRef, what, cte, srcClause string, args []any) (storage.HopsResult, error) {
+	q := cte + `
+SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
+       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
+       loss_pct, lost, sent
+FROM probe_hop
+WHERE target_id = ?
+  AND target_group = ?` + srcClause + `
+  AND (source, timestamp) IN (SELECT source, ts FROM pinned)
+ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
-		return storage.HopsResult{}, fmt.Errorf("query latest hops: %w", err)
+		return storage.HopsResult{}, fmt.Errorf("%s: %w", what, err)
 	}
 	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
 	hops, err := scanHopRows(rows)
@@ -436,24 +456,19 @@ func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.
 	// Centre and both window edges are dtMilli bounds: a centre rounded off
 	// the cycle it names leaves a neighbouring cycle nearer than that cycle,
 	// and edges rounded the other way make that neighbour the only candidate.
-	q := `
-WITH nearest AS (
+	// The now() ceiling mirrors QueryLatestHops': ingest stops new
+	// future-dated rows, this keeps ones already in the table off the pin.
+	cte := `
+WITH pinned AS (
   SELECT source,
          argMin(timestamp, abs(dateDiff('millisecond', timestamp, ` + dtMilli + `))) AS ts
   FROM probe_hop
   WHERE target_id = ?
     AND target_group = ?` + srcClause + `
     AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + `
+    AND timestamp <= now() + INTERVAL ` + maxFutureSkewSeconds + ` SECOND
   GROUP BY source
-)
-SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
-       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
-       loss_pct, lost, sent
-FROM probe_hop
-WHERE target_id = ?
-  AND target_group = ?` + srcClause + `
-  AND (source, timestamp) IN (SELECT source, ts FROM nearest)
-ORDER BY source, ttl` + hopRowLimit(hopRowCap)
+)`
 	// args layout: CTE — `at` (the centre), target id+group, optional source, from, to;
 	//              outer — target id+group, optional source.
 	args := []any{at.UnixMilli(), ref.Target.Name, ref.Group}
@@ -461,13 +476,7 @@ ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	args = append(args, at.Add(-half).UnixMilli(), at.Add(half).UnixMilli())
 	args = append(args, ref.Target.Name, ref.Group)
 	args = append(args, srcArgs...)
-	rows, err := r.conn.Query(ctx, q, args...)
-	if err != nil {
-		return storage.HopsResult{}, fmt.Errorf("query hops at: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
-	hops, err := scanHopRows(rows)
-	return r.withCycleCounters(ctx, ref, hops, err)
+	return r.pinnedHopRows(ctx, ref, "query hops at", cte, srcClause, args)
 }
 
 // maxCycleCounterKeys bounds the (source, cycle) pairs one hop read asks
@@ -614,35 +623,14 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 	return storage.HopsResult{Hops: hops}, nil
 }
 
-// queryHopsGrid reads the heatmap's grid: one row per (bucket, ttl) for one
-// probe origin. Both dimensions and the origin are bounded, which is what
-// makes maxHopTimelineRows a ceiling that can be derived rather than guessed.
-//
-// Responders inside a slot fold into the row of the cycle that lost most —
-// the row the heatmap already picked out of the per-responder rows and drew,
-// discarding the rest. Ties between responders resolve arbitrarily, as they
-// did client-side. The per-responder breakdown lives on /hops?at=, which pins
-// one cycle and needs no grid.
-//
-// max(loss_pct) preserves brief 100%-loss spikes that the slot average
-// (sum(lost)/sum(sent)) dilutes — at a 5-min bucket with 10 per-cycle rows, a
-// single 100%-loss cycle averages to 10% and disappears against the heatmap's
-// loss palette. The heatmap colors cells by this max so the spike survives.
-//
-// Aliases use `avg_loss_pct` / `max_loss_pct` (not `loss_pct`) to avoid
-// shadowing the underlying `loss_pct` column: a select-list alias of
-// `loss_pct` would make `max(loss_pct)` aggregate the alias (an aggregate
-// itself) and ClickHouse rejects "aggregate function inside aggregate
-// function" with a 500. `worst_addr` / `worst_unreach` avoid the same
-// shadowing one step further out — aliasing them to their own column names
-// makes `worst`, which reads those columns, cyclic.
-//
-// Address, annotation and timestamp come out of one argMax over a tuple so
-// they describe the same row: picked separately, a lossy responder's address
-// was served with a clean sibling's unreachable label and a third row's
-// timestamp — a hop state that never existed. The cost is that an annotation
-// on a responder that is not the slot's worst does not reach the timeline;
-// /hops?at= still carries every responder's own.
+// queryHopsGrid reads the heatmap's grid — one row per (bucket, ttl) for one
+// probe origin, each slot's responders folded into its worst-loss cycle's row
+// with address, annotation and timestamp read from one argMax tuple so they
+// describe the same row (see CLAUDE.md's storage bullet for the folding and
+// max_loss_pct rationale). No alias may shadow a column it aggregates:
+// `loss_pct AS loss_pct` makes max(loss_pct) an aggregate of an aggregate,
+// and aliasing worst_addr/worst_unreach to their own column names makes
+// `worst`, which reads those columns, cyclic.
 func (r *Reader) queryHopsGrid(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
 	// Refused rather than served raw: a slot per cycle puts the producer's
 	// cycle rate back in the row count, which nothing bounds.
