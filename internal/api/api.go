@@ -787,6 +787,12 @@ func redactAllHopAddresses(hops []storage.HopPoint) []storage.HopPoint {
 	return out
 }
 
+// statusRecentCycles is how many trailing raw cycles /status returns, and the
+// query window is derived from it (cycles × interval) so the handler never
+// scans rows it is about to trim — a fixed 24h window decoded ~690× what it
+// kept and each result held a 256-entry cycle-cache slot.
+const statusRecentCycles = 50
+
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	ref, ok := s.resolveTarget(w, r)
 	if !ok {
@@ -796,16 +802,15 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "storage not configured")
 		return
 	}
-	// Show the last 50 cycles from the raw bucket.
 	to := time.Now()
-	from := to.Add(-24 * time.Hour)
+	from := to.Add(-time.Duration(statusRecentCycles) * s.store.Current().Interval)
 	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
 		s.writeQueryErr(w, "query status", err)
 		return
 	}
-	if len(points) > 50 {
-		points = points[len(points)-50:]
+	if len(points) > statusRecentCycles {
+		points = points[len(points)-statusRecentCycles:]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"target": ref.ID(), "recent": points})
 }

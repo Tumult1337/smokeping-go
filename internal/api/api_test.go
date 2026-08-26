@@ -44,6 +44,9 @@ type stubReader struct {
 	// lastStep captures the bucket width passed to the most recent cycle
 	// query, so a test can tell a raw query from a bucketed one.
 	lastStep time.Duration
+	// lastFrom/lastTo capture the window of the most recent cycle query, so a
+	// test can assert a handler scans only what it serves.
+	lastFrom, lastTo time.Time
 	// queries counts every reader call. A window-cap test asserts this stays
 	// zero on rejection: the guard has to fire before the expensive query,
 	// which a status check alone cannot distinguish from a query that ran and
@@ -54,6 +57,7 @@ type stubReader struct {
 func (s *stubReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.CyclePoint, error) {
 	s.lastSource = f.Source
 	s.lastStep = f.Step
+	s.lastFrom, s.lastTo = from, to
 	s.queries++
 	return s.cycles, s.err
 }
@@ -1198,6 +1202,26 @@ func TestGetCyclesRawStepCap(t *testing.T) {
 				t.Fatalf("step = %s, want %s", r.lastStep, tc.wantStep)
 			}
 		})
+	}
+}
+
+// /status keeps statusRecentCycles points, so that count times the probe
+// interval is the only window it may ask storage for: the previous fixed 24h
+// raw scan decoded ~690x what the handler kept, and the full slice is what
+// CachingReader stored.
+func TestStatusQueriesOnlyTheWindowItServes(t *testing.T) {
+	r := &stubReader{}
+	code, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, "/api/v1/targets/core/gw/status")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", code, body)
+	}
+	// newTestServer configures a 1m interval.
+	want := time.Duration(statusRecentCycles) * time.Minute
+	if got := r.lastTo.Sub(r.lastFrom); got != want {
+		t.Fatalf("query window = %s, want %s (statusRecentCycles x interval)", got, want)
+	}
+	if r.lastStep != 0 {
+		t.Fatalf("step = %s, want raw", r.lastStep)
 	}
 }
 
