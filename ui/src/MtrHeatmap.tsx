@@ -162,6 +162,15 @@ function PathHeatmap({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [repaintCount, setRepaintCount] = useState(0);
+  // Hovered cell, resolved with the same pickAtX a click uses so the tooltip
+  // always describes the cell a click would open.
+  const [hover, setHover] = useState<{
+    x: number;
+    y: number;
+    hop: number;
+    sec: number;
+    p: HopPoint;
+  } | null>(null);
 
   // rows: hop index → (cycleSec → HopPoint).
   // cycles: distinct cycle timestamps in this source.
@@ -354,6 +363,33 @@ function PathHeatmap({
     return cycleAtSec(cycles, stepSec, fromSec + frac * (toSec - fromSec));
   }
 
+  // hopAtY mirrors the draw effect's row geometry: rows start at y=2 and are
+  // actualRowH tall, above the axis strip.
+  function hopAtY(clientY: number): number | null {
+    const canvas = canvasRef.current;
+    if (!canvas || visibleHops.length === 0) return null;
+    const rect = canvas.getBoundingClientRect();
+    const y = clientY - rect.top;
+    const plotH = rect.height - axisH - 2;
+    const actualRowH = Math.max(6, (plotH - 4) / visibleHops.length);
+    if (y < 2 || y >= plotH) return null;
+    const rank = Math.floor((y - 2) / actualRowH);
+    return rank >= 0 && rank < visibleHops.length ? visibleHops[rank] : null;
+  }
+
+  function handleMouseMove(e: React.MouseEvent) {
+    const wrap = wrapRef.current;
+    const sec = pickAtX(e.clientX);
+    const hop = hopAtY(e.clientY);
+    const p = sec != null && hop != null ? rows.get(hop)?.get(sec) : undefined;
+    if (!wrap || sec == null || hop == null || !p) {
+      setHover(null);
+      return;
+    }
+    const rect = wrap.getBoundingClientRect();
+    setHover({ x: e.clientX - rect.left, y: e.clientY - rect.top, hop, sec, p });
+  }
+
   // worstCycleSec maps a clicked bucket-start (unix sec, as keyed in `rows`) to
   // the timestamp of a cycle that is actually inside that bucket: the
   // worst-loss one across the visible hops, since cells are coloured by
@@ -450,8 +486,37 @@ function PathHeatmap({
         pinScrollAcrossReflow();
         onPick(worstCycleSec(t), source || undefined);
       }}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => setHover(null)}
     >
       <canvas ref={canvasRef} style={{ display: "block" }} />
+      {hover && (
+        <div
+          className="mtr-heatmap-tip"
+          style={
+            hover.x > 220
+              ? { right: `calc(100% - ${hover.x}px + 12px)`, top: Math.max(0, hover.y - 10) }
+              : { left: hover.x + 12, top: Math.max(0, hover.y - 10) }
+          }
+        >
+          <div className="mtr-heatmap-tip-head">
+            hop {hover.hop} · {new Date(hover.sec * 1000).toLocaleString()}
+          </div>
+          <div>{hover.p.IP || "no reply"}</div>
+          <div>
+            loss {(hover.p.MaxLossPct ?? hover.p.LossPct).toFixed(1)}%
+            {hover.p.MaxLossPct != null ? " (worst cycle)" : ""}
+          </div>
+          {/* Absent on a pre-step_sec server and blanked with the address on
+              redacted rows — both render as an ordinary cell. */}
+          {hover.p.Unreach && (
+            <div className="mtr-heatmap-tip-unreach">
+              <span className="hop-unreach">{hover.p.Unreach}</span> trace ended
+              here: target unreachable
+            </div>
+          )}
+        </div>
+      )}
       {stale && (
         <div
           style={{

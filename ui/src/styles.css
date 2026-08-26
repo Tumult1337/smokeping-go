@@ -500,7 +500,8 @@ th.overview-th { padding: 0; }
 .hops-table .hop-whois:hover { color: var(--accent); opacity: 1; }
 /* Tinted from the loss ramp's top stop (#ef4444, palette.ts) rather than a
    token: an unreachable is the same class of bad news as total loss. */
-.hops-table .hop-unreach {
+.hops-table .hop-unreach,
+.mtr-heatmap-tip .hop-unreach {
   margin-left: 8px;
   padding: 1px 5px;
   border-radius: 3px;
@@ -560,6 +561,35 @@ th.overview-th { padding: 0; }
 .mtr-heatmap {
   background: var(--surface-inset);
   border-radius: 4px;
+}
+
+/* Hovered-cell tooltip. pointer-events off so it never steals the click the
+   cell under it is advertising. */
+.mtr-heatmap-tip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+.mtr-heatmap-tip-head {
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.mtr-heatmap-tip-unreach {
+  margin-top: 3px;
+  color: var(--text-muted);
+}
+.mtr-heatmap-tip .hop-unreach {
+  margin-left: 0;
+  margin-right: 4px;
 }
 
 /* MTR heatmap loss key. Mirrors the canvas fill ramp so a newcomer reads the
