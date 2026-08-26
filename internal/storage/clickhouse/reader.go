@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"math"
 	"runtime"
 	"strconv"
@@ -481,8 +482,11 @@ WITH pinned AS (
 }
 
 // maxCycleCounterKeys bounds the (source, cycle) pairs one hop read asks
-// probe_cycle about; ingest holds live source names to maxRegisteredSlaves.
-const maxCycleCounterKeys = 1024
+// probe_cycle about, each costing two bound arguments in the IN set. It is
+// twice the live names the registry admits, and it trims rather than refuses:
+// it bounds the counters query alone, so it must not decide whether the hop
+// rows beside it are served.
+const maxCycleCounterKeys = 2 * maxHopSources
 
 // withCycleCounters pairs a pinned hop read with the round counters of the
 // cycles it selected. Target loss is per cycle and cannot be recovered from
@@ -507,8 +511,16 @@ func (r *Reader) queryCycleCounters(ctx context.Context, ref config.TargetRef, h
 	if len(keys) == 0 {
 		return nil, nil
 	}
+	// Past the cap the counters are trimmed, not the read refused. A hop
+	// prefix reads as a probe that stopped, which is why hop rows refuse
+	// instead — but a missing counter already renders as unknown loss by
+	// contract, so degrading the answer beats failing a path view whose rows
+	// are all present and correct.
 	if len(keys) > maxCycleCounterKeys {
-		return nil, storage.ErrHopsTruncated
+		slog.Warn("hop read exceeded its cycle-counter budget, target loss omitted for the excess",
+			"target", ref.Target.Name, "group", ref.Group,
+			"sources", len(keys), "budget", maxCycleCounterKeys)
+		keys = keys[:maxCycleCounterKeys]
 	}
 	// The range bound is redundant with the IN set and exists so the primary
 	// key still prunes.

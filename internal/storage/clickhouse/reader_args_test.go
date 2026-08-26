@@ -503,11 +503,23 @@ func TestEmptyHopReadIssuesNoCounterQuery(t *testing.T) {
 	}
 }
 
-// The counters query interpolates one tuple per key, so the key count is what
-// bounds its text and its argument slice. Ingest holds live source names to
-// 512, and a hop read pins one cycle per source, so a read naming more cycles
-// than the cap is refused rather than turned into an unbounded query.
-func TestCycleCountersRefuseTooManyKeys(t *testing.T) {
+// The counters budget must clear a full live fleet, or a pinned read loses
+// target loss for sources it could have named. It trims rather than refuses,
+// so nothing else reddens when it is cut too low.
+func TestCycleCounterBudgetClearsAFullFleet(t *testing.T) {
+	if maxCycleCounterKeys < maxHopSources {
+		t.Fatalf("maxCycleCounterKeys = %d, under the %d live sources a pinned read can name",
+			maxCycleCounterKeys, maxHopSources)
+	}
+}
+
+// The counters query interpolates one tuple per key, so the key count bounds
+// its text and its argument slice. Past that budget the counters are trimmed
+// and the read still answers: the budget bounds this query alone, and letting
+// it refuse failed a whole path view whose hop rows were present and correct
+// — source churn outlives a name's registration, so more distinct sources
+// than the budget is a legitimate read, not a malformed one.
+func TestCycleCountersTrimPastTheirBudget(t *testing.T) {
 	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
 	ts := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	hops := make([]storage.HopPoint, 0, maxCycleCounterKeys+1)
@@ -515,14 +527,19 @@ func TestCycleCountersRefuseTooManyKeys(t *testing.T) {
 		hops = append(hops, storage.HopPoint{Source: strconv.Itoa(i), Time: ts})
 	}
 	conn := &recordConn{}
-	if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops); !errors.Is(err, storage.ErrHopsTruncated) {
-		t.Fatalf("err = %v, want ErrHopsTruncated", err)
+	if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops); err != nil {
+		t.Fatalf("a read past the counter budget was refused: %v", err)
 	}
-	if conn.query != "" {
-		t.Fatalf("the refused read still issued a query:%s", conn.query)
+	if conn.query == "" {
+		t.Fatal("the read issued no counters query at all")
 	}
-	if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops[:maxCycleCounterKeys]); err != nil {
-		t.Fatalf("a read exactly at the key cap was refused: %v", err)
+	// Two bound arguments per key, after the target, group and range bounds —
+	// so the arg count is what proves the trim, not the input, sized the query.
+	if want := 4 + 2*maxCycleCounterKeys; len(conn.args) != want {
+		t.Fatalf("counters query bound %d args, want %d — the budget did not size it", len(conn.args), want)
+	}
+	if got := strings.Count(conn.query, "?"); got != len(conn.args) {
+		t.Fatalf("%d placeholders against %d args", got, len(conn.args))
 	}
 }
 
