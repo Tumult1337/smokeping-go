@@ -327,8 +327,12 @@ func TestPinnedHopReadsBoundFutureRows(t *testing.T) {
 // referenced from the source constants, never hand-copied, so mutating either
 // reddens this rather than leaving a literal that silently drifts under them.
 func TestMaxHopRowsClearsEverySourcesPinnedCycle(t *testing.T) {
-	if want := maxHopSources * cluster.MaxHopsPerCycle; maxHopRows != want {
-		t.Fatalf("maxHopRows = %d, want the %d rows a full fleet's pinned read holds", maxHopRows, want)
+	if floor := maxHopSources * cluster.MaxHopsPerCycle; maxHopRows < floor {
+		t.Fatalf("maxHopRows = %d, under the %d rows a full live fleet's pinned read holds", maxHopRows, floor)
+	}
+	const maxHopAddrBytes = 40 << 20
+	if got := maxHopRows * cluster.MaxHopAddrLen; got > maxHopAddrBytes {
+		t.Fatalf("maxHopRows admits %d bytes of hop_addr, past the %d ceiling it exists to hold", got, maxHopAddrBytes)
 	}
 }
 

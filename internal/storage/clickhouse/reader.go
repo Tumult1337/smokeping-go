@@ -12,7 +12,6 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
@@ -319,16 +318,18 @@ ORDER BY timestamp, seq`
 	return out, rows.Err()
 }
 
-// maxHopSources mirrors master's unexported maxRegisteredSlaves: the registry
-// is the list of legal source labels, so its ceiling is the sources a pinned
-// read can return one cycle for, and TestMaxHopSourcesMirrorsTheMasterRegistry
-// parses the master's source and fails naming this value on drift.
+// maxHopSources mirrors master's unexported maxRegisteredSlaves and is the
+// live fleet a pinned read must always serve, not a bound on what one can
+// return: QueryLatestHops groups by source over probe_hop itself, so its
+// group count is every label the table still holds within that TTL, which
+// operator churn raises without limit.
 const maxHopSources = 512
 
-// maxHopRows bounds a pinned hop read at the product of its two real limits:
-// QueryLatestHops and QueryHopsAt return one cycle per source, and cluster
-// ingest refuses a cycle carrying more than MaxHopsPerCycle hop rows.
-const maxHopRows = maxHopSources * cluster.MaxHopsPerCycle
+// maxHopRows is a memory ceiling rather than a product of producer limits,
+// because the source count above them is unbounded: at MaxHopAddrLen per
+// hop_addr it holds one unauthenticated pinned read to ~36.9 MB, and it stays
+// clear of the rows a full live fleet needs.
+const maxHopRows = 485_280
 
 // maxHopTTLs is the ttl column's whole domain: probe_hop stores it as UInt8
 // and cluster ingest refuses an index outside [0, 255], so nothing a source
