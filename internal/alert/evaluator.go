@@ -305,7 +305,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	// One read for the whole pass, and the only clock any state below is keyed
 	// on — never cy.Time, which the pushing slave chose.
 	now := e.nowFn()
-	window := stalenessWindow(cfg.Interval)
+	liveness := livenessWindow(cfg.Interval)
 	aheadLimit := aheadCap(cfg.Interval)
 	// Skipped whole like a cycle that sent nothing, so the source ages out
 	// rather than voting on data it replayed out of its own history.
@@ -314,7 +314,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		return
 	}
 
-	toDispatch, skipped := e.evaluate(cfg, cy, now, window, aheadLimit)
+	toDispatch, skipped := e.evaluate(cfg, cy, now, liveness, aheadLimit)
 
 	if len(skipped) > 0 {
 		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
@@ -335,6 +335,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 // scheduler.Fanout recovers sink panics — a panic here must not leave the
 // evaluator locked forever inside a process that keeps reporting healthy.
 func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration, aheadLimit int) (toDispatch []Event, skipped []time.Duration) {
+	warmupWindow := stalenessWindow(cfg.Interval)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, name := range cy.Target.Target.Alerts {
@@ -430,7 +431,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 		// Only a *new* FIRING transition is gated — an already-firing
 		// aggregate staying firing, and any transition to OK, pass through
 		// untouched so a real resolve can never get stuck behind warm-up.
-		if next == StateFiring && prevAgg != StateFiring && !w.ready(now, window) {
+		if next == StateFiring && prevAgg != StateFiring && !w.ready(now, warmupWindow) {
 			next = prevAgg
 		}
 
@@ -570,13 +571,26 @@ func firingSources(bySource map[string]*alertState, now time.Time, window time.D
 // clock, and still be evaluated for alerting. Alerting is a statement about
 // now: ingest accepts a cycle up to config.MaxCycleAge (7d) old, and
 // evaluating one replays a historical transition as if it were current, which
-// a slave can do at will. It is never tighter than the liveness window it
-// feeds — a slow-interval deployment must still be able to keep a source live
-// — nor than the skew ingest already tolerates, since master and slave clocks
-// are compared here and an honest slave at the accepted limit must not be
+// a slave can do at will. It is never tighter than the warm-up window — a
+// slow-interval deployment must still be able to keep a source live — nor
+// than the skew ingest already tolerates, since master and slave clocks are
+// compared here and an honest slave at the accepted limit must not be
 // silently excluded.
 func alertFreshness(interval time.Duration) time.Duration {
 	return max(stalenessWindow(interval), config.MaxFutureSkew)
+}
+
+// livenessWindow is how long a source's last cycle keeps it counted in tally
+// and firingSources, measured from when the master received it. It is the
+// freshness window rather than the bare 3×interval because cycles arrive in
+// pushed batches on the slave's own cluster.push_every cadence, which config
+// does not bound: any cadence that keeps a source's cycles young enough to
+// evaluate at all must also keep the source live, or every bursty-but-healthy
+// slave is pruned between pushes and a "majority" quorum collapses to
+// whichever source delivers continuously. A cadence past this window is
+// already losing cycles to the freshness gate, and warnExcluded reports it.
+func livenessWindow(interval time.Duration) time.Duration {
+	return alertFreshness(interval)
 }
 
 // aheadCeiling is the hard ceiling on that count whatever the interval, since
@@ -605,9 +619,9 @@ func aheadCap(interval time.Duration) int {
 	return int(min(derived, aheadCeiling))
 }
 
-// stalenessWindow is how long a source's last cycle stays counted, measured
-// from when the master received it. Three intervals tolerates one missed cycle
-// plus scheduling jitter and one push cadence.
+// stalenessWindow is the quorum warm-up horizon: three intervals tolerates
+// one missed cycle plus scheduling jitter. Liveness pruning uses
+// livenessWindow, which is never tighter than this.
 func stalenessWindow(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		interval = time.Minute

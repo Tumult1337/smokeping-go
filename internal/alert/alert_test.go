@@ -1747,7 +1747,7 @@ func TestDuplicateCycleDoesNotRefreshLiveness(t *testing.T) {
 
 	// frankfurt-1 goes silent past the liveness window and replays its last
 	// cycle instead of producing a new one.
-	clk.advance(stalenessWindow(time.Minute) + time.Second)
+	clk.advance(livenessWindow(time.Minute) + time.Second)
 	ev.OnCycle(ctx, healthy)
 
 	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
@@ -2394,4 +2394,32 @@ func TestPanicInEvaluationDoesNotHoldTheStateLock(t *testing.T) {
 		t.Fatal("evaluator mutex still held after a recovered panic")
 	}
 	ev.mu.Unlock()
+}
+
+// Slaves deliver cycles in pushed batches on their own cluster.push_every
+// cadence, which config does not bound. With liveness at a bare 3×interval, a
+// 20s-interval fleet bursting every 90s collapsed the quorum denominator to
+// the continuously-delivering master between pushes, and Threshold(1) == 1
+// fired a "majority" alert off a single source. Any cadence whose cycles the
+// freshness gate still evaluates must also keep its source live.
+func TestBurstyPushCadenceKeepsASourceLive(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorInterval(t, 20*time.Second, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	// One push from every slave, then only the master's local cycles until
+	// the slaves' next 90s push is due.
+	for _, src := range []string{"master", "tokyo-1", "frankfurt-1"} {
+		ev.OnCycle(ctx, cycleAt(clk, src, 0))
+	}
+	for range 4 {
+		clk.advance(20 * time.Second)
+		ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	}
+
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %+v, want none — one firing source out of three is not a majority", evs)
+	}
 }
