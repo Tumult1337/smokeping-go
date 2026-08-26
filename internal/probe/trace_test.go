@@ -439,6 +439,51 @@ func TestWalkRoundsKeepsFirstUnreachLabel(t *testing.T) {
 	}
 }
 
+// mixedTerminalScript is the shape a rate-limiting firewall produces: the
+// target echoes once, then rejects from its own address with a slow
+// admin-prohibited. Mixed onto one row, the unreachable's error-generation
+// time became the target's percentiles and len(RTTs) disagreed with
+// Sent-LossCount.
+func mixedTerminalScript(echoRTT, rejectRTT time.Duration) *scriptStep {
+	rej := ttlReply{addr: "10.0.0.9", rtt: rejectRTT, kind: replyUnreachable, unreach: "admin-prohibited"}
+	return &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: {addr: "10.0.0.9", rtt: echoRTT, kind: replyEcho},
+		{1, 1}: te("10.0.0.1"), {1, 2}: rej,
+		{2, 1}: te("10.0.0.1"), {2, 2}: rej,
+	}}
+}
+
+func TestWalkRoundsSplitsEchoFromErrorOnOneAddress(t *testing.T) {
+	s := mixedTerminalScript(5*time.Millisecond, 900*time.Millisecond)
+	hops, stats := walkRounds(context.Background(), 3, 5, 0, s.step)
+	if stats.attempted != 3 || stats.reached != 1 {
+		t.Fatalf("stats = %+v, want attempted 3 reached 1", stats)
+	}
+	var marked, errRow *Hop
+	for i := range hops {
+		if hops[i].Index != 2 {
+			continue
+		}
+		if hops[i].TargetReply {
+			marked = &hops[i]
+		} else {
+			errRow = &hops[i]
+		}
+	}
+	if marked == nil || errRow == nil {
+		t.Fatalf("want an echo row and an error row at ttl 2, got %+v", hops)
+	}
+	if len(marked.RTTs) != 1 || marked.RTTs[0] != 5*time.Millisecond || marked.Sent != 1 {
+		t.Fatalf("marked row mixed in unreachable RTTs: %+v", marked)
+	}
+	if marked.Unreach != "" {
+		t.Fatalf("echo row carries the unreachable label: %+v", marked)
+	}
+	if errRow.Unreach != "admin-prohibited" || errRow.Sent != 2 || len(errRow.RTTs) != 2 {
+		t.Fatalf("error row wrong: %+v", errRow)
+	}
+}
+
 func TestUnreachLabel(t *testing.T) {
 	tests := []struct {
 		isV6 bool

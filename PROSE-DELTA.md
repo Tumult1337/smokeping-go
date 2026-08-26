@@ -40,3 +40,21 @@ with:
 > (`matchEchoReply`, the echo read path's trust boundary): any on-path router
 > can see seq and answer from its own address, which made a fully-down target
 > read 0% loss with plausible RTTs.
+
+## Path discovery bullet (A3)
+
+Replace:
+
+> Rows are per `(ttl, responder address)` in first-seen order, so ECMP
+> siblings each carry their own samples;
+
+with:
+
+> Rows are per `(ttl, responder address, echo-vs-error)` in first-seen order,
+> so ECMP siblings each carry their own samples and a responder that both
+> echoes and rejects (a rate-limiting firewall answering admin-prohibited from
+> the target's own address) yields two rows — mixed onto one, the
+> unreachable's error-generation time rode the `TargetReply` marker into MTR's
+> RTT mirror and became the target's percentiles, with `len(RTTs)` exceeding
+> `Sent−LossCount`. The per-round one-responder-per-TTL bound is unchanged, so
+> `MaxHopRowsPerCycle`'s rounds × TTLs derivation still holds;

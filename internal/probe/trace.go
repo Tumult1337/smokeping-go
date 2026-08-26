@@ -199,17 +199,21 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 			if r.err != nil || r.addr == "" {
 				agg[ttl].losses++
 			} else {
-				i := slices.IndexFunc(agg[ttl].rows, func(row respondent) bool { return row.addr == r.addr })
+				// An echo and an error from the same address are two rows: the
+				// marked row's RTTs are the target's own echo latencies, which
+				// MTR mirrors as cycle stats, and an unreachable's RTT is the
+				// gateway's error-generation time, not the target answering.
+				isEcho := r.kind == replyEcho
+				i := slices.IndexFunc(agg[ttl].rows, func(row respondent) bool {
+					return row.addr == r.addr && row.targetReply == isEcho
+				})
 				if i < 0 {
-					agg[ttl].rows = append(agg[ttl].rows, respondent{addr: r.addr})
+					agg[ttl].rows = append(agg[ttl].rows, respondent{addr: r.addr, targetReply: isEcho})
 					i = len(agg[ttl].rows) - 1
 				}
 				row := &agg[ttl].rows[i]
 				row.rtts = append(row.rtts, r.rtt)
 				row.sent++
-				if r.kind == replyEcho {
-					row.targetReply = true
-				}
 				if row.unreach == "" {
 					row.unreach = r.unreach
 				}
