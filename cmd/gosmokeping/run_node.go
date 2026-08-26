@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/alert"
@@ -108,8 +109,16 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		// Pins follow the hot-reload contract like every other config
 		// consumer: read from store.Current() per use, never cached, so a
 		// SIGHUP-edited cluster.slave_addrs re-pins immediately.
+		//
+		// Memoized on the *config.Config pointer: Peers() now consults the
+		// pins under r.mu, and both it and resolveAdvertise are on paths an
+		// unauthenticated GET reaches (the UI's own target poll), so
+		// re-parsing every entry per call put one netip.ParseAddr per pin
+		// inside the lock cluster ingest needs. Store.Reload publishes a new
+		// pointer, so a pointer compare is the whole invalidation.
+		pins := &memoPins{log: log}
 		clusterRegistry.SetPinsFn(func() map[string]netip.Addr {
-			return currentSlavePins(log, store.Current())
+			return pins.get(store.Current())
 		})
 
 		// healthSet is read on every scheduler build, on every /config
@@ -253,6 +262,24 @@ func currentSlavePins(log *slog.Logger, c *config.Config) map[string]netip.Addr 
 		return nil
 	}
 	return pins
+}
+
+// memoPins caches currentSlavePins against the *config.Config it parsed, so
+// the hot-reload contract stays one atomic load plus a pointer compare.
+type memoPins struct {
+	log *slog.Logger
+	mu  sync.Mutex
+	cfg *config.Config
+	out map[string]netip.Addr
+}
+
+func (m *memoPins) get(c *config.Config) map[string]netip.Addr {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg != c {
+		m.cfg, m.out = c, currentSlavePins(m.log, c)
+	}
+	return m.out
 }
 
 // healthListerFunc adapts a closure to api.HealthLister.

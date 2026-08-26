@@ -519,7 +519,15 @@ Key points a reader can't derive from a single file:
   `maxSlaveFieldLen` (256): both are free strings arriving as headers,
   bounded only by net/http's 1 MiB cap, and both are retained per entry —
   advertise inside the log-dedup key even when `ParseAdvertise` rejects
-  it.
+  it. The refusal is **per field and never a refusal of liveness**: a
+  registered slave whose cycles are being ingested still advances
+  `LastSeen` (returning first let `Sweep` drop it after 24h, dedup window
+  included, and its next push 403s), and an over-length version still lets
+  the advertise beside it re-resolve — treating their union as one
+  condition froze that slave's mesh address against every later
+  `cluster.advertise` edit and every pin added to evict a squatter. A name
+  the registry has never seen is still refused outright: the entry is what
+  makes a name a legal ingest label.
   This is a cardinality and data-integrity bound, **not** authentication:
   the cluster token is shared, so any registered slave can still claim
   any other registered slave's name — including one that spells a peer's
@@ -531,11 +539,17 @@ Key points a reader can't derive from a single file:
   threat model changes.
   A slave **running this binary or newer** gets 403, re-registers and
   requeues the batch rather than dropping it — unless that re-registration
-  is itself refused with `ErrRejected`, which exits non-zero like
+  is itself refused with `ErrMasterRefused`, which exits non-zero like
   `registerForever` and `pullConfigInitial` do at boot: the master answers
   those bytes identically forever, so retrying leaves the ring
   head-of-line blocked while drop-oldest eats the live cycles behind the
-  batch, under a process reporting healthy; registration is otherwise
+  batch, under a process reporting healthy. **`ErrMasterRefused`, not
+  `ErrRejected`:** the latter is every 4xx bar 401/403/404 and the
+  retryable set, and any intermediary can produce one — a
+  `client_max_body_size`, a header-buffer limit or a routing change
+  answering 413/431/405 would crash-loop the whole fleet under systemd,
+  the failure `client.go` already records for 403. Only 400, the status
+  the master's own handlers emit, is fatal; registration is otherwise
   attempted only at boot, so under `cluster.pull_every` `"0"` — where no
   `/config` heartbeat exists either — that path is the only thing that
   recovers a slave after a master restart, and

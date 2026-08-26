@@ -211,7 +211,7 @@ func (r *Runner) registerForever(ctx context.Context) error {
 		if errors.Is(err, ErrAuth) {
 			return err
 		}
-		if errors.Is(err, ErrRejected) {
+		if errors.Is(err, ErrMasterRefused) {
 			r.log.Error("master permanently rejected registration, exiting", "err", err)
 			return err
 		}
@@ -243,7 +243,7 @@ func (r *Runner) pullConfigInitial(ctx context.Context) (cluster.ClusterConfigRe
 		if errors.Is(err, ErrAuth) {
 			return cluster.ClusterConfigResp{}, "", err
 		}
-		if errors.Is(err, ErrRejected) {
+		if errors.Is(err, ErrMasterRefused) {
 			r.log.Error("master permanently rejected the initial config pull, exiting", "err", err)
 			return cluster.ClusterConfigResp{}, "", err
 		}
@@ -337,7 +337,7 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 				r.sink.Requeue(batch)
 				return rerr
 			}
-			if errors.Is(rerr, ErrRejected) {
+			if errors.Is(rerr, ErrMasterRefused) {
 				r.log.Error("master permanently rejected re-registration, exiting", "err", rerr)
 				r.sink.Requeue(batch)
 				return rerr

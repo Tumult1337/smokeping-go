@@ -174,3 +174,42 @@ func TestPermanentlyRejectedReRegisterExitsRatherThanLooping(t *testing.T) {
 		t.Fatalf("buffered cycles = %d, want the batch requeued (1) — the process is exiting, not discarding data", got)
 	}
 }
+
+// ErrRejected is every 4xx bar 401/403/404 and the retryable set, and any
+// intermediary on the path can produce one — a client_max_body_size, a
+// header-buffer limit or a routing change answering 413/431/405. Making the
+// whole class fatal crash-looped the fleet under systemd on a proxy
+// misconfiguration, which is the failure client.go already records for 403.
+// Only 400, the status the master's own handlers emit for a permanent
+// refusal, is fatal.
+func TestOnlyTheMastersOwnRefusalIsFatal(t *testing.T) {
+	for _, tc := range []struct {
+		code  int
+		fatal bool
+	}{
+		{http.StatusBadRequest, true},
+		{http.StatusMethodNotAllowed, false},
+		{http.StatusRequestEntityTooLarge, false},
+		{http.StatusRequestHeaderFieldsTooLarge, false},
+		{http.StatusUnavailableForLegalReasons, false},
+	} {
+		t.Run(http.StatusText(tc.code), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "nope", tc.code)
+			}))
+			t.Cleanup(srv.Close)
+			r := NewRunner(slog.New(slog.DiscardHandler), &config.Config{
+				Cluster: &config.Cluster{MasterURL: srv.URL, Token: "tok", Name: "tokyo-1", PullEvery: "0"},
+			}, "v9")
+
+			err := r.client.Register(context.Background())
+			if !errors.Is(err, ErrRejected) {
+				t.Fatalf("%d: %v, want ErrRejected", tc.code, err)
+			}
+			if got := errors.Is(err, ErrMasterRefused); got != tc.fatal {
+				t.Fatalf("%d: fatal=%v, want %v — a status only an intermediary emits must not exit the process",
+					tc.code, got, tc.fatal)
+			}
+		})
+	}
+}

@@ -51,6 +51,16 @@ var ErrNotFound = errors.New("cluster: 404 not found")
 // same doomed batch while drop-oldest discards the live cycles behind it.
 var ErrRejected = errors.New("cluster: batch permanently rejected")
 
+// ErrMasterRefused marks the subset of ErrRejected that the master itself
+// emits for a request it will answer identically forever: an invalid
+// cluster.name, a header past maxSlaveFieldLen. Only this is fatal at boot and
+// on re-registration. ErrRejected alone is every 4xx bar 401/403/404 and the
+// retryable set, which any intermediary on the path can produce — a
+// client_max_body_size, a header-buffer limit or a routing change answering
+// 413/431/405 would otherwise crash-loop the whole fleet under systemd, the
+// failure client.go already records for 403.
+var ErrMasterRefused = errors.New("cluster: master refused this request")
+
 // retryable4xx are the client-error statuses whose own specification says the
 // same bytes may succeed later or on another connection, so they describe the
 // moment rather than the batch. Anything else in 4xx is ErrRejected; 401, 403
@@ -208,6 +218,12 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 		err := fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(buf)))
 		if resp.StatusCode < 500 && !retryable4xx(resp.StatusCode) {
 			err = fmt.Errorf("%w: %w", ErrRejected, err)
+			// 400 is the only status the master's own handlers emit for a
+			// permanent refusal; every other 4xx here reached us from
+			// somewhere else and must stay retryable at the process level.
+			if resp.StatusCode == http.StatusBadRequest {
+				err = fmt.Errorf("%w: %w", ErrMasterRefused, err)
+			}
 		}
 		return resp.StatusCode, httpResult{body: buf}, err
 	}

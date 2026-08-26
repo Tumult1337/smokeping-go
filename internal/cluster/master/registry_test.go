@@ -553,3 +553,39 @@ func (r *Registry) snapshotAdvertise(t *testing.T, name string) netip.Addr {
 	}
 	return info.Advertise
 }
+
+// The two bounded header fields are independent. Treating their union as one
+// condition skipped resolveAdvertise for a slave whose only problem was an
+// over-length X-Slave-Version, so its health-mesh address froze at whatever it
+// last resolved to: an operator changing cluster.advertise, or adding a pin to
+// evict a squatter, never took effect — and because the branch kept LastSeen
+// fresh, Sweep never reclaimed it either.
+func TestAnOversizedVersionDoesNotFreezeTheAdvertisedAddress(t *testing.T) {
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	long := strings.Repeat("x", maxSlaveFieldLen+1)
+
+	if err := r.Touch("tokyo-1", "v1", "10.0.0.2:1", "10.0.0.2"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// The operator moves the node; the CI-generated version is over-length.
+	if err := r.Touch("tokyo-1", long, "10.0.0.3:1", "10.0.0.3"); !errors.Is(err, errSlaveFieldTooLong) {
+		t.Fatalf("oversized version: %v, want errSlaveFieldTooLong", err)
+	}
+	if got := r.snapshotAdvertise(t, "tokyo-1"); got.String() != "10.0.0.3" {
+		t.Fatalf("advertise = %s, want 10.0.0.3 — an over-length version froze an address it says nothing about", got)
+	}
+	if got := r.snapshotVersion(t, "tokyo-1"); got != "v1" {
+		t.Fatalf("version = %q, want the last good value — the oversized bytes must not be retained", got)
+	}
+}
+
+func (r *Registry) snapshotVersion(t *testing.T, name string) string {
+	t.Helper()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	info, ok := r.slaves[name]
+	if !ok {
+		t.Fatalf("no registry entry for %s", name)
+	}
+	return info.Version
+}

@@ -141,33 +141,23 @@ func (r *Registry) Touch(name, version, addr, advertise string) error {
 	if name == "" {
 		return errEmptySlaveName
 	}
-	oversized := len(version) > maxSlaveFieldLen || len(advertise) > maxSlaveFieldLen
+	// Per field, not their union: an over-length X-Slave-Version says nothing
+	// about the advertise beside it, and skipping resolveAdvertise for both
+	// froze that slave's health-mesh address forever — an operator changing
+	// cluster.advertise, or adding a pin to evict a squatter, never took
+	// effect, while the branch kept LastSeen fresh so Sweep never reclaimed
+	// it either.
+	longVersion := len(version) > maxSlaveFieldLen
+	longAdvertise := len(advertise) > maxSlaveFieldLen
 
 	r.mu.Lock()
 	info, ok := r.slaves[name]
-	if ok && oversized {
-		// The slave is already registered and its cycles are being ingested;
-		// only these header bytes are refused, and neither is retained.
-		// Returning before LastSeen let Sweep drop an actively-pushing slave
-		// after 24h — taking its dedup window with it — and its next push
-		// then 403s.
-		info.LastSeen = time.Now()
-		info.Addr = addr
-		warn := info.AdvertiseLogState != advLogLong
-		info.AdvertiseLogState = advLogLong
-		r.mu.Unlock()
-		if warn {
-			r.log.Warn("slave header field past its limit, ignored",
-				"slave", name, "limit", maxSlaveFieldLen)
-		}
-		return errSlaveFieldTooLong
-	}
 	if !ok {
 		// A name this registry has never seen must not be created from a
 		// malformed request: the entry is what makes the name a legal ingest
 		// label, and every one costs a permanent LowCardinality dictionary
 		// entry.
-		if oversized {
+		if longVersion || longAdvertise {
 			r.mu.Unlock()
 			return errSlaveFieldTooLong
 		}
@@ -184,12 +174,21 @@ func (r *Registry) Touch(name, version, addr, advertise string) error {
 		info = &SlaveInfo{Name: name}
 		r.slaves[name] = info
 	}
-	info.Version = version
+	// LastSeen advances whatever the headers carried: the slave is registered
+	// and its cycles are being ingested, so returning before this let Sweep
+	// drop it after 24h — taking its dedup window with it — and its next push
+	// then 403s. Only the offending value is refused, and neither is retained.
 	info.Addr = addr
 	info.LastSeen = time.Now()
+	if !longVersion {
+		info.Version = version
+	}
 
 	prev := info.Advertise
-	next := r.resolveAdvertise(info, advertise, addr)
+	next := prev
+	if !longAdvertise {
+		next = r.resolveAdvertise(info, advertise, addr)
+	}
 	if next != prev {
 		// Release only an address this slave still owns, the identity match
 		// Sweep already makes. Defence in depth rather than load-bearing:
@@ -207,12 +206,35 @@ func (r *Registry) Touch(name, version, addr, advertise string) error {
 	}
 	changed := next != prev
 	onChange := r.onChange
+	warnLong := (longVersion || longAdvertise) && info.AdvertiseLogState != advLogLong
+	if longAdvertise {
+		info.AdvertiseLogState = advLogLong
+	}
 	r.mu.Unlock()
 
 	if changed && onChange != nil {
 		onChange()
 	}
+	if longVersion || longAdvertise {
+		if warnLong {
+			r.log.Warn("slave header field past its limit, ignored",
+				"slave", name, "field", longFieldName(longVersion, longAdvertise),
+				"limit", maxSlaveFieldLen)
+		}
+		return errSlaveFieldTooLong
+	}
 	return nil
+}
+
+func longFieldName(version, advertise bool) string {
+	switch {
+	case version && advertise:
+		return "version+advertise"
+	case version:
+		return "version"
+	default:
+		return "advertise"
+	}
 }
 
 // Outcome kinds for resolveAdvertise's log dedup key; the key compares
@@ -225,7 +247,7 @@ const (
 	advLogDup     = "dup"     // address already claimed by another slave
 	advLogInfo    = "info"    // accepted, but differs from observed source (NAT or proxy)
 	advLogOK      = "ok"      // accepted, matches observed source (or unparseable)
-	advLogLong    = "long"    // version or advertise past maxSlaveFieldLen
+	advLogLong    = "long"    // advertise past maxSlaveFieldLen
 )
 
 // resolveAdvertise validates a claimed address against the live pin list and
