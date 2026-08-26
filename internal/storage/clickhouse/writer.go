@@ -226,10 +226,13 @@ func rttMS(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
-// offer is the drop-on-overflow primitive used by OnCycle. Rows offered
-// after Close are dropped immediately and counted — the channel is still
-// open at that point but its consumer goroutines have exited, so a naive
-// send would queue forever-unflushed bytes with no observability.
+// offer is the drop-oldest-on-overflow primitive used by OnCycle: a full
+// channel means ClickHouse is stalling, and the buffer must surface with the
+// newest rows when it recovers — the same choice the flush-retry backlog and
+// the slave push ring make. Rows offered after Close are dropped immediately
+// and counted — the channel is still open at that point but its consumer
+// goroutines have exited, so a naive send would queue forever-unflushed bytes
+// with no observability.
 func (w *Writer) offer(table int, row any) {
 	if w.closed.Load() {
 		w.recordDrop(table)
@@ -237,7 +240,18 @@ func (w *Writer) offer(table int, row any) {
 	}
 	select {
 	case w.chans[table] <- row:
+		return
 	default:
+	}
+	select {
+	case <-w.chans[table]:
+		w.recordDrop(table)
+	default:
+	}
+	select {
+	case w.chans[table] <- row:
+	default:
+		// A concurrent producer refilled the slot the eviction freed.
 		w.recordDrop(table)
 	}
 }

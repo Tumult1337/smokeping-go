@@ -36,6 +36,31 @@ func TestOfferDropsWhenChannelFull(t *testing.T) {
 	}
 }
 
+// A full buffer means ClickHouse is stalling, and the buffer is what the
+// operator's charts read from when the stall ends — so it must hold the
+// stall's newest rows, like the flush-retry backlog and the slave push ring,
+// not a frozen snapshot of its first minutes with the incident's tail dropped.
+func TestOfferEvictsOldestWhenFull(t *testing.T) {
+	w := newTestWriter(t, 2)
+	defer w.Close() //nolint:errcheck // test cleanup
+
+	t0 := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		w.OnCycle(context.Background(), testCycle(t0.Add(time.Duration(i)*time.Second)))
+	}
+	if got := atomic.LoadUint64(&w.dropped[tableProbeCycle]); got != 1 {
+		t.Fatalf("dropped = %d, want exactly the evicted oldest row", got)
+	}
+	var got []time.Time
+	for len(w.chans[tableProbeCycle]) > 0 {
+		got = append(got, (<-w.chans[tableProbeCycle]).(scheduler.Cycle).Time)
+	}
+	want := []time.Time{t0.Add(time.Second), t0.Add(2 * time.Second)}
+	if len(got) != len(want) || !got[0].Equal(want[0]) || !got[1].Equal(want[1]) {
+		t.Fatalf("buffer holds %v, want the newest rows %v", got, want)
+	}
+}
+
 // TestOfferDropsAfterClose proves the writer's Close contract: once Close
 // has returned, further OnCycle calls increment the drop counter rather
 // than queueing into a channel with no reader. Regression guard for a
