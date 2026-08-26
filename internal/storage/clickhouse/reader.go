@@ -623,35 +623,14 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 	return storage.HopsResult{Hops: hops}, nil
 }
 
-// queryHopsGrid reads the heatmap's grid: one row per (bucket, ttl) for one
-// probe origin. Both dimensions and the origin are bounded, which is what
-// makes maxHopTimelineRows a ceiling that can be derived rather than guessed.
-//
-// Responders inside a slot fold into the row of the cycle that lost most —
-// the row the heatmap already picked out of the per-responder rows and drew,
-// discarding the rest. Ties between responders resolve arbitrarily, as they
-// did client-side. The per-responder breakdown lives on /hops?at=, which pins
-// one cycle and needs no grid.
-//
-// max(loss_pct) preserves brief 100%-loss spikes that the slot average
-// (sum(lost)/sum(sent)) dilutes — at a 5-min bucket with 10 per-cycle rows, a
-// single 100%-loss cycle averages to 10% and disappears against the heatmap's
-// loss palette. The heatmap colors cells by this max so the spike survives.
-//
-// Aliases use `avg_loss_pct` / `max_loss_pct` (not `loss_pct`) to avoid
-// shadowing the underlying `loss_pct` column: a select-list alias of
-// `loss_pct` would make `max(loss_pct)` aggregate the alias (an aggregate
-// itself) and ClickHouse rejects "aggregate function inside aggregate
-// function" with a 500. `worst_addr` / `worst_unreach` avoid the same
-// shadowing one step further out — aliasing them to their own column names
-// makes `worst`, which reads those columns, cyclic.
-//
-// Address, annotation and timestamp come out of one argMax over a tuple so
-// they describe the same row: picked separately, a lossy responder's address
-// was served with a clean sibling's unreachable label and a third row's
-// timestamp — a hop state that never existed. The cost is that an annotation
-// on a responder that is not the slot's worst does not reach the timeline;
-// /hops?at= still carries every responder's own.
+// queryHopsGrid reads the heatmap's grid — one row per (bucket, ttl) for one
+// probe origin, each slot's responders folded into its worst-loss cycle's row
+// with address, annotation and timestamp read from one argMax tuple so they
+// describe the same row (see CLAUDE.md's storage bullet for the folding and
+// max_loss_pct rationale). No alias may shadow a column it aggregates:
+// `loss_pct AS loss_pct` makes max(loss_pct) an aggregate of an aggregate,
+// and aliasing worst_addr/worst_unreach to their own column names makes
+// `worst`, which reads those columns, cyclic.
 func (r *Reader) queryHopsGrid(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopPoint, error) {
 	// Refused rather than served raw: a slot per cycle puts the producer's
 	// cycle rate back in the row count, which nothing bounds.

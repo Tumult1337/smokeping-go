@@ -61,24 +61,14 @@ const (
 	insertProbeHTTP = `INSERT INTO probe_http (timestamp, target_id, target_group, source, seq, rtt_ms, status, error)`
 )
 
-// flushRetainFactor bounds the backlog a table buffer keeps across failed
-// flushes. On a flush error the batch is retained for retry rather than
-// dropped, but a prolonged ClickHouse outage must not grow `pending` without
-// limit — so the retained backlog is capped at maxRows*flushRetainFactor,
-// dropping (and counting) the oldest overflow. This mirrors the drop-oldest
-// semantics of the slave push ring.
+// flushRetainFactor caps the batch retained across failed flushes at
+// maxRows*flushRetainFactor, dropping (and counting) the oldest overflow so
+// a long ClickHouse outage cannot grow `pending` without limit.
 const flushRetainFactor = 4
 
-// Channel sizing, in slots per table, bound once at startup. A flat 4096
-// everywhere equalized nothing: a cycle produces ~1 cycle row, `pings` rtt
-// rows and ~20 hop rows, so at the deployed 122-target/20s install a
-// ClickHouse stall drank 11 minutes of cycle buffer against 96 seconds of hop
-// buffer and hops died first. Scaling by rows-per-cycle equalizes
-// time-to-overflow instead. hopRowFactor is clamp-limited on purpose: 4096×32
-// is maxChanCap exactly, so any larger factor is inert, and the worst-case
-// hop cycles (90 rows for icmp's 3 rounds × 30 TTLs, 300 for MTR's 10 × 30)
-// still overflow first — drop-oldest and the drop counters are the bound
-// there, not the buffer.
+// Channel sizing scales slots by rows-per-cycle so all four tables absorb a
+// comparable ClickHouse stall; the derivation and the deliberate clamp on
+// hopRowFactor are in CLAUDE.md's "Write buffers" bullet.
 const (
 	baseChanCap   = 4096
 	maxChanCap    = 131072

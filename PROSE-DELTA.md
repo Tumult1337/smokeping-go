@@ -95,3 +95,19 @@ are outside storage ownership): run
 `go test -race ./internal/storage/... ./internal/probe/... ./internal/cluster/... ./internal/alert/... ./internal/scheduler/...`
 (the concurrency-sensitive packages) in the gate, matching the global rule
 that concurrency-sensitive code is tested with -race.
+
+## C13 — rationale moved out of oversized code comments
+
+Trimmed to the one-sentence rule; the surviving facts already live in
+CLAUDE.md's "Write buffers" and storage bullets except these two, which
+belong wherever those bullets live:
+
+- `flushRetainFactor` (writer.go): on a flush error the batch is retained for
+  retry on the next ticker tick rather than dropped; the retained backlog is
+  capped at `maxRows x flushRetainFactor (4)` with the oldest overflow dropped
+  and counted — the third layer (channel, retained batch, slave ring) that is
+  drop-oldest.
+- `queryHopsGrid` (reader.go): reading address, unreach and timestamp from
+  one argMax tuple costs the timeline any annotation carried by a responder
+  that is not the slot's worst; `/hops?at=` still serves every responder's
+  own. Ties between responders resolve arbitrarily, as they did client-side.
