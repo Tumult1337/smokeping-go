@@ -3,6 +3,7 @@ package master
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -378,18 +379,18 @@ func TestHandleCyclesPrefersHeaderOverBatchSource(t *testing.T) {
 func TestRegistryCapsDistinctNames(t *testing.T) {
 	reg := NewRegistry(slog.New(slog.DiscardHandler))
 	for i := range maxRegisteredSlaves {
-		if !reg.Touch("slave-"+strconv.Itoa(i), "", "", "") {
-			t.Fatalf("slave-%d refused below the cap", i)
+		if err := reg.Touch("slave-"+strconv.Itoa(i), "", "", ""); err != nil {
+			t.Fatalf("slave-%d refused below the cap: %v", i, err)
 		}
 	}
-	if reg.Touch("one-too-many", "", "", "") {
-		t.Fatal("registry accepted a name past the cap")
+	if err := reg.Touch("one-too-many", "", "", ""); !errors.Is(err, errRegistryFull) {
+		t.Fatalf("past the cap: err = %v, want errRegistryFull", err)
 	}
 	if reg.Has("one-too-many") {
 		t.Fatal("refused name stored anyway")
 	}
-	if !reg.Touch("slave-0", "v2", "", "") {
-		t.Fatal("an already-registered slave was refused at the cap")
+	if err := reg.Touch("slave-0", "v2", "", ""); err != nil {
+		t.Fatalf("an already-registered slave was refused at the cap: %v", err)
 	}
 }
 
@@ -410,6 +411,28 @@ func TestRegisterRefusedAtCap(t *testing.T) {
 	}
 	if code := postCycles(t, srv, "", "slave-0"); code != http.StatusOK {
 		t.Fatalf("registered slave refused while the registry is full: got %d, want 200", code)
+	}
+}
+
+// An oversized advertise is this request's own bytes, not a capacity
+// condition: answering it "slave registry full" (503) sent an operator
+// chasing a capacity problem that does not exist, on the only endpoint that
+// says why a slave will not join.
+func TestRegisterOversizedFieldIs400NotRegistryFull(t *testing.T) {
+	srv := newTestServer()
+	body := `{"name":"edge-1","advertise":"` + strings.Repeat("a", maxSlaveFieldLen+1) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/register", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized advertise: got %d, want 400", rec.Code)
+	}
+	if got := rec.Body.String(); strings.Contains(got, "registry full") {
+		t.Fatalf("oversized advertise answered as a capacity problem: %q", got)
+	}
+	if srv.registry.Has("edge-1") {
+		t.Error("refused slave stored anyway")
 	}
 }
 

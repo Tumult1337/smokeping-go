@@ -44,6 +44,9 @@ type stubReader struct {
 	// lastStep captures the bucket width passed to the most recent cycle
 	// query, so a test can tell a raw query from a bucketed one.
 	lastStep time.Duration
+	// lastFrom/lastTo capture the window of the most recent cycle query, so a
+	// test can assert a handler scans only what it serves.
+	lastFrom, lastTo time.Time
 	// queries counts every reader call. A window-cap test asserts this stays
 	// zero on rejection: the guard has to fire before the expensive query,
 	// which a status check alone cannot distinguish from a query that ran and
@@ -54,6 +57,7 @@ type stubReader struct {
 func (s *stubReader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.CyclePoint, error) {
 	s.lastSource = f.Source
 	s.lastStep = f.Step
+	s.lastFrom, s.lastTo = from, to
 	s.queries++
 	return s.cycles, s.err
 }
@@ -1156,10 +1160,11 @@ func TestReadEndpointWindowCaps(t *testing.T) {
 	}
 }
 
-// The ?step=raw override bypasses the tier ladder, so it is bounded by the
-// ladder's own raw tier rather than a second copy of that threshold. Asserting
-// the step the reader received keeps a guard that silently downgrades raw to
-// bucketed from passing as a fix.
+// The ?step= overrides bypass the tier ladder, so each is bounded by the
+// ladder's own tier rather than a second copy of its threshold: raw outside
+// the raw tier and 1h past the 1h tier are refused, never widened. Asserting
+// the step the reader received keeps a guard that silently downgrades an
+// override to bucketed from passing as a fix.
 func TestGetCyclesRawStepCap(t *testing.T) {
 	rawTier := 2 * time.Hour
 	if storage.PickCycleStep(rawTier) != 0 {
@@ -1175,7 +1180,9 @@ func TestGetCyclesRawStepCap(t *testing.T) {
 		{"raw past the raw tier", "/api/v1/targets/core/gw/cycles?from=-3h&step=raw", http.StatusBadRequest, 0},
 		{"raw far past the raw tier", "/api/v1/targets/core/gw/cycles?from=-3000d&step=raw", http.StatusBadRequest, 0},
 		{"bucketed wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-30d", http.StatusOK, time.Hour},
-		{"1h override on a wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-30d&step=1h", http.StatusOK, time.Hour},
+		{"1h override at its ladder tier", "/api/v1/targets/core/gw/cycles?from=-30d&step=1h", http.StatusOK, time.Hour},
+		{"1h finer than the 6h tier", "/api/v1/targets/core/gw/cycles?from=-180d&step=1h", http.StatusBadRequest, 0},
+		{"1h finer than the 1d tier", "/api/v1/targets/core/gw/cycles?from=-365d&step=1h", http.StatusBadRequest, 0},
 		{"1d override on a wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-3000d&step=1d", http.StatusOK, 24 * time.Hour},
 	}
 	for _, tc := range cases {
@@ -1198,6 +1205,26 @@ func TestGetCyclesRawStepCap(t *testing.T) {
 				t.Fatalf("step = %s, want %s", r.lastStep, tc.wantStep)
 			}
 		})
+	}
+}
+
+// /status keeps statusRecentCycles points, so that count times the probe
+// interval is the only window it may ask storage for: the previous fixed 24h
+// raw scan decoded ~690x what the handler kept, and the full slice is what
+// CachingReader stored.
+func TestStatusQueriesOnlyTheWindowItServes(t *testing.T) {
+	r := &stubReader{}
+	code, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, "/api/v1/targets/core/gw/status")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", code, body)
+	}
+	// newTestServer configures a 1m interval.
+	want := time.Duration(statusRecentCycles) * time.Minute
+	if got := r.lastTo.Sub(r.lastFrom); got != want {
+		t.Fatalf("query window = %s, want %s (statusRecentCycles x interval)", got, want)
+	}
+	if r.lastStep != 0 {
+		t.Fatalf("step = %s, want raw", r.lastStep)
 	}
 }
 
@@ -2004,7 +2031,7 @@ func TestSignedUnixSecondsStillObeyTheWindowCaps(t *testing.T) {
 		"/api/v1/targets/core/gw/rtts?" + span:                        "rtts window limited to 24h",
 		"/api/v1/targets/core/gw/http?" + span:                        "http window limited to 7d",
 		"/api/v1/targets/core/gw/hops/timeline?source=master&" + span: "hops/timeline window limited to 7d",
-		"/api/v1/targets/core/gw/cycles?step=raw&" + span:             "step=raw is limited to windows the raw tier covers",
+		"/api/v1/targets/core/gw/cycles?step=raw&" + span:             "requested step is finer than the bucket ladder serves",
 	} {
 		t.Run(path, func(t *testing.T) {
 			reader := &stubReader{}

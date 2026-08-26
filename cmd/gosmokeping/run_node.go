@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/alert"
@@ -97,11 +98,15 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	if cfg.Cluster != nil && cfg.Cluster.Token != "" {
 		clusterRegistry := master.NewRegistry(log)
 
-		pins, err := cfg.Cluster.ParsedSlaveAddrs()
-		if err != nil {
+		if _, err := cfg.Cluster.ParsedSlaveAddrs(); err != nil {
 			return fmt.Errorf("cluster.slave_addrs: %w", err)
 		}
-		clusterRegistry.SetPins(pins)
+		// Pins follow the hot-reload contract like every other config
+		// consumer: read from store.Current() per use, never cached, so a
+		// SIGHUP-edited cluster.slave_addrs re-pins immediately.
+		clusterRegistry.SetPinsFn(func() map[string]netip.Addr {
+			return currentSlavePins(log, store.Current())
+		})
 
 		// healthSet is read on every scheduler build, on every /config
 		// request and on every API target listing, so it is a closure over
@@ -226,6 +231,22 @@ func localView(c *config.Config, health *slavehealth.Set) (*config.Config, *prob
 		return nil, nil, err
 	}
 	return local, registry, nil
+}
+
+// currentSlavePins re-parses cluster.slave_addrs from the live config.
+// Validate refuses unparseable pins and Store.Reload keeps the last-good
+// config, so the error branch is a boot-checked invariant; it still logs
+// rather than passing stale pins it has no copy of.
+func currentSlavePins(log *slog.Logger, c *config.Config) map[string]netip.Addr {
+	if c.Cluster == nil {
+		return nil
+	}
+	pins, err := c.Cluster.ParsedSlaveAddrs()
+	if err != nil {
+		log.Error("cluster.slave_addrs unparseable in stored config, treating as unpinned", "err", err)
+		return nil
+	}
+	return pins
 }
 
 // healthListerFunc adapts a closure to api.HealthLister.

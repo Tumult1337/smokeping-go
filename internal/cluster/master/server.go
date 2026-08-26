@@ -6,6 +6,7 @@ package master
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -131,8 +132,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `name required: ≤128 bytes, not "master", no control chars`, http.StatusBadRequest)
 		return
 	}
-	if !s.registry.Touch(req.Name, req.Version, r.RemoteAddr, req.Advertise) {
-		http.Error(w, "slave registry full", http.StatusServiceUnavailable)
+	if err := s.registry.Touch(req.Name, req.Version, r.RemoteAddr, req.Advertise); err != nil {
+		// Registry-full is the retryable capacity condition; anything else is
+		// this request's own bytes and resending them can never succeed.
+		if errors.Is(err, errRegistryFull) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.log.Info("slave registered", "name", req.Name, "version", req.Version, "addr", r.RemoteAddr)

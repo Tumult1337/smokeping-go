@@ -2,6 +2,8 @@ package master
 
 import (
 	"cmp"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -27,12 +29,10 @@ type SlaveInfo struct {
 	// feeds debug and UI paths, and the address must not reach either.
 	Advertise netip.Addr `json:"-"`
 
-	// AdvertiseLogState is the dedup key for the last resolveAdvertise log
-	// line emitted for this slave: the outcome kind plus the raw claimed
-	// value. Touch fires on every authenticated request — roughly every 5s
-	// per slave, forever — so without this a rejected or NAT'd slave would
-	// re-log its condition on every heartbeat. Never serialised to JSON, same
-	// as Advertise: it's log bookkeeping, not registry state.
+	// AdvertiseLogState dedups resolveAdvertise's log lines (outcome kind +
+	// raw claimed value): Touch fires on every authenticated request, so a
+	// rejected or NAT'd slave would otherwise re-log each heartbeat. Never
+	// serialised, like Advertise.
 	AdvertiseLogState string `json:"-"`
 }
 
@@ -48,7 +48,11 @@ type Registry struct {
 	// bridge-networked containers all claiming 172.17.0.2 would collapse the
 	// mesh onto one bogus destination.
 	byAddr map[netip.Addr]string
-	pins   map[string]netip.Addr
+	// pinsFn is the live source of the name→address allowlist, consulted on
+	// every resolution rather than cached so a SIGHUP-edited
+	// cluster.slave_addrs re-pins without waiting for a restart. It runs
+	// under r.mu and must not re-enter the registry.
+	pinsFn func() map[string]netip.Addr
 	// fullWarned dedups the registry-full warning. A refused name is refused
 	// on every retry, and the retry rate is the attacker's to choose.
 	fullWarned bool
@@ -86,44 +90,59 @@ func (r *Registry) SetOnRemove(fn func(name string)) {
 	r.onRemove = fn
 }
 
-// SetPins installs the optional name→address allowlist. A pinned slave that
+// SetPins installs a fixed name→address allowlist. A pinned slave that
 // claims any other address is refused a health entry.
 func (r *Registry) SetPins(pins map[string]netip.Addr) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.pins = pins
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
 }
 
-// maxRegisteredSlaves bounds how many distinct names can be live in the
-// registry of one master process at once. Entries leave only via Sweep (24h
-// idle, swept hourly), so without a ceiling a token holder can mint a fresh
-// name per request for a day; every name that then pushes a cycle becomes a
-// permanent ClickHouse LowCardinality dictionary entry and a row
-// QueryLatestHops must consider forever. The deployed reference fleet runs 6
-// sources, so 512 is ~85× the real shape and far below anything that
-// pressures the map. Refusing a *new* name at the ceiling never evicts a
-// registered one: an established fleet keeps working while an attacker's
-// names are the ones refused.
+// SetPinsFn installs the live source of the pin allowlist; see Registry.pinsFn.
+func (r *Registry) SetPinsFn(fn func() map[string]netip.Addr) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pinsFn = fn
+}
+
+// currentPins must be called with r.mu held (read or write).
+func (r *Registry) currentPins() map[string]netip.Addr {
+	if r.pinsFn == nil {
+		return nil
+	}
+	return r.pinsFn()
+}
+
+// maxRegisteredSlaves bounds distinct live names per master process: the
+// registry is the list of legal source labels, and every minted label is a
+// permanent ClickHouse LowCardinality entry. Refusing a *new* name at the
+// ceiling never evicts a registered one.
 const maxRegisteredSlaves = 512
 
-// Touch records that a slave just checked in and reports whether the registry
-// accepted the name. Safe to call on every request that carries a valid slave
-// identity, not just /register. advertise is the raw slave-reported health
-// address; an empty or rejected value simply leaves the slave out of the
-// health mesh without blocking registration.
-// maxSlaveFieldLen bounds the free strings a slave asks the registry to keep
-// per entry. Both arrive as headers, where only net/http's 1 MiB cap limits
-// them, and both are retained — advertise inside the log-dedup key even when
-// ParseAdvertise rejects it. The longest legal advertise is a 45-byte IPv6
-// text form and a version is a release tag, so 256 is ~5x either.
+// Touch records that a slave just checked in; a non-nil error names why the
+// registry refused the entry. Safe to call on every request that carries a
+// valid slave identity, not just /register. advertise is the raw
+// slave-reported health address; an empty or rejected value simply leaves the
+// slave out of the health mesh without blocking registration.
+// maxSlaveFieldLen bounds the header strings the registry retains per entry;
+// the longest legal advertise is a 45-byte IPv6 text form and a version is a
+// release tag, so 256 is ~5x either.
 const maxSlaveFieldLen = 256
 
-func (r *Registry) Touch(name, version, addr, advertise string) bool {
+// The two refusals stay distinct errors because they need distinct remedies:
+// errRegistryFull is capacity (503, retryable once Sweep frees a name),
+// errSlaveFieldTooLong is this request's own bytes (400, never succeeds
+// resent).
+var (
+	errEmptySlaveName    = errors.New("empty slave name")
+	errSlaveFieldTooLong = fmt.Errorf("version or advertise exceeds %d bytes", maxSlaveFieldLen)
+	errRegistryFull      = errors.New("slave registry full")
+)
+
+func (r *Registry) Touch(name, version, addr, advertise string) error {
 	if name == "" {
-		return false
+		return errEmptySlaveName
 	}
 	if len(version) > maxSlaveFieldLen || len(advertise) > maxSlaveFieldLen {
-		return false
+		return errSlaveFieldTooLong
 	}
 
 	r.mu.Lock()
@@ -137,7 +156,7 @@ func (r *Registry) Touch(name, version, addr, advertise string) bool {
 				r.log.Warn("slave registry full, refusing new names",
 					"registered", maxRegisteredSlaves)
 			}
-			return false
+			return errRegistryFull
 		}
 		info = &SlaveInfo{Name: name}
 		r.slaves[name] = info
@@ -164,15 +183,12 @@ func (r *Registry) Touch(name, version, addr, advertise string) bool {
 	if changed && onChange != nil {
 		onChange()
 	}
-	return true
+	return nil
 }
 
-// Outcome kinds for resolveAdvertise's log dedup key. Each is combined with
-// the raw claimed value to form info.AdvertiseLogState; comparing the
-// combined key (not just next != prev on the resolved Addr) is what lets a
-// rejection log on its first occurrence — a rejected claim resolves to the
-// zero Addr on every call, so prev == next from the second call onward even
-// though nothing about the rejection state has been logged yet.
+// Outcome kinds for resolveAdvertise's log dedup key; the key compares
+// (kind, raw claim) rather than the resolved Addr because a rejected claim
+// resolves to the zero Addr on every call, which would suppress its first log.
 const (
 	advLogNone    = ""        // advertise empty; nothing to validate or log
 	advLogInvalid = "invalid" // failed ParseAdvertise
@@ -182,21 +198,12 @@ const (
 	advLogOK      = "ok"      // accepted, matches observed source (or unparseable)
 )
 
-// resolveAdvertise validates a claimed address against the pin list and the
-// current address ownership map. Must be called with r.mu held.
-//
-// Every rejection path returns the zero Addr, which means "no health entry" —
-// the fail-closed outcome. A slave is never dropped from the registry for a
-// bad advertise value; it just doesn't join the mesh.
-//
-// Each of the four log lines below fires on first occurrence and whenever
-// the (kind, claimed value) pair changes, not on every call — Touch runs on
-// every authenticated request, roughly every 5s per slave, forever. A slave
-// that keeps claiming the same bad value logs once; one that starts claiming
-// a different bad value, or flips between rejected and accepted, logs again.
-// Three of the four (invalid, pin mismatch, duplicate claim) are Warn: they
-// are actionable regardless of network topology. The fourth (observed-source
-// mismatch) is Debug — see its comment below for why.
+// resolveAdvertise validates a claimed address against the live pin list and
+// the address ownership map; call with r.mu held. Every rejection returns the
+// zero Addr — no health entry, never eviction from the registry. Each log
+// line fires once per (kind, claimed value) change rather than per call; the
+// three actionable outcomes are Warn, the observed-source mismatch is Debug
+// (see its comment).
 func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr string) netip.Addr {
 	name := info.Name
 	if advertise == "" {
@@ -211,7 +218,7 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 		}
 		return netip.Addr{}
 	}
-	if pin, pinned := r.pins[name]; pinned && pin != addr {
+	if pin, pinned := r.currentPins()[name]; pinned && pin != addr {
 		if key := advLogPin + ":" + advertise; info.AdvertiseLogState != key {
 			r.log.Warn("slave advertise address does not match its pin, excluded from health mesh",
 				"slave", name, "claimed", addr, "pinned", pin)
@@ -228,16 +235,10 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 		}
 		return netip.Addr{}
 	}
-	// A mismatch against the observed source address is legitimate under NAT,
-	// so it cannot be an error — but it is the signature of a container
-	// reporting its internal address, so it's worth surfacing for direct-
-	// connection debugging. Debug rather than Info: when the master sits
-	// behind a reverse proxy or CDN, remoteAddr is the proxy's address, not
-	// the slave's, so every slave in the fleet trips this comparison and the
-	// line reports nothing actionable. This repo does no X-Forwarded-For /
-	// CF-Connecting-IP parsing (and won't, without a trusted-proxy allowlist
-	// to stop a client spoofing its own source), so remoteAddr is always the
-	// immediate peer — meaningful only when that peer is the slave itself.
+	// Legitimate under NAT but the signature of a container reporting its
+	// internal address; Debug because behind a reverse proxy every slave
+	// trips it — remoteAddr is always the immediate peer, since XFF parsing
+	// without a trusted-proxy allowlist would let a client spoof its source.
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		if observed, perr := netip.ParseAddr(host); perr == nil && observed.Unmap() != addr {
 			if key := advLogInfo + ":" + advertise; info.AdvertiseLogState != key {
@@ -260,8 +261,15 @@ func (r *Registry) Peers() []slavehealth.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]slavehealth.Peer, 0, len(r.slaves))
+	pins := r.currentPins()
 	for _, info := range r.slaves {
 		if !info.Advertise.IsValid() {
+			continue
+		}
+		// Re-check the live pins here, not only at Touch time: a pin added by
+		// SIGHUP must drop a mismatched peer on the next scheduler signal, not
+		// once that slave happens to heartbeat again.
+		if pin, pinned := pins[info.Name]; pinned && pin != info.Advertise {
 			continue
 		}
 		out = append(out, slavehealth.Peer{Name: info.Name, Addr: info.Advertise})

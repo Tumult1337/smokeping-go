@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"net/netip"
 	"testing"
 	"time"
@@ -75,5 +76,21 @@ func TestLocalViewWithoutHealthLeavesProbesAlone(t *testing.T) {
 	}
 	if _, ok := registry.Get(slavehealth.ProbeName); ok {
 		t.Fatalf("registry resolved %q with no health mesh configured", slavehealth.ProbeName)
+	}
+}
+
+// currentSlavePins is the live closure the registry reads pins through; it
+// must parse from whatever config it is handed (the caller passes
+// store.Current()) and treat an absent cluster block as unpinned.
+func TestCurrentSlavePins(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	if got := currentSlavePins(log, &config.Config{}); got != nil {
+		t.Fatalf("nil cluster block: pins = %v, want nil", got)
+	}
+	pins := currentSlavePins(log, &config.Config{
+		Cluster: &config.Cluster{SlaveAddrs: map[string]string{"tokyo-1": "10.44.0.7"}},
+	})
+	if want := netip.MustParseAddr("10.44.0.7"); pins["tokyo-1"] != want {
+		t.Fatalf("pins = %v, want tokyo-1 -> %s", pins, want)
 	}
 }
