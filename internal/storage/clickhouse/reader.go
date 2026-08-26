@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -275,6 +276,11 @@ ORDER BY timestamp, seq`
 		var seq uint16
 		if err := rows.Scan(&p.Time, &p.RTT, &seq); err != nil {
 			return nil, err
+		}
+		// Rows this binary wrote as NaN for a 0µs RTT before rttMS clamped
+		// them; a non-finite value breaks the JSON encoder mid-response.
+		if math.IsNaN(p.RTT) || math.IsInf(p.RTT, 0) {
+			continue
 		}
 		p.Seq = int64(seq)
 		out = append(out, p)

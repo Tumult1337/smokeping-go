@@ -215,16 +215,13 @@ type httpRow struct {
 	err                   string
 }
 
-// rttMS converts a time.Duration to milliseconds. Returns NaN for
-// zero / negative durations as a defensive guard — the current caller
-// only iterates scheduler.Cycle.RTTs, which the probes populate with
-// successful pings only (lost pings never reach this function). If
-// future schema changes start carrying per-ping loss markers through
-// this path, NaN preserves unambiguous "no response" semantics against
-// legitimate sub-millisecond readings.
+// rttMS converts a time.Duration to milliseconds for the Float64 rtt_ms
+// column, clamping negatives to 0 like durUS does; cluster ingest accepts an
+// RTT of exactly 0, and the NaN this returned for it broke /rtts' JSON
+// encoding after the 200 header was already written.
 func rttMS(d time.Duration) float64 {
-	if d <= 0 {
-		return math.NaN()
+	if d < 0 {
+		return 0
 	}
 	return float64(d) / float64(time.Millisecond)
 }

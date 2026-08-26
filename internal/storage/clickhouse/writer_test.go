@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math"
 	"regexp"
 	"slices"
 	"strings"
@@ -24,7 +25,7 @@ import (
 // TestOfferDropsAfterClose below.
 func TestOfferDropsWhenChannelFull(t *testing.T) {
 	w := newTestWriter(t, 1) // tiny channel buffer, no consumer goroutines
-	defer w.Close() //nolint:errcheck // test cleanup
+	defer w.Close()          //nolint:errcheck // test cleanup
 
 	// First send fills the channel; the rest must be dropped immediately.
 	for i := 0; i < 10; i++ {
@@ -74,7 +75,7 @@ func TestCloseIsIdempotent(t *testing.T) {
 // snapshot suitable for surfacing via /api/v1/health or a metric.
 func TestDroppedReports(t *testing.T) {
 	w := newTestWriter(t, 0) // zero-buffer => every send drops
-	defer w.Close() //nolint:errcheck // test cleanup
+	defer w.Close()          //nolint:errcheck // test cleanup
 
 	w.OnCycle(context.Background(), testCycle(time.Now()))
 	w.OnCycle(context.Background(), testCycle(time.Now()))
@@ -363,6 +364,33 @@ func TestHopRTTsNotRacedBetweenFlushAndAlertDispatch(t *testing.T) {
 	}
 	cancel()
 	w.wg.Wait()
+}
+
+// Ingest accepts an RTT of exactly 0 (cluster.boundRTTs is [0, MaxSampleRTT]),
+// and rttMS turned it into a NaN that probe_rtt stored and /rtts could not
+// JSON-encode. 0 stores as itself; a negative — which no producer emits — is
+// clamped like durUS clamps it.
+func TestRTTZeroStoresZeroNotNaN(t *testing.T) {
+	w := newTestWriter(t, 4)
+	cy := testCycle(time.Now())
+	cy.RTTs = []time.Duration{0, 5 * time.Millisecond, -time.Millisecond}
+	w.OnCycle(context.Background(), cy)
+
+	want := []float64{0, 5, 0}
+	for i, wv := range want {
+		select {
+		case raw := <-w.chans[tableProbeRTT]:
+			row := raw.(rttRow)
+			if math.IsNaN(row.rttMS) || math.IsInf(row.rttMS, 0) {
+				t.Fatalf("rtt %d queued as non-finite %v", i, row.rttMS)
+			}
+			if row.rttMS != wv {
+				t.Fatalf("rtt %d queued as %v ms, want %v", i, row.rttMS, wv)
+			}
+		default:
+			t.Fatalf("rtt %d never queued", i)
+		}
+	}
 }
 
 // Sent == 0 is no measurement, and flushCycles would store it as loss_pct 0 —
