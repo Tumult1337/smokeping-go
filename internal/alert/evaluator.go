@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +56,15 @@ type Event struct {
 // Dispatcher delivers alert events. Must be safe for concurrent use.
 type Dispatcher interface {
 	Dispatch(ctx context.Context, e Event)
+}
+
+// DispatchFilter lets a Dispatcher decline an event before the evaluator
+// queues it. Which transitions are worth notifying about is the dispatcher's
+// policy, not the evaluator's, but the queue is a bounded resource the
+// evaluator owns — so the policy is asked rather than duplicated. A Dispatcher
+// that does not implement this receives every transition.
+type DispatchFilter interface {
+	Wants(e Event) bool
 }
 
 // aggKey identifies one (target, alert) pair. Sources live one level below, so
@@ -193,10 +202,12 @@ type Evaluator struct {
 	// transition a shard refuses is reverted rather than delivered out of
 	// order.
 	pending [dispatchShards]chan queuedEvent
-	// queuedBytes is the payload the queues currently retain, summed across
-	// shards. Written by the producer under mu and by every worker on
-	// release, so it is atomic rather than mu-guarded.
-	queuedBytes      atomic.Int64
+	// queuedBytes is the payload each shard's queue currently retains. Per
+	// shard, not global: one counter let a single stalled shard's backlog
+	// refuse transitions on all eight, which is the fleet-wide blast radius
+	// the sharding exists to remove. Written by the producer under mu and by
+	// that shard's worker on release, so it is atomic rather than mu-guarded.
+	queuedBytes      [dispatchShards]atomic.Int64
 	quit             chan struct{}
 	closeOnce        sync.Once
 	inflight         sync.WaitGroup
@@ -277,15 +288,21 @@ const dispatchShards = 8
 const dispatchShardDepth = dispatchQueueDepth / dispatchShards
 
 // dispatchQueueBytes bounds the payload the queues retain, which the depth
-// alone does not: an Event embeds its whole Cycle, and a worst-case one holds
-// config.MaxPingsPerCycle RTTs beside config.MaxHopRowsPerCycle hop rows of
-// cluster.MaxRTTsPerHop each — around 854 KB, so the depth by itself admits
-// 874 MB of queued notifications. At the deployed shape (20 pings, a 30-hop
-// walk) an Event's payload is a few KB and the depth is reached first by more
-// than an order of magnitude; only a pathological cycle reaches this. Refusal
-// is the same revert-and-retry as a full shard, so the cost of reaching it is
-// a page delayed by one interval, not a page lost.
+// alone does not: an Event embeds its whole Cycle, and the largest one ingest
+// accepts holds config.MaxPingsPerCycle RTTs beside cluster.MaxHopsPerCycle
+// hop rows of cluster.MaxRTTsPerHop each — about 1.18 MB, so the depth by
+// itself admits 1.2 GB of queued notifications. The producer's own maximum is
+// smaller (a 10×30 MTR walk is ~47 KB, the deployed 20-ping shape a few KB),
+// so at any shape a probe emits the depth is reached first; only a cycle
+// pushed at the ingest bound reaches this. Refusal is the same
+// revert-and-retry as a full shard, so the cost of reaching it is a page
+// delayed by one interval, not a page lost.
 const dispatchQueueBytes = 64 << 20
+
+// dispatchShardBytes is one shard's share. Split for the same reason the depth
+// is: a global counter meant one stalled shard's backlog refused every other
+// shard's transitions, putting back the fleet-wide coupling the shards remove.
+const dispatchShardBytes = dispatchQueueBytes / dispatchShards
 
 // The shards split the depth rather than multiplying it, so an uneven split
 // would quietly change the queued total. Negative here fails the build, the
@@ -298,6 +315,7 @@ const _ uint = 0 - dispatchQueueDepth%dispatchShards
 type queuedEvent struct {
 	ev    Event
 	bytes int64
+	shard int
 }
 
 // shardFor maps a (target, alert) pair onto a delivery worker. FNV-1a over the
@@ -365,7 +383,7 @@ func (e *Evaluator) deliverLoop(pending <-chan queuedEvent) {
 			for {
 				select {
 				case q := <-pending:
-					e.queuedBytes.Add(-q.bytes)
+					e.queuedBytes[q.shard].Add(-q.bytes)
 					e.inflight.Done()
 				default:
 					return
@@ -380,7 +398,7 @@ func (e *Evaluator) deliverLoop(pending <-chan queuedEvent) {
 func (e *Evaluator) deliver(q queuedEvent) {
 	ev := q.ev
 	defer e.inflight.Done()
-	defer e.queuedBytes.Add(-q.bytes)
+	defer e.queuedBytes[q.shard].Add(-q.bytes)
 	// Dispatch ran under scheduler.Fanout's recover() while it was inline in
 	// OnCycle; on its own goroutine a Dispatcher panic would take the process
 	// down instead, so the perimeter moves with it.
@@ -425,18 +443,25 @@ func (e *Evaluator) Refresh() error {
 // config. Must be called with e.mu held.
 func (e *Evaluator) pruneDepartedTargets() {
 	cfg := e.store.Current()
-	live := make(map[string]struct{})
+	// Keyed by the pair, not by target and alert independently: an alert that
+	// still exists for other targets but is detached from this one can produce
+	// no further cycle for this key either, since evaluate only ever iterates
+	// the target's own Alerts list.
+	live := make(map[aggKey]struct{})
 	for _, g := range cfg.Targets {
 		for _, t := range g.Targets {
-			live[config.TargetRef{Group: g.Group, Target: t}.ID()] = struct{}{}
+			id := config.TargetRef{Group: g.Group, Target: t}.ID()
+			for _, name := range t.Alerts {
+				live[aggKey{target: id, alert: name}] = struct{}{}
+			}
 		}
 	}
 	for key := range e.states {
 		if _, ok := cfg.Alerts[key.alert]; ok {
-			if _, ok := live[key.target]; ok {
+			if _, ok := live[key]; ok {
 				continue
 			}
-			if slavehealth.IsHealthGroup(path.Dir(key.target)) {
+			if group, _, ok := strings.Cut(key.target, "/"); ok && slavehealth.IsHealthGroup(group) {
 				continue
 			}
 		}
@@ -534,7 +559,22 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		return
 	}
 
-	toDispatch, skipped := e.evaluate(cfg, cy, now, liveness, aheadLimit)
+	toDispatch, skipped, refused := e.evaluate(cfg, cy, now, liveness, aheadLimit)
+
+	// Logged after evaluate released e.mu: slog writes synchronously, so a line
+	// emitted under the evaluator's only lock stalls OnCycle for every other
+	// target — on the one path that runs when delivery is already backed up.
+	// One line per pass rather than per alert, for the same reason warnExcluded
+	// rate-limits: a stalled shard re-refuses the same reverted transition on
+	// every cycle.
+	if n := len(refused); n > 0 {
+		r := refused[0]
+		e.log.Error("alert notification refused, delivery queue full; transition will be retried",
+			"example_target", r.target, "example_alert", r.alert,
+			"prev", r.prev, "next", r.next, "reason", r.reason,
+			"held", r.held, "limit", r.limit,
+			"refused_this_cycle", n, "refused_total", r.total)
+	}
 
 	if len(skipped) > 0 {
 		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
@@ -558,36 +598,55 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 // keeping a state nobody was told about. Called with e.mu held, which is what
 // makes the commit and the refusal one step and what makes the byte
 // reservation single-producer; the workers never take that lock.
-func (e *Evaluator) enqueueDispatch(ev Event) bool {
+func (e *Evaluator) enqueueDispatch(ev Event) (bool, *dispatchRefusal) {
+	if f, ok := e.dispatcher.(DispatchFilter); ok && !f.Wants(ev) {
+		// The dispatcher will discard this event on arrival, so queueing it
+		// spends shard depth and byte budget that exist to carry the pages
+		// that do notify. Reported as accepted: the transition is committed
+		// and there is nothing left to deliver.
+		return true, nil
+	}
 	ev = scrubHealthAddresses(ev)
 	size := eventBytes(ev)
-	if held := e.queuedBytes.Add(size); held > dispatchQueueBytes {
-		e.queuedBytes.Add(-size)
-		e.refuseDispatch(ev, "bytes", held, dispatchQueueBytes)
-		return false
+	shard := shardFor(ev.Target.ID(), ev.AlertName)
+	if held := e.queuedBytes[shard].Add(size); held > dispatchShardBytes {
+		e.queuedBytes[shard].Add(-size)
+		return false, e.refuseDispatch(ev, "bytes", held, dispatchShardBytes)
 	}
 	e.inflight.Add(1)
 	select {
-	case e.pending[shardFor(ev.Target.ID(), ev.AlertName)] <- queuedEvent{ev: ev, bytes: size}:
-		return true
+	case e.pending[shard] <- queuedEvent{ev: ev, bytes: size, shard: shard}:
+		return true, nil
 	default:
-		e.queuedBytes.Add(-size)
+		e.queuedBytes[shard].Add(-size)
 		e.inflight.Done()
-		e.refuseDispatch(ev, "depth", int64(dispatchShardDepth), dispatchShardDepth)
-		return false
+		return false, e.refuseDispatch(ev, "depth", int64(dispatchShardDepth), dispatchShardDepth)
 	}
 }
 
-// refuseDispatch counts and reports one refused transition. reason names which
-// of the two ceilings was reached, because they call for different remedies:
-// "depth" is a slow endpoint on this shard's keys, "bytes" is one cycle
-// carrying far more measurement than the fleet's shape.
-func (e *Evaluator) refuseDispatch(ev Event, reason string, held int64, limit int) {
-	e.log.Error("alert notification refused, delivery queue full; transition will be retried",
-		"target", ev.Target.ID(), "alert", ev.AlertName,
-		"prev", ev.Prev, "next", ev.Next, "reason", reason,
-		"held", held, "limit", limit,
-		"refused_total", e.dispatchRefusals.Add(1))
+// dispatchRefusal is one refused transition, returned rather than logged so
+// the line is emitted after e.mu is released: slog writes synchronously, and
+// holding the evaluator's only lock across a journald write blocked OnCycle
+// for every other target on the exact path that runs when delivery is already
+// backed up.
+type dispatchRefusal struct {
+	target, alert, reason string
+	prev, next            State
+	held                  int64
+	limit                 int
+	total                 uint64
+}
+
+// refuseDispatch counts one refused transition and describes it. reason names
+// which of the two ceilings was reached, because they call for different
+// remedies: "depth" is a slow endpoint on this shard's keys, "bytes" is one
+// cycle carrying far more measurement than the fleet's shape.
+func (e *Evaluator) refuseDispatch(ev Event, reason string, held int64, limit int) *dispatchRefusal {
+	return &dispatchRefusal{
+		target: ev.Target.ID(), alert: ev.AlertName, reason: reason,
+		prev: ev.Prev, next: ev.Next,
+		held: held, limit: limit, total: e.dispatchRefusals.Add(1),
+	}
 }
 
 // DispatchRefusals reports transitions the delivery queue could not hold.
@@ -598,7 +657,7 @@ func (e *Evaluator) DispatchRefusals() uint64 { return e.dispatchRefusals.Load()
 // evaluate runs the per-alert state machine under e.mu, held via defer because
 // scheduler.Fanout recovers sink panics — a panic here must not leave the
 // evaluator locked forever inside a process that keeps reporting healthy.
-func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration, aheadLimit int) (toDispatch []Event, skipped []time.Duration) {
+func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration, aheadLimit int) (toDispatch []Event, skipped []time.Duration, refused []*dispatchRefusal) {
 	warmupWindow := stalenessWindow(cfg.Interval)
 	freshness := alertFreshness(cfg.Interval)
 	e.mu.Lock()
@@ -657,6 +716,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 		}
 
 		if !alertCfg.Quorum.Enabled() {
+			pruneQuietSources(bySource, now, freshness)
 			if prev != st.state {
 				ev := Event{
 					Time:      cy.Time,
@@ -672,9 +732,11 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 					// that went quiet while firing would drop that resolve.
 					FiringSources: firingSources(bySource, now, window),
 				}
-				if e.enqueueDispatch(ev) {
+				ok, refusal := e.enqueueDispatch(ev)
+				if ok {
 					toDispatch = append(toDispatch, ev)
 				} else {
+					refused = append(refused, refusal)
 					// Undo the transition rather than keep a state the
 					// operator was never told about: dispatch is change-gated
 					// with no renotify, so a committed-but-undelivered
@@ -726,14 +788,15 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 				// exactly the set the quorum decision was made on.
 				FiringSources: firingSources(bySource, now, window),
 			}
-			if e.enqueueDispatch(ev) {
+			if ok, refusal := e.enqueueDispatch(ev); ok {
 				toDispatch = append(toDispatch, ev)
 			} else {
+				refused = append(refused, refusal)
 				e.agg[key] = prevAgg
 			}
 		}
 	}
-	return toDispatch, skipped
+	return toDispatch, skipped, refused
 }
 
 // warnExcluded reports at Warn that a source's cycles are being stored but not
@@ -840,6 +903,29 @@ func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window
 		}
 	}
 	return firing, live
+}
+
+// pruneQuietSources drops per-source state for sources that can no longer
+// produce an evaluable cycle. tally is the only other reaper and it runs on
+// the quorum path alone, so a non-quorum alert accumulated an alertState — its
+// up-to-8 KiB ahead slice included — for every source name that ever pushed to
+// it, and firingSources then scanned all of them under e.mu on every
+// transition. The rule is tally's: past lastCycle+freshness every stamp the
+// entry holds is refused by the freshness gate upstream, so the replay
+// identity buys nothing.
+//
+// A source in StateFiring is exempt whatever its age. Unlike quorum, a
+// per-source alert dispatches its resolve from exactly this state when the
+// source comes back, and a recreated entry starts at StateOK — so evicting one
+// makes the recovery a non-transition and the operator's page never closes.
+// The leak that leaves is bounded by sources that died while firing, which is
+// the set an operator is already looking at.
+func pruneQuietSources(bySource map[string]*alertState, now time.Time, freshness time.Duration) {
+	for src, st := range bySource {
+		if st.state != StateFiring && now.Sub(st.lastCycle) > freshness {
+			delete(bySource, src)
+		}
+	}
 }
 
 // firingSources names the sources currently in StateFiring, sorted so the

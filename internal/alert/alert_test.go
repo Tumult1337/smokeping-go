@@ -3104,7 +3104,7 @@ func TestQueueRefusesOnBytesBeforeDepthAndReleasesThem(t *testing.T) {
 	if ev.DispatchRefusals() == 0 {
 		t.Fatal("worst-case cycles never exhausted the queue at all")
 	}
-	if held := ev.queuedBytes.Load(); held > dispatchQueueBytes {
+	if held := queuedBytesTotal(ev); held > dispatchQueueBytes {
 		t.Fatalf("queue retains %d bytes, past its %d ceiling", held, dispatchQueueBytes)
 	}
 	if queued >= dispatchShardDepth {
@@ -3113,7 +3113,290 @@ func TestQueueRefusesOnBytesBeforeDepthAndReleasesThem(t *testing.T) {
 
 	close(gate)
 	ev.flush()
-	if held := ev.queuedBytes.Load(); held != 0 {
+	if held := queuedBytesTotal(ev); held != 0 {
 		t.Fatalf("queue drained but still holds %d reserved bytes — the reservation leaks, and a later burst is refused on bytes nothing is using", held)
+	}
+}
+
+func queuedBytesTotal(e *Evaluator) int64 {
+	var n int64
+	for i := range e.queuedBytes {
+		n += e.queuedBytes[i].Load()
+	}
+	return n
+}
+
+// The byte ceiling must be per shard for the same reason the depth is. As one
+// global counter, a backlog of large cycles behind a single hung endpoint
+// refused transitions on all eight shards — the fleet-wide coupling the
+// sharding exists to remove, arriving through the memory bound instead.
+func TestByteCeilingIsPerShardNotFleetWide(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+
+	names := make([]string, 0, 32)
+	for i := range 32 {
+		names = append(names, fmt.Sprintf("gw-%02d", i))
+	}
+	stuck := names[0]
+	stuckShard := shardFor("core/"+stuck, "quorum-test")
+	var other string
+	for _, n := range names[1:] {
+		if shardFor("core/"+n, "quorum-test") != stuckShard {
+			other = n
+			break
+		}
+	}
+	if other == "" {
+		t.Fatal("no target hashes off the stuck shard")
+	}
+
+	var mu sync.Mutex
+	var delivered []string
+	ev.dispatcher = dispatcherFunc(func(_ context.Context, e Event) {
+		if e.Target.Target.Name == stuck {
+			<-gate
+			return
+		}
+		mu.Lock()
+		delivered = append(delivered, e.Target.Target.Name)
+		mu.Unlock()
+	})
+
+	// Fill the stuck shard with worst-case payloads until it refuses on bytes.
+	for i := 0; ev.DispatchRefusals() == 0 && i < dispatchShardDepth+8; i++ {
+		clk.advance(time.Second)
+		loss := 0.0
+		if i%2 == 0 {
+			loss = 100
+		}
+		cy := cycleAt(clk, "tokyo-1", loss)
+		cy.Target.Target.Name = stuck
+		cy.RTTs = make([]time.Duration, config.MaxPingsPerCycle)
+		cy.Hops = make([]probe.Hop, config.MaxHopRowsPerCycle)
+		for h := range cy.Hops {
+			cy.Hops[h].RTTs = make([]time.Duration, cluster.MaxRTTsPerHop)
+		}
+		ev.OnCycle(context.Background(), cy)
+	}
+	if ev.DispatchRefusals() == 0 {
+		t.Fatal("the stuck shard never reached a ceiling at all")
+	}
+
+	// A target on another shard must still be able to page — carrying the same
+	// worst-case payload, so a shared counter (left just under its ceiling by
+	// the rollback of the refusal above) cannot admit it on size alone.
+	clk.advance(time.Second)
+	cy := cycleAt(clk, "tokyo-1", 100)
+	cy.Target.Target.Name = other
+	cy.RTTs = make([]time.Duration, config.MaxPingsPerCycle)
+	cy.Hops = make([]probe.Hop, config.MaxHopRowsPerCycle)
+	for h := range cy.Hops {
+		cy.Hops[h].RTTs = make([]time.Duration, cluster.MaxRTTsPerHop)
+	}
+	ev.OnCycle(context.Background(), cy)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		n := len(delivered)
+		mu.Unlock()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s hashes to shard %d but was never paged while shard %d was full — the byte ceiling is shared across shards",
+				other, shardFor("core/"+other, "quorum-test"), stuckShard)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A slave name may contain a slash — validSlaveName rejects only empty,
+// over-long, "master" and control characters — and TargetRef.ID() joins group
+// and name on the FIRST slash. Recovering the group with path.Dir took the
+// last one, so `_cluster/eu/fra1` read as group `_cluster/eu`, missed the
+// health-group exemption, and had its whole alert state deleted on every
+// Refresh — which RunLifecycle fires on every slave registration, not just on
+// SIGHUP. A deleted agg entry makes prevAgg StateOK, so a firing slave-down
+// alert never dispatches its resolve.
+func TestHealthTargetWithASlashedSlaveNameSurvivesRefresh(t *testing.T) {
+	ev, _, _ := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	key := aggKey{target: slavehealth.Group + "/eu/fra1", alert: "quorum-test"}
+	ev.mu.Lock()
+	ev.states[key] = map[string]*alertState{"master": {state: StateFiring}}
+	ev.agg[key] = StateFiring
+	ev.mu.Unlock()
+
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if _, ok := ev.states[key]; !ok {
+		t.Fatal("a health target whose slave name contains a slash lost its alert state on reload; its firing page can never resolve")
+	}
+	if got := ev.agg[key]; got != StateFiring {
+		t.Fatalf("aggregate is %q, want %q", got, StateFiring)
+	}
+}
+
+// tally is the only other reaper and it runs on the quorum path alone, so a
+// non-quorum alert kept an alertState for every source name that ever pushed
+// to it — each able to hold an 8 KiB ahead slice, and all of them scanned by
+// firingSources under e.mu on every transition. A source still firing is
+// exempt: a per-source alert dispatches its resolve from exactly that state,
+// and a recreated entry starts at StateOK, which makes the recovery a
+// non-transition and leaves the page open forever.
+func TestNonQuorumReapsQuietSourcesButNotFiringOnes(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	for i := range 50 {
+		ev.OnCycle(context.Background(), cycleAt(clk, fmt.Sprintf("ephemeral-%d", i), 0))
+		clk.advance(time.Millisecond)
+	}
+	ev.OnCycle(context.Background(), cycleAt(clk, "dead-while-firing", 100))
+	ev.flush()
+
+	key := aggKey{target: "core/gw", alert: "quorum-test"}
+	ev.mu.Lock()
+	before := len(ev.states[key])
+	ev.mu.Unlock()
+	if before != 51 {
+		t.Fatalf("fixture built %d sources, want 51", before)
+	}
+
+	// Well past alertFreshness for the 1m fixture interval.
+	clk.advance(time.Hour)
+	ev.OnCycle(context.Background(), cycleAt(clk, "live", 0))
+	ev.flush()
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	bySource := ev.states[key]
+	for i := range 50 {
+		if _, ok := bySource[fmt.Sprintf("ephemeral-%d", i)]; ok {
+			t.Fatalf("quiet source ephemeral-%d survived %v of silence; a non-quorum alert never reaps", i, time.Hour)
+		}
+	}
+	if st, ok := bySource["dead-while-firing"]; !ok || st.state != StateFiring {
+		t.Fatal("a source that went quiet while firing was reaped; its resolve can never be dispatched")
+	}
+}
+
+// filteringDispatcher declines everything the ActionDispatcher would drop on
+// arrival, which is what the production dispatcher does.
+type filteringDispatcher struct {
+	dispatcherFunc
+}
+
+func (f filteringDispatcher) Wants(e Event) bool {
+	return e.Next == StateFiring || e.Prev == StateFiring
+}
+
+// The queue's depth and byte budget exist to carry pages. Every per-source
+// transition was enqueued, including OK→PENDING and PENDING→OK, which
+// ActionDispatcher discards on its first line — so on a stalled shard a flap
+// filled the FIFO with events that can notify nobody and the real OK→FIRING
+// behind them was refused and delayed.
+func TestFilteredTransitionsNeverReachTheQueue(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
+	})
+	var mu sync.Mutex
+	var got []State
+	ev.dispatcher = filteringDispatcher{dispatcherFunc(func(_ context.Context, e Event) {
+		mu.Lock()
+		got = append(got, e.Next)
+		mu.Unlock()
+	})}
+
+	// Two bad cycles reach PENDING without firing, then recovery clears it.
+	for _, loss := range []float64{100, 100, 0} {
+		clk.advance(time.Second)
+		ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", loss))
+	}
+	ev.flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("queued %v; none of these can notify anyone, so none should spend a queue slot", got)
+	}
+	if held := queuedBytesTotal(ev); held != 0 {
+		t.Fatalf("filtered transitions still charged %d bytes against the budget", held)
+	}
+}
+
+// An alert detached from a target it used to name can produce no further cycle
+// for that pair, because evaluate only ever iterates the target's own Alerts
+// list. Keying the sweep on the alert existing anywhere in cfg.Alerts left the
+// whole aggKey unreachable for the process's life.
+func TestRefreshDropsAnAlertDetachedFromItsTarget(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	write := func(alerts string) {
+		t.Helper()
+		raw := `{
+			"listen": ":8080",
+			"interval": "1m",
+			"pings": 20,
+			"storage": {"clickhouse": {"addr": "ch:9000"}},
+			"probes": {"icmp": {"type": "icmp", "timeout": "2s"}},
+			"targets": [{"group":"core","targets":[
+				{"name":"gw","host":"1.1.1.1","probe":"icmp","alerts":` + alerts + `}
+			]}],
+			"alerts": {
+				"loss": {"condition":"loss_pct > 50","sustained":1,"actions":["log"]},
+				"latency": {"condition":"rtt_median > 100","sustained":1,"actions":["log"]}
+			},
+			"actions": {"log": {"type":"log"}}
+		}`
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	write(`["loss","latency"]`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, &recordingDispatcher{})
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	t.Cleanup(ev.Close)
+
+	detached := aggKey{target: "core/gw", alert: "latency"}
+	kept := aggKey{target: "core/gw", alert: "loss"}
+	ev.mu.Lock()
+	ev.states[detached] = map[string]*alertState{"tokyo-1": {state: StateOK}}
+	ev.states[kept] = map[string]*alertState{"tokyo-1": {state: StateOK}}
+	ev.mu.Unlock()
+
+	// latency stays defined for other targets; core/gw simply stops naming it.
+	write(`["loss"]`)
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if _, ok := ev.states[detached]; ok {
+		t.Fatal("core/gw no longer names the latency alert, but its state survived — evaluate only iterates the target's own alerts, so nothing can ever revisit that key")
+	}
+	if _, ok := ev.states[kept]; !ok {
+		t.Fatal("the alert the target still names was swept too")
 	}
 }

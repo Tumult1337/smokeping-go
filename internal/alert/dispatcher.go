@@ -42,11 +42,17 @@ func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
 // Evaluator is a multiple of.
 const actionTimeout = 10 * time.Second
 
+// Wants implements DispatchFilter. Only a transition into or out of firing
+// notifies anyone — pending transitions are too noisy for operators and the
+// state-change log line already captures them for debugging — so the evaluator
+// asks before spending a queue slot and the byte budget on one that Dispatch
+// would drop on arrival.
+func (d *ActionDispatcher) Wants(e Event) bool {
+	return e.Next == StateFiring || e.Prev == StateFiring
+}
+
 func (d *ActionDispatcher) Dispatch(ctx context.Context, e Event) {
-	// Only notify when an alert enters or leaves firing — pending transitions
-	// are too noisy for operators and the state-change log line already
-	// captures them for debugging.
-	if e.Next != StateFiring && e.Prev != StateFiring {
+	if !d.Wants(e) {
 		return
 	}
 	cfg := d.store.Current()
@@ -134,6 +140,15 @@ func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Actio
 	}
 	cmd := exec.CommandContext(execCtx, parts[0], parts[1:]...)
 	cmd.Stdin = strings.NewReader(body)
+	// Nil Stdout/Stderr wires the child straight to /dev/null: no pipe, so no
+	// copy goroutine for Wait to block on. CommandContext kills only the
+	// direct child, and with a pipe an orphan holding the inherited descriptor
+	// — `notify.sh &`, systemd-run, any helper daemon — kept CombinedOutput
+	// blocked long past the deadline, wedging this shard's delivery worker for
+	// as long as the orphan lived. WaitDelay bounds the stdin copier the same
+	// way. The output was discarded regardless: it is unbounded operator-script
+	// text and execFailureCategory reports the exit code alone.
+	cmd.WaitDelay = actionTimeout
 	cmd.Env = append(cmd.Environ(),
 		fmt.Sprintf("ALERT_TARGET=%s", e.Target.ID()),
 		fmt.Sprintf("ALERT_NAME=%s", e.AlertName),
@@ -145,7 +160,7 @@ func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Actio
 	// credentials, exec.Error quotes argv[0], and the command's own output is
 	// unbounded free text — so the log carries the action name and a fixed
 	// category only, like its webhook/discord siblings.
-	if _, err := cmd.CombinedOutput(); err != nil {
+	if err := cmd.Run(); err != nil {
 		d.log.Warn("exec failed", "action", name, "err", execFailureCategory(execCtx, err))
 	}
 }

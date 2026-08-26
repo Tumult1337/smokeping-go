@@ -912,7 +912,12 @@ Key points a reader can't derive from a single file:
   `httpFailureCategory` siblings: `a.Command` is env-expanded from the raw
   config bytes and can embed a resolved secret, `exec.Error` quotes
   argv[0], and the command's stdout+stderr is unbounded operator-script
-  output.
+  output. The `exec` action runs `cmd.Run()` with nil `Stdout`/`Stderr`
+  and `cmd.WaitDelay = actionTimeout`: `CombinedOutput` builds a pipe, and
+  `CommandContext` kills only the direct child, so any orphan holding the
+  inherited descriptor — `notify.sh &`, `systemd-run`, a helper daemon —
+  kept `Wait` blocked long past the deadline and wedged that shard's
+  delivery worker for as long as it lived.
 
   The master's own scheduler builds its probe registry from
   `master.LocalTargets`' returned config, not from `cfg.Probes` — the
@@ -1063,10 +1068,25 @@ Key points a reader can't derive from a single file:
   freshness gate upstream and retention buys nothing. A *time-based*
   global sweep was tried and reverted: retention is load-bearing,
   because a silent source's `StateFiring` is what dispatches its
-  eventual resolve. `pruneDepartedTargets` sweeps on `Refresh` instead,
-  dropping only a target or alert the reloaded config no longer names —
-  those can produce no further cycle — with the health group exempt
-  because it lives outside the stored config. The cost is that a producer whose clock steps
+  eventual resolve. Two bounded sweeps replace it. `pruneQuietSources` runs
+  on the **non-quorum** path, which `tally` never reaches, so an alert
+  without quorum no longer keeps an `alertState` — `ahead` slice included —
+  for every source name that ever pushed to it, scanned by `firingSources`
+  under `e.mu` on every transition. Its rule is `tally`'s, with one
+  exemption: a source in `StateFiring` is never reaped whatever its age,
+  because a per-source alert dispatches its resolve from exactly that
+  state and a recreated entry starts at `StateOK`, which makes the
+  recovery a non-transition and leaves the page open. `pruneDepartedTargets`
+  sweeps on `Refresh`, dropping a `(target, alert)` **pair** the reloaded
+  config no longer names — keyed on the pair, because an alert that still
+  exists for other targets but is detached from this one can produce no
+  further cycle for this key either, and `evaluate` only ever iterates the
+  target's own `Alerts` list. The health group is exempt because it lives
+  outside the stored config, and its group is recovered with the **first**
+  `/` — `TargetRef.ID()` joins on that one, so `path.Dir`'s last-slash
+  reading turned a slave named `eu/fra1` into group `_cluster/eu`, missed
+  the exemption, and deleted the state a firing slave-down alert needs to
+  resolve. The cost is that a producer whose clock steps
   backwards contributes nothing until its clock passes the newest timestamp
   accepted from it, which is why that skip is warned about rather than counted
   silently.
@@ -1167,13 +1187,33 @@ Key points a reader can't derive from a single file:
   `Cycle`, and a worst-case one carries `config.MaxPingsPerCycle` RTTs
   beside `config.MaxHopRowsPerCycle` hop rows of `cluster.MaxRTTsPerHop`
   each — ~854 KB, so the depth alone admitted 874 MB of queued
-  notifications. `dispatchQueueBytes` (64 MiB, summed across shards in
-  `queuedBytes`, reserved under `e.mu` and released by the worker) is the
-  second ceiling. It is inert at any real shape — the deployed 20-ping,
-  30-hop cycle is a few KB, so the depth is reached first by more than an
-  order of magnitude — and a refusal on it is the same revert-and-retry,
-  logged with `reason=bytes` against the depth's `reason=depth` because
-  the two call for different remedies. Each worker carries its own
+  notifications — and the largest an Event ingest accepts is bigger still,
+  `config.MaxPingsPerCycle` RTTs beside `cluster.MaxHopsPerCycle` hop rows
+  of `cluster.MaxRTTsPerHop` each, ~1.18 MB. `dispatchQueueBytes` (64 MiB)
+  is the second ceiling, split as `dispatchShardBytes` and reserved under
+  `e.mu` against that shard's own counter. **Per shard, for the same reason
+  the depth is:** one global counter meant a single stalled shard's backlog
+  refused transitions on all eight, putting the fleet-wide coupling back
+  through the memory bound. It is inert at any shape a probe emits — a
+  10×30 MTR walk is ~47 KB, the deployed 20-ping cycle a few KB, so the
+  depth is reached first — and a refusal on it is the same
+  revert-and-retry, logged with `reason=bytes` against the depth's
+  `reason=depth` because the two call for different remedies. Refusals are
+  collected and logged **after** `e.mu` is released, one line per pass:
+  `slog` writes synchronously, so a line under the evaluator's only lock
+  stalled `OnCycle` for every other target on the one path that runs when
+  delivery is already backed up.
+
+  A transition the `Dispatcher` would discard never enters the queue at
+  all. `DispatchFilter` is the optional interface it declares that with —
+  `ActionDispatcher.Wants` is the same enters-or-leaves-firing gate
+  `Dispatch` opens with — because which transitions notify anyone is the
+  dispatcher's policy while the queue is the evaluator's bounded resource,
+  so the policy is asked rather than duplicated. Without it a flapping
+  `sustained: 3` alert filled a stalled shard with `OK→PENDING` and
+  `PENDING→OK` events that can page nobody, and the real `OK→FIRING`
+  behind them was refused and delayed. A `Dispatcher` that does not
+  implement it still receives every transition. Each worker carries its own
   `recover()` — dispatch ran inside `scheduler.Fanout`'s while it was
   inline, and that perimeter has to move with the work or a `Dispatcher`
   panic takes the process down. `Close` signals the workers and returns
