@@ -219,8 +219,13 @@ func rttMS(d time.Duration) float64 {
 // offer is the drop-oldest-on-overflow primitive used by OnCycle: a full
 // channel means ClickHouse is stalling, and the buffer must surface with the
 // newest rows when it recovers — the same choice the flush-retry backlog and
-// the slave push ring make. Rows offered after Close are dropped immediately
-// and counted — the channel is still open at that point but its consumer
+// the slave push ring make. Overflow evicts and enqueues without a lock, so
+// two producers overlapping can invert one pair: the row evicted is whatever
+// the channel holds by then, which a producer that got in between may have
+// made newer than the row being offered. Strictness there would mean
+// serialising the fast path against a stall that has already cost more than
+// one row of recency. Rows offered after Close are dropped immediately and
+// counted — the channel is still open at that point but its consumer
 // goroutines have exited, so a naive send would queue forever-unflushed bytes
 // with no observability.
 func (w *Writer) offer(table int, row any) {
