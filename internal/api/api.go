@@ -50,6 +50,14 @@ type ReaderStats interface {
 	Stats() storage.CacheStats
 }
 
+// AlertStats exposes the alert evaluator's delivery-queue refusals to
+// /health; nil when no evaluator is wired. A refusal is reverted and retried,
+// so a rising count means notification delivery is backed up, not that pages
+// were lost.
+type AlertStats interface {
+	DispatchRefusals() uint64
+}
+
 type Server struct {
 	log            *slog.Logger
 	store          *config.Store
@@ -60,6 +68,7 @@ type Server struct {
 	healthLister   HealthLister
 	writerStats    WriterStats
 	readerStats    ReaderStats
+	alertStats     AlertStats
 	version        string
 	startAt        time.Time
 }
@@ -86,6 +95,9 @@ type Options struct {
 	// ReaderStats reports the read cache's hit/miss counters on /health. Nil
 	// when the reader is not a caching one.
 	ReaderStats ReaderStats
+	// AlertStats reports alert delivery-queue refusals on /health. Nil when
+	// no alert evaluator is wired.
+	AlertStats AlertStats
 	// Version is the build version reported by /health. Empty falls back to "dev".
 	Version string
 }
@@ -105,6 +117,7 @@ func New(opts Options) *Server {
 		healthLister:   opts.Health,
 		writerStats:    opts.WriterStats,
 		readerStats:    opts.ReaderStats,
+		alertStats:     opts.AlertStats,
 		version:        v,
 		startAt:        time.Now(),
 	}
@@ -211,6 +224,9 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.readerStats != nil {
 		payload["cache"] = s.readerStats.Stats()
+	}
+	if s.alertStats != nil {
+		payload["alert_dispatch_refusals"] = s.alertStats.DispatchRefusals()
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

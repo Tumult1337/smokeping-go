@@ -1139,14 +1139,17 @@ Key points a reader can't derive from a single file:
   re-detects and re-dispatches it. Keeping it would be a page that never
   happens: dispatch is change-gated with no renotify, so a
   committed-but-undelivered FIRING leaves the endpoint's first payload the
-  resolve for it. Refusals are counted on `DispatchDrops` and logged at
-  Error; the depth is therefore a memory ceiling, and the queue retains
-  each Event's whole `Cycle`, hop rows included. The worker carries its
-  own `recover()` — dispatch ran inside `scheduler.Fanout`'s while it was
-  inline, and that perimeter has to move with the work or a `Dispatcher`
-  panic takes the process down. `Close` signals the worker and returns
-  without waiting — the worker may be inside a delivery that never
-  answers, which is the wait every other goroutine is being spared.
+  resolve for it. Refusals are logged at Error and served as
+  `alert_dispatch_refusals` on `/api/v1/health`, named for what they are
+  rather than as drops: the transition is retried, so a rising count is a
+  delivery backlog and not missing pages. The depth is therefore a memory
+  ceiling, and the queue retains each Event's whole `Cycle`, hop rows
+  included. The worker carries its own `recover()` — dispatch ran inside
+  `scheduler.Fanout`'s while it was inline, and that perimeter has to move
+  with the work or a `Dispatcher` panic takes the process down. `Close`
+  signals the worker and returns without waiting — the worker may be
+  inside a delivery that never answers, which is the wait every other
+  goroutine is being spared.
 
   `Event.FiringSources` names the sources firing at dispatch time
   (sorted; stale and unnamed sources excluded) and is populated on both

@@ -173,6 +173,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		Health:         healthLister,
 		WriterStats:    writerStats,
 		ReaderStats:    readerStats,
+		AlertStats:     evaluator,
 		Version:        version,
 	})
 	serverDone := make(chan error, 1)

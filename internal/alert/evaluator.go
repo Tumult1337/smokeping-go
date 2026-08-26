@@ -191,11 +191,11 @@ type Evaluator struct {
 	// not. One worker, so a firing still precedes its own resolve, and a
 	// transition the queue refuses is reverted rather than delivered out of
 	// order.
-	pending       chan Event
-	quit          chan struct{}
-	closeOnce     sync.Once
-	inflight      sync.WaitGroup
-	dispatchDrops atomic.Uint64
+	pending          chan Event
+	quit             chan struct{}
+	closeOnce        sync.Once
+	inflight         sync.WaitGroup
+	dispatchRefusals atomic.Uint64
 
 	// excludedMu guards excluded, which rate-limits the warning below. It is
 	// separate from mu because the freshness check runs before the state lock
@@ -477,13 +477,15 @@ func (e *Evaluator) enqueueDispatch(ev Event) bool {
 		e.log.Error("alert notification refused, delivery queue full; transition will be retried",
 			"target", ev.Target.ID(), "alert", ev.AlertName,
 			"prev", ev.Prev, "next", ev.Next,
-			"refused_total", e.dispatchDrops.Add(1), "depth", dispatchQueueDepth)
+			"refused_total", e.dispatchRefusals.Add(1), "depth", dispatchQueueDepth)
 		return false
 	}
 }
 
-// DispatchDrops reports notifications the delivery queue could not hold.
-func (e *Evaluator) DispatchDrops() uint64 { return e.dispatchDrops.Load() }
+// DispatchRefusals reports transitions the delivery queue could not hold.
+// They are reverted and re-detected on the next cycle rather than lost, so a
+// non-zero value is a delivery backlog, not missing pages.
+func (e *Evaluator) DispatchRefusals() uint64 { return e.dispatchRefusals.Load() }
 
 // evaluate runs the per-alert state machine under e.mu, held via defer because
 // scheduler.Fanout recovers sink panics — a panic here must not leave the

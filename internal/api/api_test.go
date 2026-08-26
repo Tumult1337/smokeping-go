@@ -119,6 +119,14 @@ func withReaderStats(s ReaderStats) testOpt {
 	return func(o *Options) { o.ReaderStats = s }
 }
 
+func withAlertStats(s AlertStats) testOpt {
+	return func(o *Options) { o.AlertStats = s }
+}
+
+type alertStatStub uint64
+
+func (a alertStatStub) DispatchRefusals() uint64 { return uint64(a) }
+
 type cacheStatStub storage.CacheStats
 
 func (c cacheStatStub) Stats() storage.CacheStats { return storage.CacheStats(c) }
@@ -1511,6 +1519,28 @@ func TestHealthReportsCacheStats(t *testing.T) {
 	doJSON(t, srv, "GET", "/api/v1/health", &body)
 	if body.Cache.CyclesHits != 9 || body.Cache.HopsMisses != 1 {
 		t.Fatalf("cache = %+v, want cycles_hits=9 hops_misses=1", body.Cache)
+	}
+}
+
+func TestHealthReportsAlertDispatchRefusals(t *testing.T) {
+	srv := newTestServer(t, withAlertStats(alertStatStub(3)))
+	var body struct {
+		Refusals uint64 `json:"alert_dispatch_refusals"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/health", &body)
+	if body.Refusals != 3 {
+		t.Fatalf("alert_dispatch_refusals = %d, want 3", body.Refusals)
+	}
+}
+
+// A slave runs no evaluator, so the field must be absent rather than a zero
+// reading as a delivery queue that has never been under pressure.
+func TestHealthOmitsAlertRefusalsWithoutAnEvaluator(t *testing.T) {
+	srv := newTestServer(t)
+	var body map[string]any
+	doJSON(t, srv, "GET", "/api/v1/health", &body)
+	if _, ok := body["alert_dispatch_refusals"]; ok {
+		t.Fatal("alert_dispatch_refusals present with no evaluator wired")
 	}
 }
 

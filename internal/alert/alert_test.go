@@ -2745,7 +2745,7 @@ func TestRefusedTransitionIsRevertedNotCommitted(t *testing.T) {
 
 	// One event parks on the gate inside the worker, the rest fill the buffer,
 	// and everything past it is refused.
-	for i := 0; ev.DispatchDrops() == 0 && i < dispatchQueueDepth+16; i++ {
+	for i := 0; ev.DispatchRefusals() == 0 && i < dispatchQueueDepth+16; i++ {
 		clk.advance(time.Second)
 		loss := 0.0
 		if i%2 == 0 {
@@ -2753,7 +2753,7 @@ func TestRefusedTransitionIsRevertedNotCommitted(t *testing.T) {
 		}
 		ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", loss))
 	}
-	if ev.DispatchDrops() == 0 {
+	if ev.DispatchRefusals() == 0 {
 		t.Fatal("fixture never filled the queue")
 	}
 
@@ -2796,7 +2796,7 @@ func TestFullDeliveryQueueDropsLoudlyRatherThanBlocking(t *testing.T) {
 		}
 		ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", loss))
 	}
-	if got := ev.DispatchDrops(); got == 0 {
+	if got := ev.DispatchRefusals(); got == 0 {
 		t.Fatal("queue past its depth dropped nothing — the producer blocked instead")
 	}
 }
