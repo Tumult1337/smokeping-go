@@ -396,11 +396,35 @@ func TestValidateBoundsRetentionDays(t *testing.T) {
 				t.Fatal("a retention past the UInt32 DateTime span must be refused")
 			}
 		})
-		t.Run(f.name+" at the ceiling", func(t *testing.T) {
+		// MaxRetentionDays is a sanity bound, not the representable maximum:
+		// the TTL is evaluated against each row's own timestamp, so what fits
+		// inside DateTime depends on the clock. Validate applies that check
+		// too, because a retention it accepts must be one the process can
+		// boot with — 7,482 of the values the fixed ceiling admits validated
+		// green on load and on SIGHUP and then made the master refuse to
+		// start at its next restart, a disagreement invisible until a
+		// redeploy since Bootstrap runs only at startup.
+		t.Run(f.name+" at the representable maximum", func(t *testing.T) {
+			at := time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)
+			orig := validateNow
+			validateNow = func() time.Time { return at }
+			t.Cleanup(func() { validateNow = orig })
+
+			last := int(MaxDateTime.Sub(at).Hours() / 24)
+			if last >= MaxRetentionDays {
+				t.Fatalf("fixture is vacuous: the representable maximum %d is not below MaxRetentionDays %d", last, MaxRetentionDays)
+			}
 			cfg := scheduleConfig(20*time.Second, 10)
-			f.set(cfg, MaxRetentionDays)
+			f.set(cfg, last)
 			if err := cfg.Validate(); err != nil {
-				t.Fatalf("the ceiling itself is representable and must validate: %v", err)
+				t.Fatalf("the last representable retention must validate: %v", err)
+			}
+			cfg = scheduleConfig(20*time.Second, 10)
+			f.set(cfg, last+1)
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("%d days expires past DateTime but validated — the process will refuse to boot on it", last+1)
+			} else if !strings.Contains(err.Error(), f.name) {
+				t.Errorf("error %q does not name the field %q", err, f.name)
 			}
 		})
 		t.Run(f.name+" zero still defaults", func(t *testing.T) {

@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -50,6 +49,17 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 	}
 	defer conn.Close() //nolint:errcheck // connection teardown; error not actionable
 
+	// Before any DDL: PerTableDDL embeds the same retention in CREATE TABLE,
+	// so checking only the ALTER loop below left a fresh install creating its
+	// tables with an unrepresentable TTL and aborting afterwards — and every
+	// later start then failed at the guard without ever reaching the ALTER
+	// that would repair them.
+	for _, t := range retentionTTLs(cfg) {
+		if err := ttlWithinDateTime(t.days); err != nil {
+			return fmt.Errorf("retention %s: %w", t.table, err)
+		}
+	}
+
 	for _, ddl := range PerTableDDL(cfg.Cluster,
 		cfg.Retention.CycleDays, cfg.Retention.RTTDays,
 		cfg.Retention.HopDays, cfg.Retention.HTTPDays,
@@ -66,19 +76,7 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 	}
 
 	// Apply TTLs even on re-bootstrap so config changes take effect.
-	type ttl struct {
-		table string
-		days  int
-	}
-	for _, t := range []ttl{
-		{"probe_cycle", cfg.Retention.CycleDays},
-		{"probe_rtt", cfg.Retention.RTTDays},
-		{"probe_hop", cfg.Retention.HopDays},
-		{"probe_http", cfg.Retention.HTTPDays},
-	} {
-		if err := ttlWithinDateTime(t.days); err != nil {
-			return fmt.Errorf("retention %s: %w", t.table, err)
-		}
+	for _, t := range retentionTTLs(cfg) {
 		stmt := fmt.Sprintf("ALTER TABLE %s MODIFY TTL toDateTime(timestamp) + INTERVAL %d DAY",
 			t.table, t.days)
 		if cfg.Cluster != "" {
@@ -93,20 +91,32 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 	return nil
 }
 
-// maxDateTime is toDateTime's own ceiling: DateTime is UInt32 seconds from the
-// epoch, so 2106-02-07 06:28:15 UTC is the last instant a TTL sum can name.
-var maxDateTime = time.Unix(math.MaxUint32, 0).UTC()
+// tableTTL pairs a table with the retention configured for it.
+type tableTTL struct {
+	table string
+	days  int
+}
+
+func retentionTTLs(cfg config.ClickHouse) []tableTTL {
+	return []tableTTL{
+		{"probe_cycle", cfg.Retention.CycleDays},
+		{"probe_rtt", cfg.Retention.RTTDays},
+		{"probe_hop", cfg.Retention.HopDays},
+		{"probe_http", cfg.Retention.HTTPDays},
+	}
+}
+
+// maxDateTime is config's ceiling under this package's name, kept so the
+// bootstrap tests read against the value the DDL is actually bounded by.
+var maxDateTime = config.MaxDateTime
 
 // ttlWithinDateTime refuses a retention whose expiry falls outside DateTime.
-// config bounds the knob, but only against a fixed ceiling — the TTL is
-// evaluated per row, so whether the sum is representable depends on when the
-// row was written, and only a clock knows that.
+// config.Validate applies the same check, so this is defence in depth for a
+// config that reached the process without it — a slave building from a
+// master-supplied config, the same reason probe.Build re-checks the ping
+// budget.
 func ttlWithinDateTime(days int) error {
-	if expiry := nowFn().UTC().AddDate(0, 0, days); expiry.After(maxDateTime) {
-		return fmt.Errorf("%d days expires at %s, past DateTime's %s ceiling",
-			days, expiry.Format("2006-01-02"), maxDateTime.Format("2006-01-02"))
-	}
-	return nil
+	return config.RetentionWithinDateTime(days, nowFn())
 }
 
 // nowFn is the injectable clock for ttlWithinDateTime.

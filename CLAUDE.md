@@ -186,8 +186,20 @@ Key points a reader can't derive from a single file:
   is a sanity bound and **not** a derived maximum: the TTL is evaluated
   against each row's own timestamp, so what is representable depends on
   when the row was written and no compile-time constant knows it.
-  `clickhouse.ttlWithinDateTime` holds the real check, against a clock
-  and `toDateTime`'s 2106 ceiling. `Bootstrap` re-emits `ALTER TABLE … MODIFY TTL` on every
+  `config.RetentionWithinDateTime` holds the real check, against a clock
+  and `toDateTime`'s 2106 ceiling, and it lives in `config` for the
+  reason `ICMPPingBudget` does: **`Validate` calls it**, so a retention
+  the process cannot boot with is never stored. Guarding only at
+  bootstrap left ~7,482 of the values the fixed ceiling admits validating
+  green on load and on SIGHUP and then refusing to start at the next
+  restart — invisible until a redeploy, since `Bootstrap` runs only at
+  startup. `clickhouse.ttlWithinDateTime` delegates to the same function
+  as defence in depth, and runs **before** `PerTableDDL`: that DDL embeds
+  the retention in `CREATE TABLE` too, so a guard placed only over the
+  `ALTER` loop let a fresh install create its tables carrying an
+  unrepresentable TTL and abort afterwards, with every later start
+  failing at the guard before reaching the `ALTER` that would repair
+  them. `Bootstrap` re-emits `ALTER TABLE … MODIFY TTL` on every
   start so a config change takes effect on the next process restart. The
   writer/reader bind the rest of the config once at startup.
 

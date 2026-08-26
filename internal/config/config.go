@@ -493,8 +493,33 @@ const (
 // The ceiling is a sanity bound and not a derived maximum: the TTL is
 // evaluated against each row's own timestamp, so what is representable
 // depends on when the row was written, which no compile-time constant knows.
-// Bootstrap holds the real check, against a clock and the DateTime ceiling.
+// RetentionWithinDateTime is the real check, and Validate applies it here so
+// a config this package accepts is one the process can boot with.
 const MaxRetentionDays = 36_500
+
+// MaxDateTime is toDateTime's own ceiling: ClickHouse DateTime is UInt32
+// seconds from the epoch, so 2106-02-07 06:28:15 UTC is the last instant a
+// TTL sum can name.
+var MaxDateTime = time.Unix(math.MaxUint32, 0).UTC()
+
+// RetentionWithinDateTime refuses a retention whose expiry, measured from now,
+// falls outside DateTime. It lives here rather than in the storage package for
+// the reason ICMPPingBudget does: Validate calls it, so a retention the
+// process cannot boot with is never stored. Without that, ~7,482 of the values
+// MaxRetentionDays admits validated green on load and on SIGHUP and then made
+// the master refuse to start at its next restart — a disagreement invisible
+// until a redeploy, since Bootstrap runs only at startup.
+func RetentionWithinDateTime(days int, now time.Time) error {
+	if expiry := now.UTC().AddDate(0, 0, days); expiry.After(MaxDateTime) {
+		return fmt.Errorf("%d days expires at %s, past DateTime's %s ceiling",
+			days, expiry.Format("2006-01-02"), MaxDateTime.Format("2006-01-02"))
+	}
+	return nil
+}
+
+// validateNow is the clock Validate measures retention against, injectable so
+// a test can pin the boundary without the answer drifting a day at midnight.
+var validateNow = time.Now
 
 // MaxLabelLen bounds every identifier that becomes a ClickHouse
 // LowCardinality value — a group, a target name, a probe name, a cycle's
@@ -662,6 +687,9 @@ func (c *Config) Validate() error {
 		}
 		if *r.days < 0 || *r.days > MaxRetentionDays {
 			return fmt.Errorf("storage.clickhouse.retention.%s %d is outside [1, %d]: Bootstrap re-emits it as MODIFY TTL on every start, and a TTL in the past expires the table", r.name, *r.days, MaxRetentionDays)
+		}
+		if err := RetentionWithinDateTime(*r.days, validateNow()); err != nil {
+			return fmt.Errorf("storage.clickhouse.retention.%s: %w", r.name, err)
 		}
 	}
 	if ch.Batch.MaxRows == 0 {
