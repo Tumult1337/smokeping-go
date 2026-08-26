@@ -360,7 +360,7 @@ func (s *Server) getCycles(w http.ResponseWriter, r *http.Request) {
 	}
 	step, ok := pickStep(r.URL.Query().Get("step"), from, to)
 	if !ok {
-		writeErr(w, http.StatusBadRequest, "step=raw is limited to windows the raw tier covers; narrow the range or drop step=raw")
+		writeErr(w, http.StatusBadRequest, "requested step is finer than the bucket ladder serves for this window; narrow the range or drop the step override")
 		return
 	}
 
@@ -953,20 +953,21 @@ func parseRelativeDuration(s string) (time.Duration, error) {
 //	?step=raw|1h|1d → forces a specific tier
 //	anything else   → derived from window width.
 //
-// ok is false when the override is out of bounds for the window. Only raw can
-// be: 1h and 1d bucket harder than the ladder would, while raw returns one row
-// per cycle per source and is the one override that can outgrow its window.
-// Its bound is the ladder's own raw tier rather than a second copy of that
-// threshold, so widening the tier widens the override with it.
+// ok is false when the override buckets finer than the tier the ladder derives
+// for the window — raw outside the raw tier, 1h past the 1h tier — because a
+// finer step multiplies the row count the ladder holds to ~500-1000 buckets
+// (?step=1h at 365d is 24x the ladder). Each bound is the ladder's own tier
+// rather than a second copy of its threshold, so widening a tier widens the
+// override with it.
 func pickStep(override string, from, to time.Time) (step time.Duration, ok bool) {
 	derived := storage.PickCycleStep(to.Sub(from))
 	switch override {
 	case "raw":
 		return 0, derived == 0
 	case "1h":
-		return time.Hour, true
+		return time.Hour, derived <= time.Hour
 	case "1d":
-		return 24 * time.Hour, true
+		return 24 * time.Hour, derived <= 24*time.Hour
 	}
 	return derived, true
 }

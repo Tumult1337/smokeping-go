@@ -1160,10 +1160,11 @@ func TestReadEndpointWindowCaps(t *testing.T) {
 	}
 }
 
-// The ?step=raw override bypasses the tier ladder, so it is bounded by the
-// ladder's own raw tier rather than a second copy of that threshold. Asserting
-// the step the reader received keeps a guard that silently downgrades raw to
-// bucketed from passing as a fix.
+// The ?step= overrides bypass the tier ladder, so each is bounded by the
+// ladder's own tier rather than a second copy of its threshold: raw outside
+// the raw tier and 1h past the 1h tier are refused, never widened. Asserting
+// the step the reader received keeps a guard that silently downgrades an
+// override to bucketed from passing as a fix.
 func TestGetCyclesRawStepCap(t *testing.T) {
 	rawTier := 2 * time.Hour
 	if storage.PickCycleStep(rawTier) != 0 {
@@ -1179,7 +1180,9 @@ func TestGetCyclesRawStepCap(t *testing.T) {
 		{"raw past the raw tier", "/api/v1/targets/core/gw/cycles?from=-3h&step=raw", http.StatusBadRequest, 0},
 		{"raw far past the raw tier", "/api/v1/targets/core/gw/cycles?from=-3000d&step=raw", http.StatusBadRequest, 0},
 		{"bucketed wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-30d", http.StatusOK, time.Hour},
-		{"1h override on a wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-30d&step=1h", http.StatusOK, time.Hour},
+		{"1h override at its ladder tier", "/api/v1/targets/core/gw/cycles?from=-30d&step=1h", http.StatusOK, time.Hour},
+		{"1h finer than the 6h tier", "/api/v1/targets/core/gw/cycles?from=-180d&step=1h", http.StatusBadRequest, 0},
+		{"1h finer than the 1d tier", "/api/v1/targets/core/gw/cycles?from=-365d&step=1h", http.StatusBadRequest, 0},
 		{"1d override on a wide window unaffected", "/api/v1/targets/core/gw/cycles?from=-3000d&step=1d", http.StatusOK, 24 * time.Hour},
 	}
 	for _, tc := range cases {
@@ -2028,7 +2031,7 @@ func TestSignedUnixSecondsStillObeyTheWindowCaps(t *testing.T) {
 		"/api/v1/targets/core/gw/rtts?" + span:                        "rtts window limited to 24h",
 		"/api/v1/targets/core/gw/http?" + span:                        "http window limited to 7d",
 		"/api/v1/targets/core/gw/hops/timeline?source=master&" + span: "hops/timeline window limited to 7d",
-		"/api/v1/targets/core/gw/cycles?step=raw&" + span:             "step=raw is limited to windows the raw tier covers",
+		"/api/v1/targets/core/gw/cycles?step=raw&" + span:             "requested step is finer than the bucket ladder serves",
 	} {
 		t.Run(path, func(t *testing.T) {
 			reader := &stubReader{}
