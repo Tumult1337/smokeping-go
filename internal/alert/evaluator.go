@@ -207,9 +207,14 @@ type Evaluator struct {
 	// refuse transitions on all eight, which is the fleet-wide blast radius
 	// the sharding exists to remove. Written by the producer under mu and by
 	// that shard's worker on release, so it is atomic rather than mu-guarded.
-	queuedBytes      [dispatchShards]atomic.Int64
-	quit             chan struct{}
-	closeOnce        sync.Once
+	queuedBytes [dispatchShards]atomic.Int64
+	quit        chan struct{}
+	closeOnce   sync.Once
+	// closed is set before quit so a transition committed after shutdown is
+	// refused rather than queued into a channel whose workers have returned:
+	// that left it committed, undelivered and change-gated, and unbalanced
+	// inflight for anyone still waiting on it.
+	closed           atomic.Bool
 	inflight         sync.WaitGroup
 	dispatchRefusals atomic.Uint64
 
@@ -360,6 +365,7 @@ func eventBytes(ev Event) int64 {
 // which is the wait this queue exists to keep off every other goroutine. Each
 // exits after that delivery's own budget, abandoning whatever is queued.
 func (e *Evaluator) Close() {
+	e.closed.Store(true)
 	e.closeOnce.Do(func() {
 		queued := 0
 		for _, ch := range e.pending {
@@ -564,16 +570,21 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	// Logged after evaluate released e.mu: slog writes synchronously, so a line
 	// emitted under the evaluator's only lock stalls OnCycle for every other
 	// target — on the one path that runs when delivery is already backed up.
-	// One line per pass rather than per alert, for the same reason warnExcluded
-	// rate-limits: a stalled shard re-refuses the same reverted transition on
-	// every cycle.
+	// Rate-limited through the same window warnExcluded uses: a stalled shard
+	// re-refuses every reverted transition on every cycle, which at the
+	// deployed shape is several ERROR lines a second burying the incident they
+	// report. The counter on /api/v1/health is the unsampled signal.
 	if n := len(refused); n > 0 {
 		r := refused[0]
-		e.log.Error("alert notification refused, delivery queue full; transition will be retried",
-			"example_target", r.target, "example_alert", r.alert,
-			"prev", r.prev, "next", r.next, "reason", r.reason,
-			"held", r.held, "limit", r.limit,
-			"refused_this_cycle", n, "refused_total", r.total)
+		freshness := alertFreshness(cfg.Interval)
+		if suppressed, allow := e.rateLimit(exclusionKey{reason: "dispatch_" + r.reason}, now, freshness); allow {
+			e.log.Error("alert notification refused, delivery queue full; transition will be retried",
+				"example_target", r.target, "example_alert", r.alert,
+				"prev", r.prev, "next", r.next, "reason", r.reason,
+				"held", r.held, "limit", r.limit,
+				"refused_this_cycle", n, "suppressed", suppressed,
+				"window", freshness, "refused_total", r.total)
+		}
 	}
 
 	if len(skipped) > 0 {
@@ -599,6 +610,13 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 // makes the commit and the refusal one step and what makes the byte
 // reservation single-producer; the workers never take that lock.
 func (e *Evaluator) enqueueDispatch(ev Event) (bool, *dispatchRefusal) {
+	if e.closed.Load() {
+		return false, e.refuseDispatch(ev, "closed", 0, 0)
+	}
+	// Scrubbed first: Wants is dispatcher-supplied code reading the Event, and
+	// the invariant is that nothing leaves the evaluator carrying a health
+	// target's address.
+	ev = scrubHealthAddresses(ev)
 	if f, ok := e.dispatcher.(DispatchFilter); ok && !f.Wants(ev) {
 		// The dispatcher will discard this event on arrival, so queueing it
 		// spends shard depth and byte budget that exist to carry the pages
@@ -606,7 +624,6 @@ func (e *Evaluator) enqueueDispatch(ev Event) (bool, *dispatchRefusal) {
 		// and there is nothing left to deliver.
 		return true, nil
 	}
-	ev = scrubHealthAddresses(ev)
 	size := eventBytes(ev)
 	shard := shardFor(ev.Target.ID(), ev.AlertName)
 	if held := e.queuedBytes[shard].Add(size); held > dispatchShardBytes {
@@ -649,9 +666,11 @@ func (e *Evaluator) refuseDispatch(ev Event, reason string, held int64, limit in
 	}
 }
 
-// DispatchRefusals reports transitions the delivery queue could not hold.
-// They are reverted and re-detected on the next cycle rather than lost, so a
-// non-zero value is a delivery backlog, not missing pages.
+// DispatchRefusals reports transitions the delivery queue could not hold. A
+// refused transition is reverted and re-detected on the next cycle *while the
+// condition still holds*, so a sustained backlog delays pages rather than
+// dropping them — but a condition that clears before the queue drains is never
+// paged, because dispatch is change-gated with no renotify.
 func (e *Evaluator) DispatchRefusals() uint64 { return e.dispatchRefusals.Load() }
 
 // evaluate runs the per-alert state machine under e.mu, held via defer because
@@ -716,7 +735,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 		}
 
 		if !alertCfg.Quorum.Enabled() {
-			pruneQuietSources(bySource, now, freshness)
+			pruneQuietSources(bySource, now, window, freshness)
 			if prev != st.state {
 				ev := Event{
 					Time:      cy.Time,
@@ -740,8 +759,10 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 					// Undo the transition rather than keep a state the
 					// operator was never told about: dispatch is change-gated
 					// with no renotify, so a committed-but-undelivered
-					// transition is a page that never happens. Reverted, the
-					// next cycle re-detects it and dispatches again.
+					// transition is a page that never happens. consecHits is
+					// deliberately not reverted: it counts cycles the
+					// condition held, which is a fact about measurements and
+					// not about deliveries.
 					st.state = prev
 				}
 			}
@@ -799,6 +820,28 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 	return toDispatch, skipped, refused
 }
 
+// rateLimit reports whether a line keyed on this reason may be emitted now,
+// and how many were suppressed since the last one that was. The window doubles
+// as the eviction rule, so a key that stops recurring drops out of the map.
+func (e *Evaluator) rateLimit(key exclusionKey, now time.Time, window time.Duration) (suppressed int, allow bool) {
+	e.excludedMu.Lock()
+	defer e.excludedMu.Unlock()
+	rec := e.excluded[key]
+	if !rec.at.IsZero() && now.Sub(rec.at) < window {
+		rec.suppressed++
+		e.excluded[key] = rec
+		return 0, false
+	}
+	suppressed = rec.suppressed
+	for k, r := range e.excluded {
+		if now.Sub(r.at) >= window {
+			delete(e.excluded, k)
+		}
+	}
+	e.excluded[key] = exclusionRecord{at: now}
+	return suppressed, true
+}
+
 // warnExcluded reports at Warn that a source's cycles are being stored but not
 // evaluated for alerting. Silent exclusion is the failure alerting exists to
 // prevent, so this is not Debug; a stably-skewed source skips one cycle per
@@ -810,22 +853,10 @@ func (e *Evaluator) warnExcluded(now time.Time, reason string, cy scheduler.Cycl
 	window := alertFreshness(e.store.Current().Interval)
 	key := exclusionKey{source: cy.Source, reason: reason}
 
-	e.excludedMu.Lock()
-	rec := e.excluded[key]
-	if !rec.at.IsZero() && now.Sub(rec.at) < window {
-		rec.suppressed++
-		e.excluded[key] = rec
-		e.excludedMu.Unlock()
+	suppressed, allow := e.rateLimit(key, now, window)
+	if !allow {
 		return
 	}
-	suppressed := rec.suppressed
-	for k, r := range e.excluded {
-		if now.Sub(r.at) >= window {
-			delete(e.excluded, k)
-		}
-	}
-	e.excluded[key] = exclusionRecord{at: now}
-	e.excludedMu.Unlock()
 
 	e.log.Warn("alert.source_excluded",
 		append([]any{
@@ -920,8 +951,17 @@ func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window
 // makes the recovery a non-transition and the operator's page never closes.
 // The leak that leaves is bounded by sources that died while firing, which is
 // the set an operator is already looking at.
-func pruneQuietSources(bySource map[string]*alertState, now time.Time, freshness time.Duration) {
+func pruneQuietSources(bySource map[string]*alertState, now time.Time, window, freshness time.Duration) {
 	for src, st := range bySource {
+		// lastSeen first, exactly as tally orders it: lastCycle is the
+		// producer's own stamp, so keying on it alone deleted the state of a
+		// source that is delivering right now but whose clock lags — or that
+		// pushes on a long cluster.push_every cadence, the case livenessWindow
+		// was widened for. Its consecHits never accumulated, so a sustained
+		// alert above 1 could never fire for it.
+		if now.Sub(st.lastSeen) <= window {
+			continue
+		}
 		if st.state != StateFiring && now.Sub(st.lastCycle) > freshness {
 			delete(bySource, src)
 		}

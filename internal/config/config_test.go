@@ -725,3 +725,40 @@ func TestMaxSampleRTTIsTheStorageSaturationPoint(t *testing.T) {
 		t.Fatalf("MaxSampleRTT is %d microseconds, want MaxUint32 (%d)", got, uint64(math.MaxUint32))
 	}
 }
+
+// storage.clickhouse.batch feeds the writer directly: max_rows sizes the
+// pending slice and max_interval is the flush ticker's period. runTable runs
+// on a goroutine with no recover(), so make([]any, 0, -1) and
+// time.NewTicker(0) are boot panics with a stack trace rather than config
+// errors. Both were defaulted on the zero value only and bounded at neither
+// end, while writer.go still called them "validated at config-load".
+func TestValidateBoundsBatchKnobs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rows    int
+		iv      string
+		wantErr bool
+	}{
+		{"defaults", 0, "", false},
+		{"ordinary", 5000, "2s", false},
+		{"negative rows", -1, "1s", true},
+		{"rows past the ceiling", MaxBatchRows + 1, "1s", true},
+		{"zero interval", 1000, "0s", true},
+		{"negative interval", 1000, "-1s", true},
+		{"interval past the ceiling", 1000, "2h", true},
+		{"unparseable interval", 1000, "banana", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			cfg.Storage.ClickHouse.Batch.MaxRows = tc.rows
+			cfg.Storage.ClickHouse.Batch.MaxInterval = tc.iv
+			err := cfg.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatalf("max_rows=%d max_interval=%q validated; the writer panics on it at boot", tc.rows, tc.iv)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("max_rows=%d max_interval=%q: %v", tc.rows, tc.iv, err)
+			}
+		})
+	}
+}

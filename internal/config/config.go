@@ -497,6 +497,17 @@ const (
 // a config this package accepts is one the process can boot with.
 const MaxRetentionDays = 36_500
 
+// MaxBatchRows and MaxBatchInterval bound storage.clickhouse.batch. Both feed
+// the writer directly — max_rows sizes the pending slice, max_interval is the
+// flush ticker's period — and runTable runs on a goroutine with no recover(),
+// so an unbounded value is a boot panic rather than a config error. The
+// ceilings are generous sanity bounds: a batch past a million rows or a flush
+// interval past an hour is a misconfiguration whatever the deployment.
+const (
+	MaxBatchRows     = 1_000_000
+	MaxBatchInterval = time.Hour
+)
+
 // MaxDateTime is toDateTime's own ceiling: ClickHouse DateTime is UInt32
 // seconds from the epoch, so 2106-02-07 06:28:15 UTC is the last instant a
 // TTL sum can name.
@@ -695,11 +706,21 @@ func (c *Config) Validate() error {
 	if ch.Batch.MaxRows == 0 {
 		ch.Batch.MaxRows = 1000
 	}
+	// Bounded at both ends, like the retention knobs above and for the same
+	// reason: the writer sizes a slice and a ticker from these, and neither
+	// runTable nor the goroutine it runs on has a recover(). A zero or
+	// negative value validated green and panicked the process at boot with a
+	// stack trace instead of a config error.
+	if ch.Batch.MaxRows < 0 || ch.Batch.MaxRows > MaxBatchRows {
+		return fmt.Errorf("storage.clickhouse.batch.max_rows %d is outside [1, %d]: it sizes the writer's pending slice", ch.Batch.MaxRows, MaxBatchRows)
+	}
 	if ch.Batch.MaxInterval == "" {
 		ch.Batch.MaxInterval = "1s"
 	}
-	if _, err := time.ParseDuration(ch.Batch.MaxInterval); err != nil {
+	if d, err := time.ParseDuration(ch.Batch.MaxInterval); err != nil {
 		return fmt.Errorf("storage.clickhouse.batch.max_interval: %w", err)
+	} else if d <= 0 || d > MaxBatchInterval {
+		return fmt.Errorf("storage.clickhouse.batch.max_interval %s is outside (0, %s]: it is the writer's flush ticker, which panics on a non-positive period", d, MaxBatchInterval)
 	}
 
 	seenTargets := make(map[string]string)

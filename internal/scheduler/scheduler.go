@@ -148,14 +148,17 @@ func (s *Scheduler) runCycle(ctx context.Context, ref config.TargetRef, pr probe
 	}
 	if res == nil {
 		// A probe that bailed before building a result is a target that did
-		// not answer, which is a full-loss cycle — unless the cycle's own
-		// context ended first, in which case nothing was measured and a
-		// fabricated 100% is a data point the probe never took. resolveIPAddr
-		// honors this context, so a SIGHUP or a debounced registry change
-		// cancels every in-flight resolve; stamping loss there wrote a
-		// fleet-wide outage into storage and fired sustained:1 alerts on a
-		// config reload.
-		if cycleCtx.Err() != nil {
+		// not answer, which is a full-loss cycle — unless the scheduler
+		// itself is going away, in which case nothing was measured and a
+		// fabricated 100% is a data point the probe never took.
+		//
+		// The parent, never cycleCtx: cycleCtx also expires when the cycle
+		// runs out its own interval, which is what a blackholed resolver or
+		// an unreachable target looks like now that resolveIPAddr honors the
+		// deadline. Reading that as "nothing was measured" turned exactly the
+		// targets an operator needs paged into permanent gaps that alert on
+		// nothing.
+		if ctx.Err() != nil {
 			res = &probe.Result{}
 		} else {
 			res = &probe.Result{Sent: s.cfg.Pings, LossCount: s.cfg.Pings}

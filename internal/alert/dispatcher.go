@@ -42,6 +42,15 @@ func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
 // Evaluator is a multiple of.
 const actionTimeout = 10 * time.Second
 
+// execWaitDelay is how long past its own deadline cmd.Run waits for the I/O
+// goroutines before abandoning them. It is subtracted from the action's
+// deadline rather than added to it: WaitDelay starts counting after the
+// context is done, so leaving the two equal made one exec action's worst case
+// 2x actionTimeout — measured at 4.0s for a 2s timeout — and Evaluator.deliver
+// budgets an event at actionTimeout per action, so the next action in the same
+// alert got an already-dead context and its page was dropped in silence.
+const execWaitDelay = time.Second
+
 // Wants implements DispatchFilter. Only a transition into or out of firing
 // notifies anyone — pending transitions are too noisy for operators and the
 // state-change log line already captures them for debugging — so the evaluator
@@ -130,7 +139,7 @@ func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Actio
 	if a.Command == "" {
 		return
 	}
-	execCtx, cancel := context.WithTimeout(ctx, actionTimeout)
+	execCtx, cancel := context.WithTimeout(ctx, actionTimeout-execWaitDelay)
 	defer cancel()
 	// Split the command on whitespace. For complex pipelines operators should
 	// wrap them in a shell script and reference that.
@@ -148,7 +157,7 @@ func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Actio
 	// as long as the orphan lived. WaitDelay bounds the stdin copier the same
 	// way. The output was discarded regardless: it is unbounded operator-script
 	// text and execFailureCategory reports the exit code alone.
-	cmd.WaitDelay = actionTimeout
+	cmd.WaitDelay = execWaitDelay
 	cmd.Env = append(cmd.Environ(),
 		fmt.Sprintf("ALERT_TARGET=%s", e.Target.ID()),
 		fmt.Sprintf("ALERT_NAME=%s", e.AlertName),
@@ -171,6 +180,12 @@ func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Actio
 func execFailureCategory(ctx context.Context, err error) string {
 	if ctx.Err() != nil {
 		return "timeout"
+	}
+	// ErrWaitDelay means the command itself finished and an inherited
+	// descriptor outlived it; reporting that as a start failure sent an
+	// operator looking at the wrong end of the action.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return "output held past exit"
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

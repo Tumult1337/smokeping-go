@@ -189,7 +189,9 @@ func TestCancelledCycleIsAGapNotFabricatedLoss(t *testing.T) {
 	cfg := &config.Config{Interval: time.Minute, Pings: 20}
 	ref := config.TargetRef{Group: "g", Target: config.Target{Name: "a", Host: "h", Probe: "p"}}
 
-	t.Run("cancelled", func(t *testing.T) {
+	// The scheduler is going away: no measurement was taken and none should
+	// be invented.
+	t.Run("scheduler cancelled", func(t *testing.T) {
 		sink := &recordingSink{}
 		s := New(log, probe.NewRegistry(), sink, cfg)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -204,6 +206,25 @@ func TestCancelledCycleIsAGapNotFabricatedLoss(t *testing.T) {
 		}
 		if got[0].Sent != 0 || got[0].LossCount != 0 {
 			t.Fatalf("cancelled cycle recorded sent=%d lost=%d, want 0/0 — a cycle that measured nothing was stored as a total outage",
+				got[0].Sent, got[0].LossCount)
+		}
+	})
+
+	// The cycle ran out its own interval while the scheduler stayed up, which
+	// is what a blackholed resolver looks like: the target did not answer, so
+	// it is loss. Reading the cycle's own deadline as "nothing was measured"
+	// made a DNS-dead target a permanent gap that alerts on nothing — the one
+	// an operator most needs paged.
+	t.Run("cycle deadline expired", func(t *testing.T) {
+		sink := &recordingSink{}
+		s := New(log, probe.NewRegistry(), sink, &config.Config{Interval: 50 * time.Millisecond, Pings: 20})
+		s.runCycle(context.Background(), ref, &nilProbe{name: "p", block: true})
+		got := sink.snapshot()
+		if len(got) != 1 {
+			t.Fatalf("recorded %d cycles, want 1", len(got))
+		}
+		if got[0].Sent != 20 || got[0].LossCount != 20 {
+			t.Fatalf("a cycle that outran its own interval recorded sent=%d lost=%d, want 20/20 — an unreachable target became a gap that never alerts",
 				got[0].Sent, got[0].LossCount)
 		}
 	})

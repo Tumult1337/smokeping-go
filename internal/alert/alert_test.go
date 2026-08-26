@@ -3400,3 +3400,85 @@ func TestRefreshDropsAnAlertDetachedFromItsTarget(t *testing.T) {
 		t.Fatal("the alert the target still names was swept too")
 	}
 }
+
+// pruneQuietSources must order its guards the way tally does: lastSeen is the
+// master's receive clock, lastCycle is the producer's own stamp. Keying the
+// deletion on lastCycle alone wiped the state of a source that is delivering
+// right now but whose clock lags — or that pushes on a long
+// cluster.push_every cadence, the case livenessWindow was widened for. Its
+// consecHits never accumulated, so a sustained alert above 1 could never fire
+// for it.
+func TestQuietPruneKeepsASourceThatIsStillDelivering(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
+	})
+	key := aggKey{target: "core/gw", alert: "quorum-test"}
+
+	// A source delivering now, stamping cycles well behind the master clock.
+	lagging := cycleAt(clk, "lagging", 100)
+	lagging.Time = clk.t.Add(-alertFreshness(time.Minute) - time.Second)
+	ev.OnCycle(context.Background(), lagging)
+
+	ev.mu.Lock()
+	if bySource := ev.states[key]; bySource != nil {
+		if st, ok := bySource["lagging"]; ok {
+			// The freshness gate refuses the cycle outright, so drive the
+			// state directly: what is under test is the prune, not the gate.
+			st.lastSeen = clk.now()
+			st.lastCycle = clk.t.Add(-alertFreshness(time.Minute) - time.Second)
+			st.consecHits = 2
+		}
+	}
+	if ev.states[key] == nil {
+		ev.states[key] = map[string]*alertState{}
+	}
+	ev.states[key]["lagging"] = &alertState{
+		state:      StatePending,
+		consecHits: 2,
+		lastSeen:   clk.now(),
+		seenCycle:  true,
+		lastCycle:  clk.t.Add(-alertFreshness(time.Minute) - time.Second),
+	}
+	ev.mu.Unlock()
+
+	// Another source's cycle drives the prune.
+	ev.OnCycle(context.Background(), cycleAt(clk, "healthy", 0))
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	st, ok := ev.states[key]["lagging"]
+	if !ok {
+		t.Fatal("a source delivering right now was pruned on the strength of its own lagging timestamp; its consecHits can never reach a sustained threshold")
+	}
+	if st.consecHits != 2 {
+		t.Fatalf("consecHits = %d, want 2 — the entry was recreated rather than kept", st.consecHits)
+	}
+}
+
+// After Close the delivery workers have returned, but the channels are still
+// open — so an enqueue kept succeeding into a buffer nobody reads. The
+// transition was committed, change-gated, never delivered, and inflight was
+// left permanently unbalanced for anyone waiting on it. Reachable whenever
+// shutdown does not run the drain: run_node's supervisor returns its error
+// before <-serverDone.
+func TestEnqueueAfterCloseIsRefusedNotCommitted(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	var delivered atomic.Int64
+	ev.dispatcher = dispatcherFunc(func(context.Context, Event) { delivered.Add(1) })
+
+	ev.Close()
+	clk.advance(time.Second)
+	ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", 100))
+
+	if got := ev.DispatchRefusals(); got == 0 {
+		t.Fatal("a transition enqueued after Close was accepted; nothing will ever deliver it and inflight never balances")
+	}
+	key := aggKey{target: "core/gw", alert: "quorum-test"}
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if got := ev.states[key]["tokyo-1"].state; got != StateOK {
+		t.Fatalf("state = %s, want ok — a refused transition must be reverted, shutdown or not", got)
+	}
+}

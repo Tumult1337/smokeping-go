@@ -1215,7 +1215,13 @@ Key points a reader can't derive from a single file:
   it. It does not need to be the maximum, because **a refused transition
   is reverted, not lost** — the enqueue happens under `e.mu` at the moment
   of commit, so a full queue undoes the state change and the next cycle
-  re-detects and re-dispatches it. Keeping it would be a page that never
+  re-detects and re-dispatches it, *for as long as the condition holds*.
+  A condition that clears while the queue is still full is never paged:
+  dispatch is change-gated with no renotify, and closing that would mean
+  a ledger of owed pages rather than a state machine. `consecHits` is not
+  reverted with the state — it counts cycles the condition held, which is
+  a fact about measurements, not deliveries, and reverting it changes no
+  outcome (verified against the transient case). Keeping it would be a page that never
   happens: dispatch is change-gated with no renotify, so a
   committed-but-undelivered FIRING leaves the endpoint's first payload the
   resolve for it. Refusals are logged at Error and served as

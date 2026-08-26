@@ -133,7 +133,7 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pin
 	loopCtx, cancel := context.WithCancel(context.Background())
 	w := &Writer{log: log, conn: conn, cfg: cfg, cancel: cancel, chans: newWriterChans(pings)}
 
-	maxInterval, _ := time.ParseDuration(cfg.Batch.MaxInterval) // validated at config-load
+	maxInterval, _ := time.ParseDuration(cfg.Batch.MaxInterval) // validated and bounded at config-load
 	for i := 0; i < numTables; i++ {
 		w.wg.Add(1)
 		go w.runTable(loopCtx, i, cfg.Batch.MaxRows, maxInterval)
