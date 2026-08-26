@@ -358,6 +358,34 @@ func TestPinsFollowTheLiveConfigNotACachedCopy(t *testing.T) {
 	}
 }
 
+// The same handover with the old owner silent. byAddr only ever updates when
+// a slave heartbeats, so a reload swapping two pins left the address owned by
+// a slave the live pins no longer admit, and the new rightful owner was
+// refused a health entry until a Sweep removed the old one — up to a day.
+func TestReloadedPinFreesTheAddressFromASilentOwner(t *testing.T) {
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	pins := map[string]netip.Addr{}
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
+
+	r.Touch("frankfurt-1", "v1", "203.0.113.9:5555", "10.44.0.2")
+
+	// The operator re-pins frankfurt-1 elsewhere and gives its old address to
+	// tokyo-1. frankfurt-1 never heartbeats again.
+	pins = map[string]netip.Addr{
+		"frankfurt-1": netip.MustParseAddr("10.44.0.3"),
+		"tokyo-1":     netip.MustParseAddr("10.44.0.2"),
+	}
+	r.Touch("tokyo-1", "v1", "203.0.113.20:5555", "10.44.0.2")
+
+	peers := r.Peers()
+	if len(peers) != 1 || peers[0].Name != "tokyo-1" {
+		t.Fatalf("peers = %+v, want tokyo-1 holding the address its pin names", peers)
+	}
+	if peers[0].Addr != netip.MustParseAddr("10.44.0.2") {
+		t.Fatalf("tokyo-1 addr = %s, want 10.44.0.2", peers[0].Addr)
+	}
+}
+
 // Touch-time resolution reads the same live pins, and a heartbeat under a
 // reloaded mismatching pin releases the address ownership so another slave
 // can claim it — a cached pin map would leave the old owner holding it.

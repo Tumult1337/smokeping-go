@@ -226,6 +226,13 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 		}
 		return netip.Addr{}
 	}
+	// An owner the live pins now exclude no longer holds this address, and
+	// byAddr only ever updates when that owner heartbeats — so a reload that
+	// swaps two slaves' pins locked the new rightful owner out until the old
+	// one was swept, up to a day later.
+	if owner, taken := r.byAddr[addr]; taken && owner != name && !r.pinAdmits(owner, addr) {
+		delete(r.byAddr, addr)
+	}
 	if owner, taken := r.byAddr[addr]; taken && owner != name {
 		if key := advLogDup + ":" + advertise; info.AdvertiseLogState != key {
 			r.log.Warn("slave advertise address already claimed, excluded from health mesh",
@@ -257,6 +264,13 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 // Peers returns the slaves eligible for health probing, sorted by name. The
 // sort is load-bearing: the scheduler fingerprint is derived from this list,
 // and map iteration order would otherwise force a rebuild on every signal.
+// pinAdmits reports whether name may still hold addr under the live pins.
+// An unpinned slave holds whatever it advertised.
+func (r *Registry) pinAdmits(name string, addr netip.Addr) bool {
+	pin, pinned := r.currentPins()[name]
+	return !pinned || pin == addr
+}
+
 func (r *Registry) Peers() []slavehealth.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
