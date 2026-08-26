@@ -50,7 +50,11 @@ type Registry struct {
 	// bridge-networked containers all claiming 172.17.0.2 would collapse the
 	// mesh onto one bogus destination.
 	byAddr map[netip.Addr]string
-	pins   map[string]netip.Addr
+	// pinsFn is the live source of the name→address allowlist, consulted on
+	// every resolution rather than cached so a SIGHUP-edited
+	// cluster.slave_addrs re-pins without waiting for a restart. It runs
+	// under r.mu and must not re-enter the registry.
+	pinsFn func() map[string]netip.Addr
 	// fullWarned dedups the registry-full warning. A refused name is refused
 	// on every retry, and the retry rate is the attacker's to choose.
 	fullWarned bool
@@ -88,12 +92,25 @@ func (r *Registry) SetOnRemove(fn func(name string)) {
 	r.onRemove = fn
 }
 
-// SetPins installs the optional name→address allowlist. A pinned slave that
+// SetPins installs a fixed name→address allowlist. A pinned slave that
 // claims any other address is refused a health entry.
 func (r *Registry) SetPins(pins map[string]netip.Addr) {
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
+}
+
+// SetPinsFn installs the live source of the pin allowlist; see Registry.pinsFn.
+func (r *Registry) SetPinsFn(fn func() map[string]netip.Addr) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pins = pins
+	r.pinsFn = fn
+}
+
+// currentPins must be called with r.mu held (read or write).
+func (r *Registry) currentPins() map[string]netip.Addr {
+	if r.pinsFn == nil {
+		return nil
+	}
+	return r.pinsFn()
 }
 
 // maxRegisteredSlaves bounds how many distinct names can be live in the
@@ -225,7 +242,7 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 		}
 		return netip.Addr{}
 	}
-	if pin, pinned := r.pins[name]; pinned && pin != addr {
+	if pin, pinned := r.currentPins()[name]; pinned && pin != addr {
 		if key := advLogPin + ":" + advertise; info.AdvertiseLogState != key {
 			r.log.Warn("slave advertise address does not match its pin, excluded from health mesh",
 				"slave", name, "claimed", addr, "pinned", pin)
@@ -274,8 +291,15 @@ func (r *Registry) Peers() []slavehealth.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]slavehealth.Peer, 0, len(r.slaves))
+	pins := r.currentPins()
 	for _, info := range r.slaves {
 		if !info.Advertise.IsValid() {
+			continue
+		}
+		// Re-check the live pins here, not only at Touch time: a pin added by
+		// SIGHUP must drop a mismatched peer on the next scheduler signal, not
+		// once that slave happens to heartbeat again.
+		if pin, pinned := pins[info.Name]; pinned && pin != info.Advertise {
 			continue
 		}
 		out = append(out, slavehealth.Peer{Name: info.Name, Addr: info.Advertise})

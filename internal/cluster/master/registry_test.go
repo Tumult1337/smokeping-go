@@ -331,3 +331,48 @@ func TestRegistryRefusesOversizedFields(t *testing.T) {
 		t.Errorf("a version at the limit was refused: %v", err)
 	}
 }
+
+// The pin list follows the config hot-reload contract: consulted live on
+// every read, never cached at wiring time. A pin added by SIGHUP must leave
+// the mesh on the next Peers() read — the scheduler rebuild path — not once
+// the pinned slave happens to heartbeat again.
+func TestPinsFollowTheLiveConfigNotACachedCopy(t *testing.T) {
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	pins := map[string]netip.Addr{}
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
+
+	r.Touch("frankfurt-1", "v1", "203.0.113.9:5555", "10.44.0.2")
+	if got := len(r.Peers()); got != 1 {
+		t.Fatalf("unpinned slave: peers = %d, want 1", got)
+	}
+
+	pins = map[string]netip.Addr{"frankfurt-1": netip.MustParseAddr("10.44.0.99")}
+	if got := len(r.Peers()); got != 0 {
+		t.Fatalf("reloaded pin not applied until the slave's next heartbeat: peers = %d, want 0", got)
+	}
+
+	pins = map[string]netip.Addr{}
+	r.Touch("frankfurt-1", "v1", "203.0.113.9:5555", "10.44.0.2")
+	if got := len(r.Peers()); got != 1 {
+		t.Fatalf("removed pin: peers = %d, want the slave re-admitted (1)", got)
+	}
+}
+
+// Touch-time resolution reads the same live pins, and a heartbeat under a
+// reloaded mismatching pin releases the address ownership so another slave
+// can claim it — a cached pin map would leave the old owner holding it.
+func TestReloadedPinFreesTheAddressAtNextHeartbeat(t *testing.T) {
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	pins := map[string]netip.Addr{}
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
+
+	r.Touch("frankfurt-1", "v1", "203.0.113.9:5555", "10.44.0.2")
+	pins = map[string]netip.Addr{"frankfurt-1": netip.MustParseAddr("10.44.0.99")}
+	r.Touch("frankfurt-1", "v1", "203.0.113.9:5555", "10.44.0.2")
+	r.Touch("tokyo-1", "v1", "203.0.113.20:5555", "10.44.0.2")
+
+	peers := r.Peers()
+	if len(peers) != 1 || peers[0].Name != "tokyo-1" {
+		t.Fatalf("peers = %v, want only tokyo-1 holding the freed address", peers)
+	}
+}
