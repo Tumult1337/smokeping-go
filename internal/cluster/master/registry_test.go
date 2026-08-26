@@ -3,6 +3,7 @@ package master
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"log/slog"
 	"net/netip"
 	"strings"
@@ -317,16 +318,16 @@ func TestRegistryRefusesOversizedFields(t *testing.T) {
 	reg := NewRegistry(slog.New(slog.DiscardHandler))
 	big := strings.Repeat("v", maxSlaveFieldLen+1)
 
-	if reg.Touch("edge-1", big, "10.0.0.5:5000", "") {
-		t.Error("oversized version accepted")
+	if err := reg.Touch("edge-1", big, "10.0.0.5:5000", ""); !errors.Is(err, errSlaveFieldTooLong) {
+		t.Errorf("oversized version: err = %v, want errSlaveFieldTooLong", err)
 	}
-	if reg.Touch("edge-2", "", "10.0.0.5:5000", big) {
-		t.Error("oversized advertise accepted")
+	if err := reg.Touch("edge-2", "", "10.0.0.5:5000", big); !errors.Is(err, errSlaveFieldTooLong) {
+		t.Errorf("oversized advertise: err = %v, want errSlaveFieldTooLong", err)
 	}
 	if reg.Has("edge-1") || reg.Has("edge-2") {
 		t.Error("refused slave stored anyway")
 	}
-	if !reg.Touch("edge-3", strings.Repeat("v", maxSlaveFieldLen), "10.0.0.5:5000", "10.44.0.2") {
-		t.Error("a version at the limit was refused")
+	if err := reg.Touch("edge-3", strings.Repeat("v", maxSlaveFieldLen), "10.0.0.5:5000", "10.44.0.2"); err != nil {
+		t.Errorf("a version at the limit was refused: %v", err)
 	}
 }

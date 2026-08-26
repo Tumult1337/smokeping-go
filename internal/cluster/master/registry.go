@@ -2,6 +2,8 @@ package master
 
 import (
 	"cmp"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -106,11 +108,11 @@ func (r *Registry) SetPins(pins map[string]netip.Addr) {
 // names are the ones refused.
 const maxRegisteredSlaves = 512
 
-// Touch records that a slave just checked in and reports whether the registry
-// accepted the name. Safe to call on every request that carries a valid slave
-// identity, not just /register. advertise is the raw slave-reported health
-// address; an empty or rejected value simply leaves the slave out of the
-// health mesh without blocking registration.
+// Touch records that a slave just checked in; a non-nil error names why the
+// registry refused the entry. Safe to call on every request that carries a
+// valid slave identity, not just /register. advertise is the raw
+// slave-reported health address; an empty or rejected value simply leaves the
+// slave out of the health mesh without blocking registration.
 // maxSlaveFieldLen bounds the free strings a slave asks the registry to keep
 // per entry. Both arrive as headers, where only net/http's 1 MiB cap limits
 // them, and both are retained — advertise inside the log-dedup key even when
@@ -118,12 +120,24 @@ const maxRegisteredSlaves = 512
 // text form and a version is a release tag, so 256 is ~5x either.
 const maxSlaveFieldLen = 256
 
-func (r *Registry) Touch(name, version, addr, advertise string) bool {
+// The two refusals are distinct errors because they need distinct remedies:
+// errRegistryFull is the capacity ceiling (503, retryable once Sweep frees a
+// name), while errSlaveFieldTooLong is this request's own bytes (400, and
+// resending them can never succeed). Collapsing both into one signal sent an
+// operator with an oversized advertise chasing a capacity problem that did
+// not exist.
+var (
+	errEmptySlaveName    = errors.New("empty slave name")
+	errSlaveFieldTooLong = fmt.Errorf("version or advertise exceeds %d bytes", maxSlaveFieldLen)
+	errRegistryFull      = errors.New("slave registry full")
+)
+
+func (r *Registry) Touch(name, version, addr, advertise string) error {
 	if name == "" {
-		return false
+		return errEmptySlaveName
 	}
 	if len(version) > maxSlaveFieldLen || len(advertise) > maxSlaveFieldLen {
-		return false
+		return errSlaveFieldTooLong
 	}
 
 	r.mu.Lock()
@@ -137,7 +151,7 @@ func (r *Registry) Touch(name, version, addr, advertise string) bool {
 				r.log.Warn("slave registry full, refusing new names",
 					"registered", maxRegisteredSlaves)
 			}
-			return false
+			return errRegistryFull
 		}
 		info = &SlaveInfo{Name: name}
 		r.slaves[name] = info
@@ -164,7 +178,7 @@ func (r *Registry) Touch(name, version, addr, advertise string) bool {
 	if changed && onChange != nil {
 		onChange()
 	}
-	return true
+	return nil
 }
 
 // Outcome kinds for resolveAdvertise's log dedup key. Each is combined with
