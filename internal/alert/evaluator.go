@@ -277,12 +277,27 @@ func (e *Evaluator) refreshConditions() error {
 // every cycle regardless of quorum mode, so a real recovery still dispatches
 // a correct resolve without any reset — only the cross-source aggregate
 // needs a clean slate.
+//
+// The warm-up map is swept by the same rule, and independently: a quorum
+// alert that never dispatched has a warmup entry but no agg entry, so
+// sweeping only agg's keys both leaked those entries for alerts that left
+// the config and kept a stale firstSeen across a disable/re-enable — making
+// the 3×-interval window look long-elapsed, so the first partial-data
+// evaluation paged immediately, the exact flap warm-up exists to prevent.
 func (e *Evaluator) pruneStaleAggregates(oldEnabled map[string]bool) {
+	stale := func(alert string) bool {
+		was, existed := oldEnabled[alert]
+		now, stillExists := e.quorumEnabled[alert]
+		return !existed || !stillExists || was != now
+	}
 	for key := range e.agg {
-		was, existed := oldEnabled[key.alert]
-		now, stillExists := e.quorumEnabled[key.alert]
-		if !existed || !stillExists || was != now {
+		if stale(key.alert) {
 			delete(e.agg, key)
+			delete(e.warmup, key)
+		}
+	}
+	for key := range e.warmup {
+		if stale(key.alert) {
 			delete(e.warmup, key)
 		}
 	}

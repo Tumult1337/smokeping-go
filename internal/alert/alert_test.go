@@ -2613,3 +2613,62 @@ func TestExecFailureCategoryNamesATimeout(t *testing.T) {
 		t.Fatalf("got %q, want timeout", got)
 	}
 }
+
+// A quorum alert that never dispatched has a warmup entry but no agg entry,
+// so a sweep over agg's keys alone leaves it behind across a quorum toggle:
+// the stale firstSeen makes the 3×-interval window look long-elapsed, and the
+// first partial-data evaluation after re-enabling pages immediately — the
+// restart flap warm-up exists to prevent. The leftover is also a leak for
+// alerts that leave the config entirely.
+func TestQuorumToggleResetsWarmup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	writeQuorumTestConfig(t, path, true)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+	disp := &recordingDispatcher{}
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, disp)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	clk := pinClock(ev, testBase)
+	ctx := context.Background()
+
+	// One healthy cycle from a single source: warm-up bookkeeping exists, but
+	// nothing ever dispatched, so e.agg holds no key.
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
+
+	writeQuorumTestConfig(t, path, false)
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload (quorum off): %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh (quorum off): %v", err)
+	}
+	ev.mu.Lock()
+	leftover := len(ev.warmup)
+	ev.mu.Unlock()
+	if leftover != 0 {
+		t.Fatalf("%d warm-up entries survived the quorum toggle", leftover)
+	}
+
+	clk.advance(time.Hour)
+	writeQuorumTestConfig(t, path, true)
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload (quorum on): %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh (quorum on): %v", err)
+	}
+
+	// First evaluation after re-enable is partial data: one firing source,
+	// Threshold(1) == 1. Warm-up must hold it.
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %+v, want none — warm-up must restart with the toggled aggregate", evs)
+	}
+}
