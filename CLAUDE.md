@@ -1130,8 +1130,14 @@ Key points a reader can't derive from a single file:
   delivers a batch's cycles in sequence, so bounding one transition left
   their sum unbounded and one push against an endpoint that accepts but
   never answers pinned the ingest handler for hours. `Evaluator` therefore
-  queues committed transitions to a single delivery worker — single so a
-  firing still precedes its own resolve. `dispatchQueueDepth` is
+  queues committed transitions to `dispatchShards` (8) delivery workers,
+  each with its own FIFO, a `(target, alert)` pair hashed onto exactly one
+  of them so a firing still precedes its own resolve. Sharding is what
+  bounds the blast radius: `Dispatch` bounds itself at `actionTimeout` per
+  action, so a dead endpoint does not park a worker forever — it caps that
+  worker's delivery *rate*, and on one worker that rate was the whole
+  fleet's, every target's page queued behind an endpoint that was not
+  theirs. `dispatchQueueDepth` is
   `cluster.MaxCyclesPerBatch`, the burst it absorbs rather than the
   producer's maximum: `evaluate` emits one Event per alert a target names
   and config bounds that count nowhere, so a batch produces a multiple of
@@ -1144,14 +1150,25 @@ Key points a reader can't derive from a single file:
   resolve for it. Refusals are logged at Error and served as
   `alert_dispatch_refusals` on `/api/v1/health`, named for what they are
   rather than as drops: the transition is retried, so a rising count is a
-  delivery backlog and not missing pages. The depth is therefore a memory
-  ceiling, and the queue retains each Event's whole `Cycle`, hop rows
-  included. The worker carries its own `recover()` — dispatch ran inside
-  `scheduler.Fanout`'s while it was inline, and that perimeter has to move
-  with the work or a `Dispatcher` panic takes the process down. `Close`
-  signals the worker and returns without waiting — the worker may be
-  inside a delivery that never answers, which is the wait every other
-  goroutine is being spared.
+  delivery backlog and not missing pages. It is split across the shards as
+  `dispatchShardDepth`, so the queued total is unchanged.
+
+  The depth bounds the count, not the bytes: an Event retains its whole
+  `Cycle`, and a worst-case one carries `config.MaxPingsPerCycle` RTTs
+  beside `config.MaxHopRowsPerCycle` hop rows of `cluster.MaxRTTsPerHop`
+  each — ~854 KB, so the depth alone admitted 874 MB of queued
+  notifications. `dispatchQueueBytes` (64 MiB, summed across shards in
+  `queuedBytes`, reserved under `e.mu` and released by the worker) is the
+  second ceiling. It is inert at any real shape — the deployed 20-ping,
+  30-hop cycle is a few KB, so the depth is reached first by more than an
+  order of magnitude — and a refusal on it is the same revert-and-retry,
+  logged with `reason=bytes` against the depth's `reason=depth` because
+  the two call for different remedies. Each worker carries its own
+  `recover()` — dispatch ran inside `scheduler.Fanout`'s while it was
+  inline, and that perimeter has to move with the work or a `Dispatcher`
+  panic takes the process down. `Close` signals the workers and returns
+  without waiting — one may be inside a delivery that never answers, which
+  is the wait every other goroutine is being spared.
 
   `Event.FiringSources` names the sources firing at dispatch time
   (sorted; stale and unnamed sources excluded) and is populated on both

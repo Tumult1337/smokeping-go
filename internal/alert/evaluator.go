@@ -184,14 +184,19 @@ type Evaluator struct {
 	agg    map[aggKey]State                  // target+alert → last dispatched aggregate state (quorum alerts only)
 	warmup map[aggKey]*aggWarmup             // target+alert → warm-up bookkeeping (quorum alerts only)
 
-	// pending carries committed transitions to the delivery worker. Dispatch
-	// is deliberately off the caller's goroutine: it ran inline under the
-	// ingest handler, where a batch of transitions against an unresponsive
-	// endpoint pinned that handler for hours — each cycle bounded, their sum
-	// not. One worker, so a firing still precedes its own resolve, and a
-	// transition the queue refuses is reverted rather than delivered out of
+	// pending carries committed transitions to the delivery workers, one
+	// queue per shard. Dispatch is deliberately off the caller's goroutine:
+	// it ran inline under the ingest handler, where a batch of transitions
+	// against an unresponsive endpoint pinned that handler for hours — each
+	// cycle bounded, their sum not. A (target, alert) pair always hashes to
+	// the same shard, so a firing still precedes its own resolve, and a
+	// transition a shard refuses is reverted rather than delivered out of
 	// order.
-	pending          chan Event
+	pending [dispatchShards]chan queuedEvent
+	// queuedBytes is the payload the queues currently retain, summed across
+	// shards. Written by the producer under mu and by every worker on
+	// release, so it is atomic rather than mu-guarded.
+	queuedBytes      atomic.Int64
 	quit             chan struct{}
 	closeOnce        sync.Once
 	inflight         sync.WaitGroup
@@ -236,13 +241,15 @@ func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) 
 		agg:        make(map[aggKey]State),
 		warmup:     make(map[aggKey]*aggWarmup),
 		excluded:   make(map[exclusionKey]exclusionRecord),
-		pending:    make(chan Event, dispatchQueueDepth),
 		quit:       make(chan struct{}),
 	}
 	if err := e.refreshConditions(); err != nil {
 		return nil, err
 	}
-	go e.deliverLoop()
+	for i := range e.pending {
+		e.pending[i] = make(chan queuedEvent, dispatchShardDepth)
+		go e.deliverLoop(e.pending[i])
+	}
 	return e, nil
 }
 
@@ -250,34 +257,115 @@ func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) 
 // evaluate emits one Event per alert a target names and config bounds that
 // count nowhere, so a batch can produce a multiple of it. It does not need to
 // be the maximum — a refused transition is reverted and re-detected on the
-// next cycle rather than lost — so this is a memory ceiling, and the queue
-// retains each Event's whole Cycle, hop rows included.
+// next cycle rather than lost.
 const dispatchQueueDepth = cluster.MaxCyclesPerBatch
 
-// Close signals the delivery worker to stop and returns without waiting for
-// it: the worker may be inside a delivery to an endpoint that never answers,
-// which is the wait this queue exists to keep off every other goroutine. It
+// dispatchShards is how many delivery workers run, and so the blast radius of
+// one unresponsive endpoint: Dispatch bounds itself at actionTimeout per
+// action, so a dead webhook does not hang a worker forever — it caps that
+// worker's delivery rate at one event per budget, which on a single worker is
+// the whole fleet's rate. Sharding by (target, alert) leaves the stall on the
+// keys that own the bad endpoint and lets every other key keep paging. It is a
+// fanout width rather than a derived bound: each shard costs one goroutine
+// parked in a delivery's own budget, never CPU, and the queued total stays
+// dispatchQueueDepth because the depth is split rather than multiplied.
+const dispatchShards = 8
+
+// dispatchShardDepth is one worker's queue. Ordering is per shard, which is
+// why the hash covers the whole aggKey: a firing and its own resolve carry the
+// same target and alert, so both land in this FIFO and cannot overtake.
+const dispatchShardDepth = dispatchQueueDepth / dispatchShards
+
+// dispatchQueueBytes bounds the payload the queues retain, which the depth
+// alone does not: an Event embeds its whole Cycle, and a worst-case one holds
+// config.MaxPingsPerCycle RTTs beside config.MaxHopRowsPerCycle hop rows of
+// cluster.MaxRTTsPerHop each — around 854 KB, so the depth by itself admits
+// 874 MB of queued notifications. At the deployed shape (20 pings, a 30-hop
+// walk) an Event's payload is a few KB and the depth is reached first by more
+// than an order of magnitude; only a pathological cycle reaches this. Refusal
+// is the same revert-and-retry as a full shard, so the cost of reaching it is
+// a page delayed by one interval, not a page lost.
+const dispatchQueueBytes = 64 << 20
+
+// The shards split the depth rather than multiplying it, so an uneven split
+// would quietly change the queued total. Negative here fails the build, the
+// same way probe pins its echo window to the walk's.
+const _ uint = 0 - dispatchQueueDepth%dispatchShards
+
+// queuedEvent pairs an Event with the payload bytes it reserved, so a worker
+// releases exactly what the producer charged rather than re-measuring a value
+// the scrub may have changed.
+type queuedEvent struct {
+	ev    Event
+	bytes int64
+}
+
+// shardFor maps a (target, alert) pair onto a delivery worker. FNV-1a over the
+// two strings with a separator, so "a"+"bc" and "ab"+"c" do not collide, and
+// allocation-free because it runs under e.mu on every transition.
+func shardFor(target, alert string) int {
+	const (
+		fnvOffset = uint64(14695981039346656037)
+		fnvPrime  = uint64(1099511628211)
+	)
+	h := fnvOffset
+	for i := 0; i < len(target); i++ {
+		h = (h ^ uint64(target[i])) * fnvPrime
+	}
+	h *= fnvPrime
+	for i := 0; i < len(alert); i++ {
+		h = (h ^ uint64(alert[i])) * fnvPrime
+	}
+	return int(h % dispatchShards)
+}
+
+// eventBytes is the variable-length payload one queued Event retains. The
+// fixed part of the struct is what dispatchQueueDepth bounds; this covers the
+// slices behind it, which are the only fields a single cycle can make large.
+func eventBytes(ev Event) int64 {
+	const durSize = int64(8)
+	n := int64(len(ev.Cycle.RTTs)) * durSize
+	for _, h := range ev.Cycle.Hops {
+		n += int64(len(h.RTTs))*durSize + int64(len(h.IP)) + int64(len(h.Unreach))
+	}
+	for _, s := range ev.Cycle.HTTPSamples {
+		n += int64(len(s.Err))
+	}
+	for _, src := range ev.FiringSources {
+		n += int64(len(src))
+	}
+	return n
+}
+
+// Close signals the delivery workers to stop and returns without waiting for
+// them: a worker may be inside a delivery to an endpoint that never answers,
+// which is the wait this queue exists to keep off every other goroutine. Each
 // exits after that delivery's own budget, abandoning whatever is queued.
 func (e *Evaluator) Close() {
 	e.closeOnce.Do(func() {
-		if queued := len(e.pending); queued > 0 {
+		queued := 0
+		for _, ch := range e.pending {
+			queued += len(ch)
+		}
+		if queued > 0 {
 			e.log.Error("alert notifications undelivered at shutdown", "queued", queued)
 		}
 		close(e.quit)
 	})
 }
 
-func (e *Evaluator) deliverLoop() {
+func (e *Evaluator) deliverLoop(pending <-chan queuedEvent) {
 	for {
 		select {
-		case ev := <-e.pending:
-			e.deliver(ev)
+		case q := <-pending:
+			e.deliver(q)
 		case <-e.quit:
-			// Balance inflight for whatever is still queued so a caller
-			// waiting on it cannot hang past shutdown.
+			// Balance inflight and the byte reservation for whatever is still
+			// queued so a caller waiting on either cannot hang past shutdown.
 			for {
 				select {
-				case <-e.pending:
+				case q := <-pending:
+					e.queuedBytes.Add(-q.bytes)
 					e.inflight.Done()
 				default:
 					return
@@ -289,8 +377,10 @@ func (e *Evaluator) deliverLoop() {
 
 // deliver bounds one event by its own action count: Dispatch runs an event's
 // actions in sequence and each bounds itself at actionTimeout.
-func (e *Evaluator) deliver(ev Event) {
+func (e *Evaluator) deliver(q queuedEvent) {
+	ev := q.ev
 	defer e.inflight.Done()
+	defer e.queuedBytes.Add(-q.bytes)
 	// Dispatch ran under scheduler.Fanout's recover() while it was inline in
 	// OnCycle; on its own goroutine a Dispatcher panic would take the process
 	// down instead, so the perimeter moves with it.
@@ -461,25 +551,43 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	}
 }
 
-// enqueueDispatch offers one transition to the delivery worker, reporting
-// whether the queue took it. It never blocks — blocking here is the pinned
-// caller this queue exists to prevent — so a full queue refuses, and the
-// caller undoes the transition rather than keeping a state nobody was told
-// about. Called with e.mu held, which is what makes the commit and the
-// refusal one step; the worker never takes that lock.
+// enqueueDispatch offers one transition to its shard's delivery worker,
+// reporting whether the queue took it. It never blocks — blocking here is the
+// pinned caller this queue exists to prevent — so a full shard or an exhausted
+// byte budget refuses, and the caller undoes the transition rather than
+// keeping a state nobody was told about. Called with e.mu held, which is what
+// makes the commit and the refusal one step and what makes the byte
+// reservation single-producer; the workers never take that lock.
 func (e *Evaluator) enqueueDispatch(ev Event) bool {
-	e.inflight.Add(1)
-	select {
-	case e.pending <- scrubHealthAddresses(ev):
-		return true
-	default:
-		e.inflight.Done()
-		e.log.Error("alert notification refused, delivery queue full; transition will be retried",
-			"target", ev.Target.ID(), "alert", ev.AlertName,
-			"prev", ev.Prev, "next", ev.Next,
-			"refused_total", e.dispatchRefusals.Add(1), "depth", dispatchQueueDepth)
+	ev = scrubHealthAddresses(ev)
+	size := eventBytes(ev)
+	if held := e.queuedBytes.Add(size); held > dispatchQueueBytes {
+		e.queuedBytes.Add(-size)
+		e.refuseDispatch(ev, "bytes", held, dispatchQueueBytes)
 		return false
 	}
+	e.inflight.Add(1)
+	select {
+	case e.pending[shardFor(ev.Target.ID(), ev.AlertName)] <- queuedEvent{ev: ev, bytes: size}:
+		return true
+	default:
+		e.queuedBytes.Add(-size)
+		e.inflight.Done()
+		e.refuseDispatch(ev, "depth", int64(dispatchShardDepth), dispatchShardDepth)
+		return false
+	}
+}
+
+// refuseDispatch counts and reports one refused transition. reason names which
+// of the two ceilings was reached, because they call for different remedies:
+// "depth" is a slow endpoint on this shard's keys, "bytes" is one cycle
+// carrying far more measurement than the fleet's shape.
+func (e *Evaluator) refuseDispatch(ev Event, reason string, held int64, limit int) {
+	e.log.Error("alert notification refused, delivery queue full; transition will be retried",
+		"target", ev.Target.ID(), "alert", ev.AlertName,
+		"prev", ev.Prev, "next", ev.Next, "reason", reason,
+		"held", held, "limit", limit,
+		"refused_total", e.dispatchRefusals.Add(1))
 }
 
 // DispatchRefusals reports transitions the delivery queue could not hold.

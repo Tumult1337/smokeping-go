@@ -2743,9 +2743,9 @@ func TestRefusedTransitionIsRevertedNotCommitted(t *testing.T) {
 		mu.Unlock()
 	})
 
-	// One event parks on the gate inside the worker, the rest fill the buffer,
-	// and everything past it is refused.
-	for i := 0; ev.DispatchRefusals() == 0 && i < dispatchQueueDepth+16; i++ {
+	// One event parks on the gate inside the shard's worker, the rest fill
+	// that shard's buffer, and everything past it is refused.
+	for i := 0; ev.DispatchRefusals() == 0 && i < dispatchShardDepth+16; i++ {
 		clk.advance(time.Second)
 		loss := 0.0
 		if i%2 == 0 {
@@ -2786,9 +2786,9 @@ func TestFullDeliveryQueueDropsLoudlyRatherThanBlocking(t *testing.T) {
 	})
 	ev.dispatcher = dispatcherFunc(func(context.Context, Event) { <-block })
 
-	// One event reaches the worker and blocks there; the queue then absorbs
-	// dispatchQueueDepth more before the next is refused.
-	for i := range dispatchQueueDepth + 8 {
+	// One event reaches the worker and blocks there; that shard's queue then
+	// absorbs dispatchShardDepth more before the next is refused.
+	for i := range dispatchShardDepth + 8 {
 		clk.advance(time.Second)
 		loss := 0.0
 		if i%2 == 0 {
@@ -2988,5 +2988,132 @@ func TestQuorumToggleResetsWarmup(t *testing.T) {
 	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
 	if evs := disp.events(); len(evs) != 0 {
 		t.Fatalf("got %+v, want none — warm-up must restart with the toggled aggregate", evs)
+	}
+}
+
+// A hung endpoint must stall only the keys that own it. Dispatch bounds itself
+// at actionTimeout per action, so an unresponsive webhook does not park a
+// worker forever — it caps that worker's delivery rate at one event per
+// budget, and on a single worker that rate was the whole fleet's: every other
+// target's page waited behind an endpoint that had nothing to do with it. The
+// invariant is per shard, so this asserts delivery for exactly the targets
+// that hash off the stuck one — a set that is empty if the queue is ever
+// collapsed back to one worker, which is what makes the check fail rather than
+// pass vacuously.
+func TestAHungEndpointStallsOnlyItsOwnShard(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+
+	names := make([]string, 0, 32)
+	for i := range 32 {
+		names = append(names, fmt.Sprintf("gw-%02d", i))
+	}
+	stuck := names[0]
+	stuckShard := shardFor("core/"+stuck, "quorum-test")
+
+	var want []string
+	for _, n := range names[1:] {
+		if shardFor("core/"+n, "quorum-test") != stuckShard {
+			want = append(want, n)
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("every target hashes to the stuck shard — one worker serves the whole fleet, so a single hung endpoint mutes it")
+	}
+
+	hung := make(chan struct{})
+	t.Cleanup(func() { close(hung) })
+	var mu sync.Mutex
+	delivered := make(map[string]bool, len(want))
+	ev.dispatcher = dispatcherFunc(func(_ context.Context, e Event) {
+		if e.Target.Target.Name == stuck {
+			<-hung
+			return
+		}
+		mu.Lock()
+		delivered[e.Target.Target.Name] = true
+		mu.Unlock()
+	})
+
+	// The stuck target goes first so its worker is already parked when the
+	// rest arrive.
+	for _, n := range names {
+		cy := cycleAt(clk, "tokyo-1", 100)
+		cy.Target.Target.Name = n
+		ev.OnCycle(context.Background(), cy)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		n := len(delivered)
+		mu.Unlock()
+		if n >= len(want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			mu.Lock()
+			defer mu.Unlock()
+			t.Fatalf("%d of %d targets off the stuck shard were paged; the rest are queued behind an endpoint that is not theirs", len(delivered), len(want))
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, n := range want {
+		if !delivered[n] {
+			t.Errorf("target %s hashes off the stuck shard but was never paged", n)
+		}
+	}
+}
+
+// The depth alone is not a memory bound: an Event retains its whole Cycle, and
+// a worst-case one carries config.MaxPingsPerCycle RTTs beside
+// config.MaxHopRowsPerCycle hop rows of cluster.MaxRTTsPerHop each. At that
+// shape one shard's depth is ~106 MB and the fleet's ~851 MB, so the byte
+// ceiling must refuse first — and must release what it reserved, or one burst
+// of large cycles refuses every page thereafter.
+func TestQueueRefusesOnBytesBeforeDepthAndReleasesThem(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	gate := make(chan struct{})
+	ev.dispatcher = dispatcherFunc(func(context.Context, Event) { <-gate })
+
+	queued := 0
+	for i := 0; ev.DispatchRefusals() == 0 && i < dispatchShardDepth+8; i++ {
+		clk.advance(time.Second)
+		loss := 0.0
+		if i%2 == 0 {
+			loss = 100
+		}
+		cy := cycleAt(clk, "tokyo-1", loss)
+		cy.RTTs = make([]time.Duration, config.MaxPingsPerCycle)
+		cy.Hops = make([]probe.Hop, config.MaxHopRowsPerCycle)
+		for h := range cy.Hops {
+			cy.Hops[h].RTTs = make([]time.Duration, cluster.MaxRTTsPerHop)
+		}
+		before := ev.DispatchRefusals()
+		ev.OnCycle(context.Background(), cy)
+		if ev.DispatchRefusals() == before && i%2 == 0 {
+			queued++
+		}
+	}
+	if ev.DispatchRefusals() == 0 {
+		t.Fatal("worst-case cycles never exhausted the queue at all")
+	}
+	if held := ev.queuedBytes.Load(); held > dispatchQueueBytes {
+		t.Fatalf("queue retains %d bytes, past its %d ceiling", held, dispatchQueueBytes)
+	}
+	if queued >= dispatchShardDepth {
+		t.Fatalf("%d worst-case events queued before the first refusal — the depth bound was reached first, so bytes are unbounded", queued)
+	}
+
+	close(gate)
+	ev.flush()
+	if held := ev.queuedBytes.Load(); held != 0 {
+		t.Fatalf("queue drained but still holds %d reserved bytes — the reservation leaks, and a later burst is refused on bytes nothing is using", held)
 	}
 }
