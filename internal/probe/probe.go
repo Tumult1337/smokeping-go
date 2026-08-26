@@ -213,7 +213,23 @@ func resolveIPAddr(ctx context.Context, network, host string) (*net.IPAddr, erro
 	if len(ips) == 0 {
 		return nil, noSuitable
 	}
-	return &net.IPAddr{IP: ips[0]}, nil
+	return zonedFromName(host, ips[0])
+}
+
+// zonedFromName refuses a link-local address that arrived without a zone.
+// LookupIP returns []net.IP, which carries none — net.ResolveIPAddr went
+// through lookupIPAddr, whose []IPAddr has the Zone the hosts parser fills —
+// and there is no family-pinned resolver call that returns one, so the zone a
+// name like `fe80::1%eth0 gw6` in /etc/hosts carries cannot be recovered here.
+// Silently keeping it empty produced an EINVAL on every send and a peer that
+// never matched: 100% loss with nothing in the log. A link-local target is
+// configured as a literal, where the zone survives, so this refuses loudly
+// rather than measuring a destination the kernel cannot reach.
+func zonedFromName(host string, ip net.IP) (*net.IPAddr, error) {
+	if ip.To4() == nil && ip.IsLinkLocalUnicast() {
+		return nil, fmt.Errorf("resolve %q: link-local %s has no zone; configure the literal with %%interface", host, ip)
+	}
+	return &net.IPAddr{IP: ip}, nil
 }
 
 func matchesFamily(network string, ip net.IP) bool {

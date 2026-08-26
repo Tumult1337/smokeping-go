@@ -617,3 +617,23 @@ func TestICMPProbeWarnsOnTransientTraceError(t *testing.T) {
 		t.Fatalf("throttle did not suppress the second warn:\n%s", buf.String())
 	}
 }
+
+// The zone has to reach the wire on the socket listen() prefers. Taking it
+// from the socket rather than the destination dropped it — listen binds the
+// unprivileged ping socket to the wildcard address, so its zone is always
+// empty — and sendto answers EINVAL on every ping to a link-local target,
+// which reads as 100% loss. matchEchoReply compares the peer against the
+// zoned destination, so the two halves would disagree even if a send landed.
+func TestEchoDestinationCarriesTheTargetsZone(t *testing.T) {
+	dst := &net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth0"}
+	udp, ok := echoDestination(true, dst).(*net.UDPAddr)
+	if !ok {
+		t.Fatal("a ping socket needs a *net.UDPAddr destination")
+	}
+	if udp.Zone != "eth0" {
+		t.Fatalf("udp destination zone = %q, want eth0 — every send to it is EINVAL", udp.Zone)
+	}
+	if got := echoDestination(false, dst); got != net.Addr(dst) {
+		t.Fatalf("raw destination = %v, want the *net.IPAddr unchanged", got)
+	}
+}

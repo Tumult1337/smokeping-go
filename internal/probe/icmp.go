@@ -142,6 +142,19 @@ const _ uint = 1<<16 - defaultTraceRounds*(defaultTraceMaxTTL+1) - config.MaxPin
 // derived from the walk's own round and TTL bounds in trace.go.
 func (i *ICMP) traceSeqCeil() int { return i.traceRounds * (i.traceMaxTTL + 1) }
 
+// echoDestination picks the address form the socket accepts: an unprivileged
+// ping socket wants a UDPAddr, a raw one an IPAddr. Both carry dst.Zone.
+// Taking the zone from the socket instead dropped it, because listen binds the
+// ping socket to the wildcard address — sendto then answered EINVAL on every
+// ping to a link-local target and it read 100% loss, while the walk's sendAddr
+// and matchEchoReply's comparison both used the zoned form.
+func echoDestination(isUDP bool, dst *net.IPAddr) net.Addr {
+	if isUDP {
+		return &net.UDPAddr{IP: dst.IP, Zone: dst.Zone}
+	}
+	return dst
+}
+
 // echoBaseSeq keeps the batch's window [base, base+count) above the walk's
 // sequence range and clear of the 16-bit wrap that would fold it back in — the
 // two now run at once, and a colliding seq makes sendTTL report the target
@@ -312,13 +325,8 @@ func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 		return 0, err
 	}
 
-	// Destination: for unprivileged UDP sockets we need a UDPAddr; for raw ICMP an IPAddr.
-	var addr net.Addr = dst
-	isUDP := false
-	if ua, ok := asUDPAddr(conn); ok {
-		addr = &net.UDPAddr{IP: dst.IP, Zone: ua.Zone}
-		isUDP = true
-	}
+	_, isUDP := asUDPAddr(conn)
+	addr := echoDestination(isUDP, dst)
 
 	deadline, ok := ctx.Deadline()
 	if !ok || time.Until(deadline) > timeout {

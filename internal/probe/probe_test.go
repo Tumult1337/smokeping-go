@@ -438,3 +438,31 @@ func TestNumericLinkLocalZoneResolvesToTheNameTheKernelReports(t *testing.T) {
 		}
 	}
 }
+
+// LookupIP returns []net.IP and carries no Zone, where net.ResolveIPAddr went
+// through lookupIPAddr and its []IPAddr does. There is no family-pinned
+// resolver call that returns one, so a name whose /etc/hosts entry reads
+// `fe80::1%eth0 gw6` cannot have its zone recovered here — and a zoneless
+// link-local destination is EINVAL on every send and a peer that never
+// matches, i.e. 100% loss with nothing logged. Refuse loudly instead.
+func TestLinkLocalFromANameIsRefusedRatherThanUnreachable(t *testing.T) {
+	orig := lookupIPFn
+	lookupIPFn = func(context.Context, string, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("fe80::1")}, nil
+	}
+	t.Cleanup(func() { lookupIPFn = orig })
+
+	if _, err := resolveIPAddr(context.Background(), "ip6", "gw6"); err == nil {
+		t.Fatal("a zoneless link-local from a name resolved successfully; every send to it is EINVAL and the target reads 100% loss with nothing in the log")
+	} else if !strings.Contains(err.Error(), "zone") {
+		t.Fatalf("error should name the missing zone, got %v", err)
+	}
+
+	// A routable address from the same path must still resolve.
+	lookupIPFn = func(context.Context, string, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("2001:db8::1")}, nil
+	}
+	if _, err := resolveIPAddr(context.Background(), "ip6", "gw6"); err != nil {
+		t.Fatalf("an ordinary v6 name must still resolve: %v", err)
+	}
+}
