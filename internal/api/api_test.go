@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2142,13 +2144,13 @@ func TestStatusTrimsPerSourceAndEchoesItsWindow(t *testing.T) {
 	}
 	var got struct {
 		Recent []storage.CyclePoint `json:"recent"`
-		From   int64                `json:"from"`
-		To     int64                `json:"to"`
+		From   time.Time            `json:"from"`
+		To     time.Time            `json:"to"`
 	}
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.From == 0 || got.To == 0 {
+	if got.From.IsZero() || got.To.IsZero() {
 		t.Fatal("/status echoes no window, so an empty recent is indistinguishable from a target that never existed")
 	}
 	per := map[string]int{}
@@ -2169,5 +2171,21 @@ func TestStatusTrimsPerSourceAndEchoesItsWindow(t *testing.T) {
 		if p.Time.Unix() != newest {
 			t.Fatalf("trim dropped the newest cycles, keeping up to %s", p.Time)
 		}
+	}
+}
+
+// cycleCounterDTOs serves storage.CycleCounters as-is, so a field added to
+// that struct publishes itself on an unauthenticated endpoint without anyone
+// deciding to. This is the decision point: adding a field means updating this
+// list, which is where the question gets asked.
+func TestCycleCountersPublishOnlyTheFieldsWeChose(t *testing.T) {
+	want := []string{"Source", "Time", "Sent", "LossCount", "LossPct"}
+	rt := reflect.TypeOf(storage.CycleCounters{})
+	var got []string
+	for i := range rt.NumField() {
+		got = append(got, rt.Field(i).Name)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("storage.CycleCounters is %v, want %v — /hops serves it verbatim to anonymous callers", got, want)
 	}
 }

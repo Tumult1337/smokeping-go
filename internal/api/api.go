@@ -805,7 +805,7 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	// cannot tell it apart from a target that never existed.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"target": ref.ID(), "recent": points,
-		"from": from.Unix(), "to": to.Unix(),
+		"from": from, "to": to,
 	})
 }
 
@@ -830,7 +830,10 @@ func trimPerSource(points []storage.CyclePoint, n int) []storage.CyclePoint {
 		return points
 	}
 	seen := make(map[string]int, len(counts))
-	out := points[:0]
+	// A fresh slice, not points[:0]: CachingReader hands back a copy today,
+	// but filtering in place writes through whatever backing array the reader
+	// returned, and nothing in the Reader contract says it is ours.
+	out := make([]storage.CyclePoint, 0, len(points))
 	for _, p := range points {
 		if counts[p.Source]-seen[p.Source] <= n {
 			out = append(out, p)

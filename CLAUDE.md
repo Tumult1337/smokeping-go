@@ -1225,7 +1225,12 @@ Key points a reader can't derive from a single file:
   action, so a dead endpoint does not park a worker forever — it caps that
   worker's delivery *rate*, and on one worker that rate was the whole
   fleet's, every target's page queued behind an endpoint that was not
-  theirs. `dispatchQueueDepth` is
+  theirs. **What it does not isolate is a shared endpoint:** the thing that
+  stalls is a `cfg.Actions` entry, not a target, so a fleet whose alerts
+  all name one dead webhook fills every shard — `dispatchShards` times
+  slower, not never. Isolating that means a queue per action, which is a
+  different key and a different bound; the shards buy the case where one
+  target's endpoint is the broken one. `dispatchQueueDepth` is
   `cluster.MaxCyclesPerBatch`, the burst it absorbs rather than the
   producer's maximum: `evaluate` emits one Event per alert a target names
   and config bounds that count nowhere, so a batch produces a multiple of

@@ -21,6 +21,10 @@ import (
 // work nobody is waiting for.
 const (
 	sinkCycleBudget = 30 * time.Second
+	// Kept equal to api's server WriteTimeout by hand: neither package can
+	// import the other, and the value is a bound on this handler rather than a
+	// protocol constant worth moving into cluster. If that timeout changes,
+	// change this with it.
 	sinkBatchBudget = 120 * time.Second
 )
 
