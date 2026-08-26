@@ -61,6 +61,23 @@ func TestTCPProbeUnreachable(t *testing.T) {
 	}
 }
 
+// The RTT slice is sized by count, which is caller-supplied, so a cancelled
+// cycle must return before paying that allocation.
+func TestTCPProbeCancelledContextAllocatesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := NewTCP("tcp", time.Second).Probe(ctx, Target{Host: "127.0.0.1:9"}, 1<<20)
+	if err == nil {
+		t.Fatal("a cancelled context must return an error")
+	}
+	if res.Sent != 0 {
+		t.Fatalf("Sent = %d, want 0 attempts on a cancelled cycle", res.Sent)
+	}
+	if cap(res.RTTs) != 0 {
+		t.Fatalf("a cancelled cycle pre-allocated %d rtt slots", cap(res.RTTs))
+	}
+}
+
 func TestHTTPProbe(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -197,6 +214,13 @@ func TestBuildRejectsUnschedulablePingBudget(t *testing.T) {
 		// randomized map iteration reached first, so it must name neither.
 		if strings.Contains(err.Error(), "wan") {
 			t.Fatalf("schedule error is attributed to a probe name: %v", err)
+		}
+	})
+
+	t.Run("pings past the ingest rtt ceiling is refused without an icmp probe", func(t *testing.T) {
+		probes := map[string]config.Probe{"mtr": {Type: "mtr", Timeout: 2 * time.Second}}
+		if _, err := Build(probes, 5*time.Second, 100_000); err == nil {
+			t.Fatal("a scheduler error path stamps Sent=pings, so 100k pings must be refused for every probe map")
 		}
 	})
 

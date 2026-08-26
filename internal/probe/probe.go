@@ -97,6 +97,9 @@ func Build(probes map[string]config.Probe, interval time.Duration, pings int) (*
 	// Defence in depth: config.Validate refuses this schedule too, so reaching
 	// it here means a config that never passed validation — a slave's
 	// master-supplied view, or a caller that built a Config in memory.
+	if err := config.ValidatePingCount(pings); err != nil {
+		return nil, err
+	}
 	var budget time.Duration
 	if config.HasICMPProbe(probes) {
 		var err error

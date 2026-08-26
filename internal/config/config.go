@@ -559,6 +559,22 @@ func HasICMPProbe(probes map[string]Probe) bool {
 	return false
 }
 
+// ValidatePingCount bounds pings for every schedule, icmp or not: the
+// scheduler stamps Sent = pings on any probe error and a cycle carries up to
+// one RTT per ping, so a count past MaxPingsPerCycle — cluster ingest's
+// rtts-per-cycle ceiling, itself below the UInt16 sent/lost columns — is a
+// cycle no master can ingest. probe.Build applies the same bound as defence
+// in depth for a slave building a master-supplied config.
+func ValidatePingCount(pings int) error {
+	if pings <= 0 {
+		return fmt.Errorf("pings must be positive, got %d", pings)
+	}
+	if pings > MaxPingsPerCycle {
+		return fmt.Errorf("pings=%d exceeds %d, the most rtt samples cluster ingest admits per cycle", pings, MaxPingsPerCycle)
+	}
+	return nil
+}
+
 // ICMPPingBudget returns the per-ping deadline a full-loss cycle derives and
 // refuses the schedule when it falls below MinPingBudget. The icmp probe
 // shortens each echo to fit the cycle, but no shortening rescues a schedule
@@ -593,8 +609,8 @@ func (c *Config) Validate() error {
 	if c.Interval > MaxProbeInterval {
 		return fmt.Errorf("interval %s exceeds %s, past which a measured rtt is no longer storable", c.Interval, MaxProbeInterval)
 	}
-	if c.Pings <= 0 {
-		return fmt.Errorf("pings must be positive")
+	if err := ValidatePingCount(c.Pings); err != nil {
+		return err
 	}
 	if HasICMPProbe(c.Probes) {
 		if _, err := ICMPPingBudget(c.Interval, c.Pings); err != nil {

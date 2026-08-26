@@ -521,6 +521,26 @@ func TestValidateRefusesUnschedulablePingCount(t *testing.T) {
 		}
 	})
 
+	t.Run("pings past the ingest rtt ceiling is refused with no icmp probe", func(t *testing.T) {
+		cfg := scheduleConfig(5*time.Second, 100_000)
+		cfg.Probes = map[string]Probe{"web": {Type: "tcp", Timeout: 2 * time.Second}}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("pings=100000 stamps Sent=100000 on a probe error, which cluster ingest refuses; Validate must refuse it first")
+		}
+		if !strings.Contains(err.Error(), "100000") {
+			t.Errorf("error %q does not name the count", err)
+		}
+	})
+
+	t.Run("pings at the ceiling is accepted with no icmp probe", func(t *testing.T) {
+		cfg := scheduleConfig(5*time.Second, MaxPingsPerCycle)
+		cfg.Probes = map[string]Probe{"web": {Type: "tcp", Timeout: 2 * time.Second}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("pings at MaxPingsPerCycle is ingestable and must validate: %v", err)
+		}
+	})
+
 	t.Run("Load refuses it too", func(t *testing.T) {
 		body := strings.NewReplacer(`"interval": "30s"`, `"interval": "20s"`, `"pings": 10`, `"pings": 120`).Replace(minimalConfig)
 		if _, err := Load(writeTmp(t, body)); err == nil {
