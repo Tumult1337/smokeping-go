@@ -369,14 +369,17 @@ func TestHopRTTsNotRacedBetweenFlushAndAlertDispatch(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := &Writer{log: discard, conn: &prepConn{batch: &recordBatch{}}}
+	conn := &prepConn{batch: &recordBatch{}}
+	w := &Writer{log: discard, conn: conn}
 	for i := range w.chans {
-		w.chans[i] = make(chan any, 64)
+		// Room for every row, so the flushed count below is deterministic.
+		w.chans[i] = make(chan any, 256)
 	}
 	w.wg.Add(1)
 	go w.runTable(ctx, tableProbeHop, 1, time.Millisecond)
 
-	for i := 0; i < 200; i++ {
+	const cycles = 200
+	for i := 0; i < cycles; i++ {
 		cy := testCycle(time.Now())
 		cy.Hops = []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: []time.Duration{
 			30 * time.Millisecond, 10 * time.Millisecond, 20 * time.Millisecond}}}
@@ -389,6 +392,31 @@ func TestHopRTTsNotRacedBetweenFlushAndAlertDispatch(t *testing.T) {
 	}
 	cancel()
 	w.wg.Wait()
+
+	// -race is the tearing detector, but the gate does not always run it — so
+	// also assert the flushed data: every row arrived, and each carries the
+	// stats of the exact three-sample slice the dispatcher was reading.
+	if got := w.Dropped()["probe_hop"]; got != 0 {
+		t.Fatalf("fixture overflowed its own buffer: %d drops", got)
+	}
+	if got := len(conn.batch.appended); got != cycles {
+		t.Fatalf("flushed %d hop rows, want %d — rows were lost between OnCycle and Send", got, cycles)
+	}
+	cols := insertColumns(t, conn.query)
+	for _, args := range conn.batch.appended {
+		byCol := map[string]any{}
+		for i, c := range cols {
+			byCol[c] = args[i]
+		}
+		if byCol["rtt_min_us"] != uint32(10000) || byCol["rtt_max_us"] != uint32(30000) ||
+			byCol["rtt_median_us"] != uint32(20000) || byCol["rtt_mean_us"] != uint32(20000) {
+			t.Fatalf("flush read torn hop RTTs: min=%v max=%v median=%v mean=%v",
+				byCol["rtt_min_us"], byCol["rtt_max_us"], byCol["rtt_median_us"], byCol["rtt_mean_us"])
+		}
+	}
+	if !conn.batch.sent {
+		t.Fatal("batch never sent")
+	}
 }
 
 // Ingest accepts an RTT of exactly 0 (cluster.boundRTTs is [0, MaxSampleRTT]),
