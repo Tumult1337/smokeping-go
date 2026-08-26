@@ -336,6 +336,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 // evaluator locked forever inside a process that keeps reporting healthy.
 func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration, aheadLimit int) (toDispatch []Event, skipped []time.Duration) {
 	warmupWindow := stalenessWindow(cfg.Interval)
+	freshness := alertFreshness(cfg.Interval)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, name := range cy.Target.Target.Alerts {
@@ -411,7 +412,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 			continue
 		}
 
-		firing, live := e.tally(bySource, now, window)
+		firing, live := e.tally(bySource, now, window, freshness)
 		next := StateOK
 		if live > 0 && firing >= alertCfg.Quorum.Threshold(live) {
 			next = StateFiring
@@ -524,18 +525,34 @@ func scrubHealthAddresses(ev Event) Event {
 	return ev
 }
 
-// tally counts firing and live sources, evicting any that have gone stale.
+// tally counts firing and live sources, pruning any that have gone stale.
 // now is the master's receive clock: a slave choosing this value could date a
 // cycle forward and age every honest source out of the denominator, becoming a
 // majority of itself. Must be called with e.mu held.
 //
 // Pruning is essential rather than cosmetic: a slave that dies while healthy
 // would otherwise sit in the denominator forever, so a real outage seen by
-// every remaining source could never reach a majority.
-func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window time.Duration) (firing, live int) {
+// every remaining source could never reach a majority. But pruning drops only
+// participation — the evaluation state a recreated entry would start from
+// anyway — never the replay identity (seenCycle/lastCycle/pastCycle/ahead):
+// deleting the whole entry recreated it with seenCycle false, which admits
+// anything, so the redelivery of a pruned source's cycle was applied a second
+// time and could resolve a live alert or refire a sustained one. The identity
+// is deleted only once no stamp it holds could pass the freshness gate —
+// every stamp is at most lastCycle, so past lastCycle+freshness any replay is
+// refused upstream and the entry buys nothing. Retention is bounded by the
+// same fact: ingest accepts a stamp at most config.MaxFutureSkew ahead of the
+// receive time, so an entry outlives its last cycle by at most
+// freshness+MaxFutureSkew.
+func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window, freshness time.Duration) (firing, live int) {
 	for src, st := range bySource {
 		if now.Sub(st.lastSeen) > window {
-			delete(bySource, src)
+			if now.Sub(st.lastCycle) > freshness {
+				delete(bySource, src)
+			} else {
+				st.state = StateOK
+				st.consecHits = 0
+			}
 			continue
 		}
 		live++

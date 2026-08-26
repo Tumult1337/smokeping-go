@@ -2423,3 +2423,101 @@ func TestBurstyPushCadenceKeepsASourceLive(t *testing.T) {
 		t.Fatalf("got %+v, want none — one firing source out of three is not a majority", evs)
 	}
 }
+
+// tally's prune must drop only quorum participation, never the replay
+// identity: deleting the whole alertState recreated it with seenCycle false,
+// which admits anything, so the redelivery of a pruned source's cycle — still
+// inside the freshness gate whenever its stamp ran ahead of the receive time
+// — was applied as if never seen.
+func TestPrunedSourceStillRefusesItsReplayedCycle(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	// tokyo-1's healthy cycle arrives forward-dated by the skew ingest
+	// accepts, then tokyo-1 dies while the master sees a real outage.
+	poison := healthyCycle("tokyo-1")
+	poison.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, poison)
+	for range 6 {
+		clk.advance(time.Minute)
+		ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	}
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("setup: got %+v, want the master's FIRING once tokyo-1 aged out", evs)
+	}
+	disp.reset()
+
+	// The lost-ack redelivery: its stamp is one minute in the past now, well
+	// inside the freshness gate. Applied a second time it re-enters the
+	// denominator healthy and resolves a page off replayed data.
+	ev.OnCycle(ctx, poison)
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %+v, want none — a replayed measurement must not resolve a live alert", evs)
+	}
+}
+
+// The retained identity is bounded: past lastCycle+freshness every stamp the
+// entry holds is refused by the freshness gate itself, so keeping it buys
+// nothing and holding it longer is the unbounded per-source memory the prune
+// exists to avoid.
+func TestPrunedIdentityIsEventuallyDeleted(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	poison := healthyCycle("tokyo-1")
+	poison.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, poison)
+
+	clk.advance(config.MaxFutureSkew + alertFreshness(time.Minute) + time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if _, ok := ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"]; ok {
+		t.Fatal("replay identity retained past the freshness gate that makes it useless")
+	}
+}
+
+// What the prune does drop is the evaluation state: a pruned source that
+// comes back starts from StateOK with a zero streak, exactly as the deleted
+// entry used to — only the replay identity survives.
+func TestPruneResetsEvaluationStateButKeepsIdentity(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	bad := lossyCycle("tokyo-1", 100)
+	bad.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, bad) // tokyo-1: consecHits 1
+
+	// A master cycle after tokyo-1 went stale (but its identity is still
+	// fresh) runs the prune.
+	clk.advance(livenessWindow(time.Minute) + 30*time.Second)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
+
+	// tokyo-1 revives with a genuine cycle: a fresh streak, not a resumed one.
+	clk.advance(30 * time.Second)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	st, ok := ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"]
+	if !ok {
+		t.Fatal("tokyo-1's state missing entirely")
+	}
+	if st.consecHits != 1 {
+		t.Fatalf("consecHits = %d after a prune and one bad cycle, want 1", st.consecHits)
+	}
+	if !st.seenCycle {
+		t.Fatal("replay identity did not survive the prune")
+	}
+}
