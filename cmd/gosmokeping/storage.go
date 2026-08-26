@@ -41,6 +41,7 @@ func openStorage(ctx context.Context, log *slog.Logger, cfg config.Storage, ping
 		_ = w.Close()
 		return nil, fmt.Errorf("clickhouse reader: %w", err)
 	}
+	r.WithLogger(log)
 	return &storageBackend{
 		sink:   w,
 		reader: r,

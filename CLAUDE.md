@@ -133,9 +133,12 @@ Key points a reader can't derive from a single file:
   against `probe_cycle`'s ~11 minutes — worse than the imbalance the
   sizing was added to remove. The channel cap only ever governed the case
   where ClickHouse accepts the connection and hangs; now it governs a
-  refused one too. `flushRetainFactor` is the same choice one layer up,
-  retaining a failed batch for the next tick and capping the backlog at
-  `maxRows × 4` with the oldest overflow dropped and counted;
+  refused one too. `flushRetainFactor` retains a failed batch for the
+  next tick and caps `pending` at `maxRows × 4`; since the loop stops
+  draining while a flush is failing, `pending` cannot exceed `maxRows`
+  during an outage and that cap binds only on the shutdown drain, which
+  appends the whole channel at once — every row it still holds there is
+  counted as a drop, not just the overflow past the cap;
   `slave.PushSink`'s ring is the third.
 
   **Window caps.** The binary ships no auth, so on every endpoint that

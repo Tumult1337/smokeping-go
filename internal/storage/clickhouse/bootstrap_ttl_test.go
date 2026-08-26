@@ -37,19 +37,49 @@ func TestTTLPastDateTimeCeilingIsRefused(t *testing.T) {
 // a retention Validate accepts and this refuses is a master that reloads green
 // and then will not boot — visible to nobody until a redeploy.
 func TestBootstrapAndValidateAgreeOnEveryRetention(t *testing.T) {
-	at := time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)
+	// The real clock, pinned for this package only: config.Validate reads its
+	// own unexported clock, so the two layers can only be compared at the same
+	// instant. Values within a day of the ceiling are left to the two
+	// single-layer boundary tests, which each pin the clock they check.
+	at := time.Now()
 	orig := nowFn
 	nowFn = func() time.Time { return at }
 	t.Cleanup(func() { nowFn = orig })
 
-	last := int(config.MaxDateTime.Sub(at).Hours() / 24)
-	for _, days := range []int{1, 365, last - 1, last, last + 1, last + 1000, config.MaxRetentionDays} {
+	last := int(config.MaxDateTime.Sub(at.UTC()).Hours() / 24)
+	// Drives Config.Validate, not RetentionWithinDateTime: comparing the
+	// backstop against the function it delegates to is a tautology, and
+	// deleting the call from Validate leaves it green.
+	for _, days := range []int{-1, 0, 1, 365, last - 2, last + 1000, config.MaxRetentionDays} {
+		cfg := validatableConfig()
+		cfg.Storage.ClickHouse.Retention.CycleDays = days
+		validateOK := cfg.Validate() == nil
 		bootstrapOK := ttlWithinDateTime(days) == nil
-		validateOK := config.RetentionWithinDateTime(days, at) == nil
+		// days == 0 is the one legal disagreement: Validate reads it as
+		// "use the default" and rewrites it before the check.
+		if days == 0 {
+			if !validateOK {
+				t.Errorf("0 days must default rather than fail: %v", cfg.Validate())
+			}
+			continue
+		}
 		if bootstrapOK != validateOK {
-			t.Errorf("%d days: bootstrap accepts=%v, config accepts=%v — the layers disagree",
+			t.Errorf("%d days: bootstrap accepts=%v, config accepts=%v — a config that validates green must be one the process can boot with",
 				days, bootstrapOK, validateOK)
 		}
+	}
+}
+
+func validatableConfig() *config.Config {
+	return &config.Config{
+		Listen:   ":8080",
+		Interval: time.Minute,
+		Pings:    5,
+		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: 2 * time.Second}},
+		Targets: []config.Group{{Group: "core", Targets: []config.Target{
+			{Name: "gw", Host: "1.1.1.1", Probe: "icmp"},
+		}}},
 	}
 }
 

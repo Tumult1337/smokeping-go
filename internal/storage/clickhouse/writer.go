@@ -61,9 +61,9 @@ const (
 	insertProbeHTTP = `INSERT INTO probe_http (timestamp, target_id, target_group, source, seq, rtt_ms, status, error)`
 )
 
-// flushRetainFactor caps the batch retained across failed flushes at
-// maxRows*flushRetainFactor, dropping (and counting) the oldest overflow so
-// a long ClickHouse outage cannot grow `pending` without limit.
+// flushRetainFactor caps `pending` at maxRows*flushRetainFactor. During an
+// outage the loop stops draining, so pending cannot exceed maxRows and this
+// binds only on the shutdown drain, which appends the whole channel at once.
 const flushRetainFactor = 4
 
 // Channel sizing scales slots by rows-per-cycle so all four tables absorb a
@@ -347,6 +347,14 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 			drainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			flush(drainCtx)
 			cancel()
+			// flush clears pending on success, so anything left is a batch it
+			// retained for a retry that will never come. The trim inside it
+			// counted only the overflow past maxRows*flushRetainFactor; these
+			// are lost too, and writer_drops under-reported shutdown loss by
+			// up to that many rows per table.
+			for range pending {
+				w.recordDrop(table)
+			}
 			return
 		case row := <-src:
 			pending = append(pending, row)

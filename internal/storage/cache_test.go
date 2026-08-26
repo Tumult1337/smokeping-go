@@ -1311,3 +1311,50 @@ func TestCachingReader_HopsAt_CoalescedRelativePinsShareOneEntry(t *testing.T) {
 		t.Fatalf("inner calls: got %d, want a second entry for the next quantum", got)
 	}
 }
+
+// panicAfterFirst answers once, then panics — a leader failing on a key the
+// cache already holds, which is the only path where stale-serving applies.
+type panicAfterFirst struct {
+	fakeReader
+	calls atomic.Int64
+}
+
+func (p *panicAfterFirst) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, q QueryFilter) ([]CyclePoint, error) {
+	if p.calls.Add(1) > 1 {
+		panic("leader blew up")
+	}
+	return []CyclePoint{{Time: from}}, nil
+}
+
+// Stale-serving exists to ride out a ClickHouse outage. A panicked leader is
+// not that — it is a bug, and masking it behind an expired entry means a
+// repeating panic is invisible for as long as the entry survives the LRU,
+// with waiters getting a 200 carrying arbitrarily old data. isRefusal names
+// it for the same reason it names ErrHopsTruncated.
+func TestCachingReader_LeaderPanicIsNotMaskedByAStaleEntry(t *testing.T) {
+	inner := &panicAfterFirst{}
+	c := NewCachingReader(inner, 8, 8)
+	ref := newRef("g", "t")
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	from, to := now.Add(-time.Hour), now
+
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{}); err != nil {
+		t.Fatalf("warming the cache: %v", err)
+	}
+
+	// Expire the entry in place; hopsLookup and this path both leave it in the
+	// LRU, which is what makes stale available at all.
+	c.mu.Lock()
+	for _, elem := range c.items {
+		elem.Value.(*cycleCacheEntry).expires = now.Add(-time.Hour)
+	}
+	c.mu.Unlock()
+
+	_, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{})
+	if err == nil {
+		t.Fatal("a panicking leader was masked as a stale hit: the caller got a 200 with old data and nothing recorded the panic")
+	}
+	if !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("err = %v, want the contained panic", err)
+	}
+}

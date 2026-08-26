@@ -25,6 +25,14 @@ type Reader struct {
 	logger *slog.Logger
 }
 
+// WithLogger sets the logger the reader's diagnostics use. Separate from
+// NewReader so a caller that has no logger — every test that builds a Reader
+// around a fake conn — is not made to invent one.
+func (r *Reader) WithLogger(log *slog.Logger) *Reader {
+	r.logger = log
+	return r
+}
+
 func (r *Reader) log() *slog.Logger {
 	if r.logger == nil {
 		return slog.Default()

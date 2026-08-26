@@ -63,9 +63,18 @@ var ErrOverloaded = errors.New("storage: too many queries in flight")
 // answer — so serving an expired entry in its place would turn it into a 200
 // that never expires, since only a success bumps an entry's TTL. Every new
 // semantic sentinel a Reader can return belongs here.
+// isRefusal names the errors a stale entry must not stand in for. A refusal
+// is deterministic, so serving stale turns it into a 200 that never ends. A
+// panicked leader is here for a different reason: it is a bug, not the
+// ClickHouse outage stale-serving exists to ride out, and masking it means a
+// repeating panic is invisible for as long as an entry survives the LRU.
 func isRefusal(err error) bool {
-	return errors.Is(err, ErrHopsTruncated)
+	return errors.Is(err, ErrHopsTruncated) || errors.Is(err, errLeaderPanicked)
 }
+
+// errLeaderPanicked is the sentinel recoverToError wraps a recovered panic in,
+// so isRefusal can name it rather than matching on message text.
+var errLeaderPanicked = errors.New("storage: query leader panicked")
 
 // CachingReader wraps a Reader with two LRU+singleflight decorators: one for
 // QueryCycles, one for the three hops query paths. QueryRTTs and
@@ -521,7 +530,7 @@ func recoverToError[T any](run func(context.Context) (T, error)) func(context.Co
 	return func(ctx context.Context) (out T, err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				err = fmt.Errorf("storage: query leader panicked: %v", r)
+				err = fmt.Errorf("%w: %v", errLeaderPanicked, r)
 			}
 		}()
 		return run(ctx)

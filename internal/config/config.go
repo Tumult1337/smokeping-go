@@ -521,6 +521,13 @@ var MaxDateTime = time.Unix(math.MaxUint32, 0).UTC()
 // the master refuse to start at its next restart — a disagreement invisible
 // until a redeploy, since Bootstrap runs only at startup.
 func RetentionWithinDateTime(days int, now time.Time) error {
+	// Both ends. Bounding only the ceiling let the case this function's own
+	// callers cite — a TTL already in the past, which expires the whole table
+	// on the next merge — through the storage-side backstop, where the config
+	// that reached it was by definition not validated.
+	if days < 1 {
+		return fmt.Errorf("%d days is a TTL in the past, which expires the whole table", days)
+	}
 	if expiry := now.UTC().AddDate(0, 0, days); expiry.After(MaxDateTime) {
 		return fmt.Errorf("%d days expires at %s, past DateTime's %s ceiling",
 			days, expiry.Format("2006-01-02"), MaxDateTime.Format("2006-01-02"))
