@@ -400,23 +400,15 @@ func (r *Reader) QueryLatestHops(ctx context.Context, ref config.TargetRef, f st
 	// all-view — the UI then renders one randomly-chosen source's latest
 	// cycle. With the per-source group the response carries one cycle per
 	// origin, matching what QueryHopsAt does for the historical-pin path.
-	q := `
-WITH latest AS (
+	cte := `
+WITH pinned AS (
   SELECT source, max(timestamp) AS ts
   FROM probe_hop
   WHERE target_id = ?
     AND target_group = ?` + srcClause + freshClause + `
     AND timestamp <= now() + INTERVAL ` + maxFutureSkewSeconds + ` SECOND
   GROUP BY source
-)
-SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
-       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
-       loss_pct, lost, sent
-FROM probe_hop
-WHERE target_id = ?
-  AND target_group = ?` + srcClause + `
-  AND (source, timestamp) IN (SELECT source, ts FROM latest)
-ORDER BY source, ttl` + hopRowLimit(hopRowCap)
+)`
 	// args layout: CTE filter (target id+group, opt source, opt freshness), outer filter (target id+group, opt source).
 	args := []any{ref.Target.Name, ref.Group}
 	args = append(args, srcArgs...)
@@ -425,9 +417,25 @@ ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	}
 	args = append(args, ref.Target.Name, ref.Group)
 	args = append(args, srcArgs...)
+	return r.pinnedHopRows(ctx, ref, "query latest hops", cte, srcClause, args)
+}
+
+// pinnedHopRows is the tail both pinned reads share: the hop rows at exactly
+// the (source, ts) pairs the caller's `pinned` CTE selected, paired with those
+// cycles' own round counters.
+func (r *Reader) pinnedHopRows(ctx context.Context, ref config.TargetRef, what, cte, srcClause string, args []any) (storage.HopsResult, error) {
+	q := cte + `
+SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
+       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
+       loss_pct, lost, sent
+FROM probe_hop
+WHERE target_id = ?
+  AND target_group = ?` + srcClause + `
+  AND (source, timestamp) IN (SELECT source, ts FROM pinned)
+ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	rows, err := r.conn.Query(ctx, q, args...)
 	if err != nil {
-		return storage.HopsResult{}, fmt.Errorf("query latest hops: %w", err)
+		return storage.HopsResult{}, fmt.Errorf("%s: %w", what, err)
 	}
 	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
 	hops, err := scanHopRows(rows)
@@ -450,8 +458,8 @@ func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.
 	// and edges rounded the other way make that neighbour the only candidate.
 	// The now() ceiling mirrors QueryLatestHops': ingest stops new
 	// future-dated rows, this keeps ones already in the table off the pin.
-	q := `
-WITH nearest AS (
+	cte := `
+WITH pinned AS (
   SELECT source,
          argMin(timestamp, abs(dateDiff('millisecond', timestamp, ` + dtMilli + `))) AS ts
   FROM probe_hop
@@ -460,15 +468,7 @@ WITH nearest AS (
     AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + `
     AND timestamp <= now() + INTERVAL ` + maxFutureSkewSeconds + ` SECOND
   GROUP BY source
-)
-SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
-       rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0,
-       loss_pct, lost, sent
-FROM probe_hop
-WHERE target_id = ?
-  AND target_group = ?` + srcClause + `
-  AND (source, timestamp) IN (SELECT source, ts FROM nearest)
-ORDER BY source, ttl` + hopRowLimit(hopRowCap)
+)`
 	// args layout: CTE — `at` (the centre), target id+group, optional source, from, to;
 	//              outer — target id+group, optional source.
 	args := []any{at.UnixMilli(), ref.Target.Name, ref.Group}
@@ -476,13 +476,7 @@ ORDER BY source, ttl` + hopRowLimit(hopRowCap)
 	args = append(args, at.Add(-half).UnixMilli(), at.Add(half).UnixMilli())
 	args = append(args, ref.Target.Name, ref.Group)
 	args = append(args, srcArgs...)
-	rows, err := r.conn.Query(ctx, q, args...)
-	if err != nil {
-		return storage.HopsResult{}, fmt.Errorf("query hops at: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck // scanHopRows returns rows.Err() which covers close errors
-	hops, err := scanHopRows(rows)
-	return r.withCycleCounters(ctx, ref, hops, err)
+	return r.pinnedHopRows(ctx, ref, "query hops at", cte, srcClause, args)
 }
 
 // maxCycleCounterKeys bounds the (source, cycle) pairs one hop read asks

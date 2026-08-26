@@ -68,3 +68,30 @@ Known limit of the guard: the raw SELECT's *scan destination list* cannot be
 checked without a live server (the fake conn returns no rows), so a column
 added to the SELECT but not to Scan still only fails against ClickHouse —
 same seam the skill already documents.
+
+## C12 — cache Stats() wiring (request to the API agent), and the DTO clone
+
+- `CachingReader.Stats()` / `storage.CacheStats` (internal/storage/cache.go)
+  has no production read site — repo rule says wire it or delete it. Request:
+  serve it on `/api/v1/health` next to `writer_drops` (e.g. a `cache` object
+  with `cycles_hits/cycles_misses/hops_hits/hops_misses`). If the API side
+  would rather not carry the field, delete `Stats()`, `CacheStats`, and the
+  three `TestCachingReader_Stats_*` tests together — half-deleting leaves the
+  same dead surface.
+- `internal/api`'s `cycleLossDTO` clones `storage.CycleCounters`
+  field-for-field; consider serializing `storage.CycleCounters` directly (it
+  is already the wire shape) or deriving the DTO in one place. Storage cannot
+  fix this side.
+- For the record: the group-C finding also named `queryCycleCounters` as
+  missing from the placeholder-parity guard; it already has
+  `TestCycleCounterQueryPlaceholdersMatchArgs`, so only `QueryOverview` was
+  actually uncovered and is now covered.
+
+## C8 — CI gate lacks -race
+
+`make test` and `.github/workflows/build.yml` run `go test` without `-race`,
+so every race-detector-reliant test proves nothing in CI. Request (CI/Make
+are outside storage ownership): run
+`go test -race ./internal/storage/... ./internal/probe/... ./internal/cluster/... ./internal/alert/... ./internal/scheduler/...`
+(the concurrency-sensitive packages) in the gate, matching the global rule
+that concurrency-sensitive code is tested with -race.
