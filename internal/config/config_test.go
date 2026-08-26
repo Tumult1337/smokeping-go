@@ -364,6 +364,58 @@ func minimalValidConfig(t *testing.T) *Config {
 	}
 }
 
+// A negative retention reaches Bootstrap's ALTER TABLE ... MODIFY TTL as a
+// TTL in the past and expires the table on the next start — fail-open on a
+// data-destroying knob, so Validate refuses it instead of defaulting.
+func TestValidateBoundsRetentionDays(t *testing.T) {
+	fields := []struct {
+		name string
+		set  func(*Config, int)
+	}{
+		{"cycle_days", func(c *Config, v int) { c.Storage.ClickHouse.Retention.CycleDays = v }},
+		{"rtt_days", func(c *Config, v int) { c.Storage.ClickHouse.Retention.RTTDays = v }},
+		{"hop_days", func(c *Config, v int) { c.Storage.ClickHouse.Retention.HopDays = v }},
+		{"http_days", func(c *Config, v int) { c.Storage.ClickHouse.Retention.HTTPDays = v }},
+	}
+	for _, f := range fields {
+		t.Run(f.name+" negative", func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			f.set(cfg, -1)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("a negative retention is a TTL in the past and must be refused")
+			}
+			if !strings.Contains(err.Error(), f.name) {
+				t.Errorf("error %q does not name the field %q", err, f.name)
+			}
+		})
+		t.Run(f.name+" past the DateTime span", func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			f.set(cfg, MaxRetentionDays+1)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("a retention past the UInt32 DateTime span must be refused")
+			}
+		})
+		t.Run(f.name+" at the ceiling", func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			f.set(cfg, MaxRetentionDays)
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("the ceiling itself is representable and must validate: %v", err)
+			}
+		})
+		t.Run(f.name+" zero still defaults", func(t *testing.T) {
+			cfg := scheduleConfig(20*time.Second, 10)
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			r := cfg.Storage.ClickHouse.Retention
+			if r.CycleDays != 365 || r.RTTDays != 14 || r.HopDays != 90 || r.HTTPDays != 14 {
+				t.Fatalf("defaults changed: %+v", r)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsReservedGroup(t *testing.T) {
 	c := minimalValidConfig(t)
 	c.Targets = append(c.Targets, Group{
@@ -518,6 +570,49 @@ func TestValidateRefusesUnschedulablePingCount(t *testing.T) {
 		cfg.Probes = map[string]Probe{"web": {Type: "http", Timeout: 2 * time.Second}}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("an http-only config is not bound by the icmp ping budget: %v", err)
+		}
+	})
+
+	t.Run("pings past the ingest rtt ceiling is refused with no icmp probe", func(t *testing.T) {
+		cfg := scheduleConfig(5*time.Second, 100_000)
+		cfg.Probes = map[string]Probe{"web": {Type: "tcp", Timeout: 2 * time.Second}}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("pings=100000 stamps Sent=100000 on a probe error, which cluster ingest refuses; Validate must refuse it first")
+		}
+		if !strings.Contains(err.Error(), "100000") {
+			t.Errorf("error %q does not name the count", err)
+		}
+	})
+
+	t.Run("pings at the ceiling is accepted with no icmp probe", func(t *testing.T) {
+		cfg := scheduleConfig(5*time.Second, MaxPingsPerCycle)
+		cfg.Probes = map[string]Probe{"web": {Type: "tcp", Timeout: 2 * time.Second}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("pings at MaxPingsPerCycle is ingestable and must validate: %v", err)
+		}
+	})
+
+	t.Run("a cluster master is bound with no icmp probe defined", func(t *testing.T) {
+		// 20 pings at 4s derives a 10ms budget — fine to store standalone,
+		// unbuildable the moment the health mesh injects its icmp probe.
+		cfg := scheduleConfig(4*time.Second, 20)
+		cfg.Probes = map[string]Probe{"web": {Type: "tcp", Timeout: 2 * time.Second}}
+		cfg.Cluster = &Cluster{Token: "secret"}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("a cluster master's schedule gains the slave-health icmp probe, so this must be refused")
+		}
+		if !strings.Contains(err.Error(), "icmp schedule") {
+			t.Errorf("error %q does not name the icmp schedule", err)
+		}
+	})
+
+	t.Run("the same schedule stays legal standalone", func(t *testing.T) {
+		cfg := scheduleConfig(4*time.Second, 20)
+		cfg.Probes = map[string]Probe{"web": {Type: "tcp", Timeout: 2 * time.Second}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("no icmp probe can ever be injected without a cluster, so this must validate: %v", err)
 		}
 	})
 

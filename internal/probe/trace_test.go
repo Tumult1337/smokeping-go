@@ -136,6 +136,15 @@ func (s *scriptStep) called(round, ttl int) bool {
 	return false
 }
 
+// addrOrZero maps a test case's "" onto the invalid zero Addr matchDatagram
+// reports for a non-match.
+func addrOrZero(s string) netip.Addr {
+	if s == "" {
+		return netip.Addr{}
+	}
+	return netip.MustParseAddr(s)
+}
+
 func hopByIndex(t *testing.T, hops []Hop, idx int) Hop {
 	t.Helper()
 	for _, h := range hops {
@@ -148,9 +157,11 @@ func hopByIndex(t *testing.T, hops []Hop, idx int) Hop {
 }
 
 func te(addr string) ttlReply {
-	return ttlReply{addr: addr, rtt: time.Millisecond, kind: replyTimeExceeded}
+	return ttlReply{addr: netip.MustParseAddr(addr), rtt: time.Millisecond, kind: replyTimeExceeded}
 }
-func ech(addr string) ttlReply { return ttlReply{addr: addr, rtt: time.Millisecond, kind: replyEcho} }
+func ech(addr string) ttlReply {
+	return ttlReply{addr: netip.MustParseAddr(addr), rtt: time.Millisecond, kind: replyEcho}
+}
 
 // A route that lengthens mid-cycle must have its new downstream hops probed:
 // the old cross-round finalTTL clamp froze the walk at the shortest path yet
@@ -255,7 +266,7 @@ func TestWalkRoundsEmitsPartialOnCancel(t *testing.T) {
 }
 
 func teRTT(addr string, rtt time.Duration) ttlReply {
-	return ttlReply{addr: addr, rtt: rtt, kind: replyTimeExceeded}
+	return ttlReply{addr: netip.MustParseAddr(addr), rtt: rtt, kind: replyTimeExceeded}
 }
 
 // ECMP responders at one TTL must each get their own row with their own
@@ -345,8 +356,8 @@ func TestWalkRoundsEmitsSilentRowWhenNoResponder(t *testing.T) {
 // rows, so an unmarked second target address would leak and under-count.
 func TestWalkRoundsMarksEveryEchoResponder(t *testing.T) {
 	s := &scriptStep{replies: map[[2]int]ttlReply{
-		{0, 1}: te("10.0.0.1"), {0, 2}: {addr: "192.0.2.9", rtt: 2 * time.Millisecond, kind: replyEcho},
-		{1, 1}: te("10.0.0.1"), {1, 2}: {addr: "192.0.2.10", rtt: 3 * time.Millisecond, kind: replyEcho},
+		{0, 1}: te("10.0.0.1"), {0, 2}: {addr: netip.MustParseAddr("192.0.2.9"), rtt: 2 * time.Millisecond, kind: replyEcho},
+		{1, 1}: te("10.0.0.1"), {1, 2}: {addr: netip.MustParseAddr("192.0.2.10"), rtt: 3 * time.Millisecond, kind: replyEcho},
 	}}
 	hops, _ := walkRounds(context.Background(), 2, 10, 0, s.step)
 	marked := 0
@@ -364,7 +375,7 @@ func TestWalkRoundsMarksEveryEchoResponder(t *testing.T) {
 }
 
 func unreach(addr, label string) ttlReply {
-	return ttlReply{addr: addr, rtt: time.Millisecond, kind: replyUnreachable, unreach: label}
+	return ttlReply{addr: netip.MustParseAddr(addr), rtt: time.Millisecond, kind: replyUnreachable, unreach: label}
 }
 
 // An unreachable-reporting gateway is the true end of the path: continuing
@@ -436,6 +447,51 @@ func TestWalkRoundsKeepsFirstUnreachLabel(t *testing.T) {
 	hops, _ := walkRounds(context.Background(), 2, 5, 0, s.step)
 	if h := hopByIndex(t, hops, 1); h.Unreach != "host-unreachable" {
 		t.Fatalf("label = %q, want the first round's host-unreachable", h.Unreach)
+	}
+}
+
+// mixedTerminalScript is the shape a rate-limiting firewall produces: the
+// target echoes once, then rejects from its own address with a slow
+// admin-prohibited. Mixed onto one row, the unreachable's error-generation
+// time became the target's percentiles and len(RTTs) disagreed with
+// Sent-LossCount.
+func mixedTerminalScript(echoRTT, rejectRTT time.Duration) *scriptStep {
+	rej := ttlReply{addr: netip.MustParseAddr("10.0.0.9"), rtt: rejectRTT, kind: replyUnreachable, unreach: "admin-prohibited"}
+	return &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: {addr: netip.MustParseAddr("10.0.0.9"), rtt: echoRTT, kind: replyEcho},
+		{1, 1}: te("10.0.0.1"), {1, 2}: rej,
+		{2, 1}: te("10.0.0.1"), {2, 2}: rej,
+	}}
+}
+
+func TestWalkRoundsSplitsEchoFromErrorOnOneAddress(t *testing.T) {
+	s := mixedTerminalScript(5*time.Millisecond, 900*time.Millisecond)
+	hops, stats := walkRounds(context.Background(), 3, 5, 0, s.step)
+	if stats.attempted != 3 || stats.reached != 1 {
+		t.Fatalf("stats = %+v, want attempted 3 reached 1", stats)
+	}
+	var marked, errRow *Hop
+	for i := range hops {
+		if hops[i].Index != 2 {
+			continue
+		}
+		if hops[i].TargetReply {
+			marked = &hops[i]
+		} else {
+			errRow = &hops[i]
+		}
+	}
+	if marked == nil || errRow == nil {
+		t.Fatalf("want an echo row and an error row at ttl 2, got %+v", hops)
+	}
+	if len(marked.RTTs) != 1 || marked.RTTs[0] != 5*time.Millisecond || marked.Sent != 1 {
+		t.Fatalf("marked row mixed in unreachable RTTs: %+v", marked)
+	}
+	if marked.Unreach != "" {
+		t.Fatalf("echo row carries the unreachable label: %+v", marked)
+	}
+	if errRow.Unreach != "admin-prohibited" || errRow.Sent != 2 || len(errRow.RTTs) != 2 {
+		t.Fatalf("error row wrong: %+v", errRow)
 	}
 }
 
@@ -656,7 +712,7 @@ func TestMatchDatagramRequiresEchoFromDestination(t *testing.T) {
 			if ok != tc.wantOK {
 				t.Fatalf("matched = %v, want %v (%+v)", ok, tc.wantOK, got)
 			}
-			if got.addr != tc.wantAddr || got.kind != tc.wantKind {
+			if got.addr != addrOrZero(tc.wantAddr) || got.kind != tc.wantKind {
 				t.Fatalf("got addr %q kind %d, want %q %d", got.addr, got.kind, tc.wantAddr, tc.wantKind)
 			}
 		})
@@ -763,7 +819,7 @@ func TestMatchDatagramRequiresTheDestinationZone(t *testing.T) {
 			if ok != tc.wantOK {
 				t.Fatalf("matched = %v, want %v (%+v)", ok, tc.wantOK, got)
 			}
-			if got.addr != tc.wantAddr || got.kind != tc.wantKind {
+			if got.addr != addrOrZero(tc.wantAddr) || got.kind != tc.wantKind {
 				t.Fatalf("got addr %q kind %d, want %q %d", got.addr, got.kind, tc.wantAddr, tc.wantKind)
 			}
 		})

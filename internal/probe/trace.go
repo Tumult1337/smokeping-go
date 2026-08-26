@@ -31,7 +31,7 @@ func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, tim
 	if host == "" {
 		return nil, roundStats{}, errors.New("trace: host required")
 	}
-	ip, err := net.ResolveIPAddr(familyNetwork("ip", family), host)
+	ip, err := resolveIPAddr(ctx, familyNetwork("ip", family), host)
 	if err != nil {
 		return nil, roundStats{}, fmt.Errorf("resolve %q: %w", host, err)
 	}
@@ -144,9 +144,10 @@ const (
 	replyEcho
 )
 
-// ttlReply is one TTL probe's outcome; addr is empty unless something matched.
+// ttlReply is one TTL probe's outcome; addr is the invalid zero Addr unless
+// something matched, parsed once at the read boundary (matchDatagram).
 type ttlReply struct {
-	addr    string
+	addr    netip.Addr
 	rtt     time.Duration
 	kind    replyKind
 	unreach string
@@ -173,7 +174,7 @@ type roundStats struct {
 // guaranteed to be the deepest.
 func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, step stepFunc) ([]Hop, roundStats) {
 	type respondent struct {
-		addr        string
+		addr        netip.Addr
 		targetReply bool
 		unreach     string
 		rtts        []time.Duration
@@ -196,20 +197,24 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 			}
 			r := step(ctx, round, ttl)
 			stats.attempted = round + 1
-			if r.err != nil || r.addr == "" {
+			if r.err != nil || !r.addr.IsValid() {
 				agg[ttl].losses++
 			} else {
-				i := slices.IndexFunc(agg[ttl].rows, func(row respondent) bool { return row.addr == r.addr })
+				// An echo and an error from the same address are two rows: the
+				// marked row's RTTs are the target's own echo latencies, which
+				// MTR mirrors as cycle stats, and an unreachable's RTT is the
+				// gateway's error-generation time, not the target answering.
+				isEcho := r.kind == replyEcho
+				i := slices.IndexFunc(agg[ttl].rows, func(row respondent) bool {
+					return row.addr == r.addr && row.targetReply == isEcho
+				})
 				if i < 0 {
-					agg[ttl].rows = append(agg[ttl].rows, respondent{addr: r.addr})
+					agg[ttl].rows = append(agg[ttl].rows, respondent{addr: r.addr, targetReply: isEcho})
 					i = len(agg[ttl].rows) - 1
 				}
 				row := &agg[ttl].rows[i]
 				row.rtts = append(row.rtts, r.rtt)
 				row.sent++
-				if r.kind == replyEcho {
-					row.targetReply = true
-				}
 				if row.unreach == "" {
 					row.unreach = r.unreach
 				}
@@ -241,7 +246,7 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 		for i, row := range a.rows {
 			h := Hop{
 				Index:       ttl,
-				IP:          row.addr,
+				IP:          row.addr.String(),
 				TargetReply: row.targetReply,
 				Unreach:     row.unreach,
 				RTTs:        row.rtts,
@@ -419,7 +424,7 @@ func matchDatagram(datagram []byte, proto int, peer net.Addr, isV6 bool, id, seq
 	if !matched {
 		return ttlReply{}, false
 	}
-	return ttlReply{addr: peerIP.String(), kind: kind, unreach: unreach}, true
+	return ttlReply{addr: peerIP, kind: kind, unreach: unreach}, true
 }
 
 // embeddedIDSeq extracts the ICMP id and sequence of the original echo request

@@ -35,6 +35,9 @@ func (p *TCP) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 		addr = net.JoinHostPort(addr, "80")
 	}
 
+	if err := ctx.Err(); err != nil {
+		return &Result{}, err
+	}
 	result := &Result{RTTs: make([]time.Duration, 0, count)}
 	dialer := &net.Dialer{Timeout: p.timeout}
 	network := familyNetwork("tcp", t.Family)

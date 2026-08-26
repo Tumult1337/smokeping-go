@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/tumult/gosmokeping/internal/config"
 	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 )
 
 // requireICMPSocket probes the capability directly rather than inferring it
@@ -327,6 +329,76 @@ func TestICMPProbeContainsTracePanic(t *testing.T) {
 // report the target reached at that TTL and truncates the hop list. The
 // deeper-walk case is the mutation guard: a bound hardcoded at the default
 // ceiling instead of derived from traceRounds/traceMaxTTL fails only there.
+// The echo batch's read path is the same trust boundary matchDatagram guards
+// for the walk: seq (and id) are visible to any on-path router, so one that
+// answers echoes from its own address made a fully-down target read 0% loss
+// with plausible RTTs. Only a reply whose peer is the resolved destination is
+// the target's.
+func TestMatchEchoReplyRequiresEchoFromDestination(t *testing.T) {
+	const id, seq = 0x4242, 9
+	dst := netip.MustParseAddr("192.0.2.9")
+	echoReply, err := (&icmp.Message{
+		Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq, Data: []byte("x")},
+	}).Marshal(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, err := (&icmp.Message{
+		Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id + 1, Seq: seq, Data: []byte("x")},
+	}).Marshal(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		datagram []byte
+		peer     net.Addr
+		isUDP    bool
+		want     bool
+	}{
+		{"reply from the destination on a raw socket", echoReply,
+			&net.IPAddr{IP: net.ParseIP("192.0.2.9")}, false, true},
+		{"reply from the destination on a ping socket", echoReply,
+			&net.UDPAddr{IP: net.ParseIP("192.0.2.9")}, true, true},
+		{"reply forged by an on-path router", echoReply,
+			&net.IPAddr{IP: net.ParseIP("10.0.0.1")}, false, false},
+		{"reply forged by an on-path router on a ping socket", echoReply,
+			&net.UDPAddr{IP: net.ParseIP("127.0.0.1")}, true, false},
+		{"reply from an unresolvable source", echoReply,
+			&net.TCPAddr{IP: net.ParseIP("192.0.2.9")}, false, false},
+		// The kernel rewrites the ID on ping sockets, so it must stay ignored
+		// there and enforced on raw sockets.
+		{"rewritten id from the destination on a ping socket", otherID,
+			&net.UDPAddr{IP: net.ParseIP("192.0.2.9")}, true, true},
+		{"wrong id from the destination on a raw socket", otherID,
+			&net.IPAddr{IP: net.ParseIP("192.0.2.9")}, false, false},
+		{"unparseable bytes", []byte{0xff},
+			&net.IPAddr{IP: net.ParseIP("192.0.2.9")}, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchEchoReply(tc.datagram, 1, tc.peer, tc.isUDP, id, seq, dst); got != tc.want {
+				t.Fatalf("matched = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// An unresolved destination must match nothing rather than everything.
+func TestMatchEchoReplyDeniesAnInvalidDestination(t *testing.T) {
+	const id, seq = 0x4242, 9
+	echoReply, err := (&icmp.Message{
+		Type: ipv4.ICMPTypeEchoReply, Body: &icmp.Echo{ID: id, Seq: seq},
+	}).Marshal(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matchEchoReply(echoReply, 1, &net.TCPAddr{IP: net.ParseIP("192.0.2.9")}, false, id, seq, netip.Addr{}) {
+		t.Fatal("an invalid destination matched an echo reply")
+	}
+}
+
 func TestICMPEchoBaseSeqDisjointFromTraceWindow(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

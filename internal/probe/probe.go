@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -97,6 +99,9 @@ func Build(probes map[string]config.Probe, interval time.Duration, pings int) (*
 	// Defence in depth: config.Validate refuses this schedule too, so reaching
 	// it here means a config that never passed validation — a slave's
 	// master-supplied view, or a caller that built a Config in memory.
+	if err := config.ValidatePingCount(pings); err != nil {
+		return nil, err
+	}
 	var budget time.Duration
 	if config.HasICMPProbe(probes) {
 		var err error
@@ -133,6 +138,44 @@ func familyNetwork(base, family string) string {
 	default:
 		return base
 	}
+}
+
+// lookupIPAddrFn is the injectable seam over the resolver so tests can drive
+// a blackholed DNS lookup without one.
+var lookupIPAddrFn = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// resolveIPAddr is net.ResolveIPAddr with the context honored: probes run
+// under the cycle deadline and the trace goroutine is joined on every return
+// path, so a resolver call that ignores a cancelled cycle blocks shutdown and
+// every SIGHUP rebuild behind it for the resolver's own timeout.
+func resolveIPAddr(ctx context.Context, network, host string) (*net.IPAddr, error) {
+	addrs, err := lookupIPAddrFn(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var match func(net.IPAddr) bool
+	switch network {
+	case "ip4":
+		match = func(a net.IPAddr) bool { return a.IP.To4() != nil }
+	case "ip6":
+		match = func(a net.IPAddr) bool { return len(a.IP) == net.IPv6len && a.IP.To4() == nil }
+	default:
+		// net.ResolveIPAddr's own preference for a bare "ip" network: the
+		// family a literal spells, IPv4 otherwise, any family as a fallback.
+		prefer6 := strings.ContainsRune(host, ':')
+		match = func(a net.IPAddr) bool { return (a.IP.To4() == nil) == prefer6 }
+	}
+	for i := range addrs {
+		if match(addrs[i]) {
+			return &addrs[i], nil
+		}
+	}
+	if network == "ip" && len(addrs) > 0 {
+		return &addrs[0], nil
+	}
+	return nil, &net.AddrError{Err: "no suitable address found", Addr: host}
 }
 
 func build(name string, pc config.Probe) (Probe, error) {

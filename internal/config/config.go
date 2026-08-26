@@ -487,6 +487,13 @@ const (
 	MaxPingsPerCycle = 1<<16 - icmpTraceSeqReserve
 )
 
+// MaxRetentionDays bounds each storage.clickhouse.retention knob (days of
+// per-table TTL). Below 1 day the ALTER ... MODIFY TTL Bootstrap re-emits on
+// every start is a TTL already in the past, which expires the whole table;
+// the ceiling is the full span of ClickHouse's UInt32-second DateTime, past
+// which timestamp + INTERVAL n DAY is representable for no row at all.
+const MaxRetentionDays = math.MaxUint32 / (24 * 60 * 60)
+
 // MaxLabelLen bounds every identifier that becomes a ClickHouse
 // LowCardinality value — a group, a target name, a probe name, a cycle's
 // source. Config.Validate refuses a longer one so a config the master accepts
@@ -559,6 +566,22 @@ func HasICMPProbe(probes map[string]Probe) bool {
 	return false
 }
 
+// ValidatePingCount bounds pings for every schedule, icmp or not: the
+// scheduler stamps Sent = pings on any probe error and a cycle carries up to
+// one RTT per ping, so a count past MaxPingsPerCycle — cluster ingest's
+// rtts-per-cycle ceiling, itself below the UInt16 sent/lost columns — is a
+// cycle no master can ingest. probe.Build applies the same bound as defence
+// in depth for a slave building a master-supplied config.
+func ValidatePingCount(pings int) error {
+	if pings <= 0 {
+		return fmt.Errorf("pings must be positive, got %d", pings)
+	}
+	if pings > MaxPingsPerCycle {
+		return fmt.Errorf("pings=%d exceeds %d, the most rtt samples cluster ingest admits per cycle", pings, MaxPingsPerCycle)
+	}
+	return nil
+}
+
 // ICMPPingBudget returns the per-ping deadline a full-loss cycle derives and
 // refuses the schedule when it falls below MinPingBudget. The icmp probe
 // shortens each echo to fit the cycle, but no shortening rescues a schedule
@@ -593,10 +616,14 @@ func (c *Config) Validate() error {
 	if c.Interval > MaxProbeInterval {
 		return fmt.Errorf("interval %s exceeds %s, past which a measured rtt is no longer storable", c.Interval, MaxProbeInterval)
 	}
-	if c.Pings <= 0 {
-		return fmt.Errorf("pings must be positive")
+	if err := ValidatePingCount(c.Pings); err != nil {
+		return err
 	}
-	if HasICMPProbe(c.Probes) {
+	// A cluster master's probe map gains slavehealth's icmp probe at
+	// scheduler-build time, so its schedule is bound whether or not the stored
+	// map defines one — gating on the stored map alone let a validated config
+	// become unbuildable fleet-wide at the first slave registration.
+	if HasICMPProbe(c.Probes) || (c.Cluster != nil && c.Cluster.Token != "") {
 		if _, err := ICMPPingBudget(c.Interval, c.Pings); err != nil {
 			return fmt.Errorf("icmp schedule: %w", err)
 		}
@@ -617,17 +644,23 @@ func (c *Config) Validate() error {
 	if ch.Username == "" {
 		ch.Username = "default"
 	}
-	if ch.Retention.CycleDays == 0 {
-		ch.Retention.CycleDays = 365
-	}
-	if ch.Retention.RTTDays == 0 {
-		ch.Retention.RTTDays = 14
-	}
-	if ch.Retention.HopDays == 0 {
-		ch.Retention.HopDays = 90
-	}
-	if ch.Retention.HTTPDays == 0 {
-		ch.Retention.HTTPDays = 14
+	for _, r := range []struct {
+		name string
+		days *int
+		def  int
+	}{
+		{"cycle_days", &ch.Retention.CycleDays, 365},
+		{"rtt_days", &ch.Retention.RTTDays, 14},
+		{"hop_days", &ch.Retention.HopDays, 90},
+		{"http_days", &ch.Retention.HTTPDays, 14},
+	} {
+		if *r.days == 0 {
+			*r.days = r.def
+			continue
+		}
+		if *r.days < 0 || *r.days > MaxRetentionDays {
+			return fmt.Errorf("storage.clickhouse.retention.%s %d is outside [1, %d]: Bootstrap re-emits it as MODIFY TTL on every start, and a TTL in the past expires the table", r.name, *r.days, MaxRetentionDays)
+		}
 	}
 	if ch.Batch.MaxRows == 0 {
 		ch.Batch.MaxRows = 1000

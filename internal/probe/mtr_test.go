@@ -86,6 +86,29 @@ func TestMTRMirrorsAggregateAcrossMarkedRows(t *testing.T) {
 // Summing the rows therefore counts one round several times: three rounds that
 // all reached the target read as six sent and three lost, and 50% loss pages
 // an operator for an outage that never happened.
+// The mirror must carry the target's echo latencies only — the fixture is
+// produced by the real walkRounds over mixedTerminalScript, not hand-written.
+func TestMTRMirrorExcludesUnreachableRTTs(t *testing.T) {
+	m := NewMTR("mtr", time.Second)
+	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
+		hops, stats := walkRounds(ctx, rounds, maxTTL, spacing, mixedTerminalScript(5*time.Millisecond, 900*time.Millisecond).step)
+		return hops, stats, nil
+	}
+	res, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Sent != 3 || res.LossCount != 2 {
+		t.Fatalf("Sent=%d Lost=%d, want 3/2 — one echo in three rounds", res.Sent, res.LossCount)
+	}
+	if len(res.RTTs) != res.Sent-res.LossCount {
+		t.Fatalf("len(RTTs)=%d disagrees with Sent-LossCount=%d: %v", len(res.RTTs), res.Sent-res.LossCount, res.RTTs)
+	}
+	if res.RTTs[0] != 5*time.Millisecond {
+		t.Fatalf("mirror carried the unreachable's RTT: %v", res.RTTs)
+	}
+}
+
 func TestMTRSentCountsRoundsNotHopRows(t *testing.T) {
 	m := NewMTR("mtr", time.Second)
 	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
