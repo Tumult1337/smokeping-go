@@ -1281,3 +1281,33 @@ func TestCachingReader_LeaderPanicIsContainedAndReleasesItsSlot(t *testing.T) {
 		t.Fatalf("%d hops inflight slots leaked after panics", leaked)
 	}
 }
+
+// The relative form of /hops?at= resolves against a fresh server clock, so
+// without coalescing an identical polled URL mints a new millisecond key per
+// request — flushing the 16-entry hops LRU that warm 7d timeline entries
+// share. CoalesceHopsAt restores one entry per 60s quantum for that form
+// while the key itself stays exactly as fine as the query (see
+// TestCachingReader_HopsAt_KeysOnTheRequestedCycle).
+func TestCachingReader_HopsAt_CoalescedRelativePinsShareOneEntry(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &atEchoReader{}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+	ref := newRef("g", "t")
+
+	base := now.Add(-time.Hour).Truncate(time.Minute).Add(10 * time.Second)
+	for _, at := range []time.Time{base, base.Add(900 * time.Millisecond), base.Add(40 * time.Second)} {
+		if _, err := c.QueryHopsAt(context.Background(), ref, CoalesceHopsAt(at), 30*time.Minute, QueryFilter{}); err != nil {
+			t.Fatalf("at %s: %v", at, err)
+		}
+	}
+	if got := inner.calls.Load(); got != 1 {
+		t.Fatalf("inner calls: got %d, want one — the three pins share a quantum", got)
+	}
+	if _, err := c.QueryHopsAt(context.Background(), ref, CoalesceHopsAt(base.Add(70*time.Second)), 30*time.Minute, QueryFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inner.calls.Load(); got != 2 {
+		t.Fatalf("inner calls: got %d, want a second entry for the next quantum", got)
+	}
+}

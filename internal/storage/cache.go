@@ -367,6 +367,18 @@ func (c *CachingReader) QueryLatestHops(ctx context.Context, ref config.TargetRe
 	})
 }
 
+// CoalesceHopsAt floors a pinned instant to the cache's `to` quantum, for the
+// callers whose `at` carries no sub-minute intent of its own — the API's
+// relative form (`?at=-1h`) resolves against a fresh server clock, so left
+// unfloored it mints a new millisecond cache key per request against a
+// 16-entry LRU. Never apply it to an absolute pin: the RFC3339 form is a
+// heatmap click-through whose millisecond names one cycle (see CLAUDE.md's
+// UI time-axis contract), and the key below must stay exactly as fine as the
+// query it fronts.
+func CoalesceHopsAt(at time.Time) time.Time {
+	return time.Unix(floorUnix(at, cacheKeyToQuantum), 0).UTC()
+}
+
 func (c *CachingReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.Time, window time.Duration, f QueryFilter) (HopsResult, error) {
 	// `at` keys exactly, at the millisecond the backend resolves it to: it
 	// names one cycle, and the read returns that cycle's path and its round
