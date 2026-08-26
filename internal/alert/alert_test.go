@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -962,8 +963,6 @@ func newTestEvaluatorClock(t *testing.T, a config.Alert) (*Evaluator, *recording
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	disp.ev = ev
-	t.Cleanup(ev.Close)
 	disp.ev = ev
 	t.Cleanup(ev.Close)
 	return ev, disp, pinClock(ev, testBase)
@@ -2638,7 +2637,6 @@ type deadlineDispatcher struct {
 	deadline time.Time
 	hadOne   bool
 	seen     bool
-	ev       *Evaluator
 }
 
 func (d *deadlineDispatcher) Dispatch(ctx context.Context, _ Event) {
@@ -2698,8 +2696,88 @@ type dispatcherFunc func(context.Context, Event)
 
 func (f dispatcherFunc) Dispatch(ctx context.Context, e Event) { f(ctx, e) }
 
-// Past the queue depth a notification is dropped rather than blocking the
-// producer, and the drop is counted rather than silent.
+// Dispatch ran under scheduler.Fanout's recover() while it was inline in
+// OnCycle. On its own goroutine an uncontained panic takes down probing,
+// ingest and the UI with it, so the perimeter has to move with the work.
+func TestDispatcherPanicDoesNotKillTheProcess(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	var delivered atomic.Int64
+	ev.dispatcher = dispatcherFunc(func(_ context.Context, e Event) {
+		if delivered.Add(1) == 1 {
+			panic("dispatcher blew up")
+		}
+	})
+
+	ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", 100))
+	ev.flush()
+
+	// The worker must still be delivering after the panic, not dead.
+	clk.advance(time.Second)
+	ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", 0))
+	ev.flush()
+	if got := delivered.Load(); got != 2 {
+		t.Fatalf("delivered %d events, want 2 — the worker did not survive the panic", got)
+	}
+}
+
+// A transition the full queue refuses must not stay committed. Dispatch is
+// change-gated with no renotify, so a committed-but-undelivered FIRING is a
+// page that never happens while its RESOLVE goes out normally once the queue
+// drains — the endpoint's first payload being a resolve for a page never
+// sent, the shape this whole series exists to close. The invariant: once the
+// queue is empty, the last state the dispatcher was told is the state the
+// evaluator holds.
+func TestRefusedTransitionIsRevertedNotCommitted(t *testing.T) {
+	gate := make(chan struct{})
+	var mu sync.Mutex
+	var got []Event
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ev.dispatcher = dispatcherFunc(func(_ context.Context, e Event) {
+		<-gate
+		mu.Lock()
+		got = append(got, e)
+		mu.Unlock()
+	})
+
+	// One event parks on the gate inside the worker, the rest fill the buffer,
+	// and everything past it is refused.
+	for i := 0; ev.DispatchDrops() == 0 && i < dispatchQueueDepth+16; i++ {
+		clk.advance(time.Second)
+		loss := 0.0
+		if i%2 == 0 {
+			loss = 100
+		}
+		ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", loss))
+	}
+	if ev.DispatchDrops() == 0 {
+		t.Fatal("fixture never filled the queue")
+	}
+
+	close(gate)
+	ev.flush()
+
+	key := aggKey{target: "core/gw", alert: "quorum-test"}
+	ev.mu.Lock()
+	committed := ev.states[key]["tokyo-1"].state
+	ev.mu.Unlock()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("nothing was delivered at all")
+	}
+	if delivered := got[len(got)-1].Next; delivered != committed {
+		t.Fatalf("evaluator holds %s but the endpoint was last told %s — a refused transition stayed committed, so that page is never sent",
+			committed, delivered)
+	}
+}
+
+// Past the queue depth a notification is refused rather than blocking the
+// producer, and the refusal is counted rather than silent.
 func TestFullDeliveryQueueDropsLoudlyRatherThanBlocking(t *testing.T) {
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })
@@ -2741,7 +2819,6 @@ func TestQueuedDispatchKeepsABudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	d.ev = ev
 	t.Cleanup(ev.Close)
 	clk := pinClock(ev, testBase)
 

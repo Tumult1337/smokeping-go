@@ -689,11 +689,15 @@ Key points a reader can't derive from a single file:
   503 that invites an identical retry. A flag on a 200 was rejected:
   `CachingReader` would cache and re-serve the partial set, and an error
   is the fail-closed default for a consumer that has not heard of the
-  flag. `CachingReader` also refuses to answer it from an expired entry:
-  a refusal is deterministic, only a success bumps an entry's expiry, and
+  flag. `CachingReader` also refuses to answer it from an expired entry: a
+  refusal is deterministic, only a success bumps an entry's expiry, and
   serving stale on one turned the refusal into a 200 that never ended
   (`isRefusal`, the one place a new semantic sentinel is declared).
-  `maxCycleCounterKeys` (1024) bounds the same read's counters lookup.
+  `maxCycleCounterKeys` (2 × `maxHopSources`) bounds the same read's
+  counters lookup, and is the one bound here that **trims rather than
+  reports**: it governs that query alone, a missing counter already
+  renders as unknown loss by contract, and letting it refuse failed a
+  whole path view whose hop rows were present and correct.
 
 - **Ingest admits each measurement once per window; local probing needs no
   guard.** Cluster delivery
@@ -1125,14 +1129,22 @@ Key points a reader can't derive from a single file:
   their sum unbounded and one push against an endpoint that accepts but
   never answers pinned the ingest handler for hours. `Evaluator` therefore
   queues committed transitions to a single delivery worker — single so a
-  firing still precedes its own resolve — depth
-  `cluster.MaxCyclesPerBatch`, the same constant `aheadCeiling` derives
-  from and for the same reason: one push is the redelivery unit, so a
-  batch's worth is the most transitions one ingest can queue. Past that
-  depth the notification is dropped, counted on `DispatchDrops` and logged
-  at Error, because blocking the producer is the pinned handler the queue
-  exists to prevent; reaching it means the endpoint has been unresponsive
-  for a batch's worth of pages. `Close` signals the worker and returns
+  firing still precedes its own resolve. `dispatchQueueDepth` is
+  `cluster.MaxCyclesPerBatch`, the burst it absorbs rather than the
+  producer's maximum: `evaluate` emits one Event per alert a target names
+  and config bounds that count nowhere, so a batch produces a multiple of
+  it. It does not need to be the maximum, because **a refused transition
+  is reverted, not lost** — the enqueue happens under `e.mu` at the moment
+  of commit, so a full queue undoes the state change and the next cycle
+  re-detects and re-dispatches it. Keeping it would be a page that never
+  happens: dispatch is change-gated with no renotify, so a
+  committed-but-undelivered FIRING leaves the endpoint's first payload the
+  resolve for it. Refusals are counted on `DispatchDrops` and logged at
+  Error; the depth is therefore a memory ceiling, and the queue retains
+  each Event's whole `Cycle`, hop rows included. The worker carries its
+  own `recover()` — dispatch ran inside `scheduler.Fanout`'s while it was
+  inline, and that perimeter has to move with the work or a `Dispatcher`
+  panic takes the process down. `Close` signals the worker and returns
   without waiting — the worker may be inside a delivery that never
   answers, which is the wait every other goroutine is being spared.
 

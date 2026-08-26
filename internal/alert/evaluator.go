@@ -186,10 +186,11 @@ type Evaluator struct {
 
 	// pending carries committed transitions to the delivery worker. Dispatch
 	// is deliberately off the caller's goroutine: it ran inline under the
-	// ingest handler, where a batch of MaxCyclesPerBatch transitions against
-	// an unresponsive endpoint pinned that handler for hours — each cycle
-	// bounded, their sum not. One worker, so firing still precedes its own
-	// resolve.
+	// ingest handler, where a batch of transitions against an unresponsive
+	// endpoint pinned that handler for hours — each cycle bounded, their sum
+	// not. One worker, so a firing still precedes its own resolve, and a
+	// transition the queue refuses is reverted rather than delivered out of
+	// order.
 	pending       chan Event
 	quit          chan struct{}
 	closeOnce     sync.Once
@@ -245,9 +246,12 @@ func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) 
 	return e, nil
 }
 
-// dispatchQueueDepth bounds notifications awaiting delivery. One push is the
-// redelivery unit, so a batch's worth is the most transitions a single ingest
-// can queue — the same reasoning aheadCeiling takes from the same constant.
+// dispatchQueueDepth is the burst this absorbs, not the producer's maximum:
+// evaluate emits one Event per alert a target names and config bounds that
+// count nowhere, so a batch can produce a multiple of it. It does not need to
+// be the maximum — a refused transition is reverted and re-detected on the
+// next cycle rather than lost — so this is a memory ceiling, and the queue
+// retains each Event's whole Cycle, hop rows included.
 const dispatchQueueDepth = cluster.MaxCyclesPerBatch
 
 // Close signals the delivery worker to stop and returns without waiting for
@@ -287,6 +291,15 @@ func (e *Evaluator) deliverLoop() {
 // actions in sequence and each bounds itself at actionTimeout.
 func (e *Evaluator) deliver(ev Event) {
 	defer e.inflight.Done()
+	// Dispatch ran under scheduler.Fanout's recover() while it was inline in
+	// OnCycle; on its own goroutine a Dispatcher panic would take the process
+	// down instead, so the perimeter moves with it.
+	defer func() {
+		if v := recover(); v != nil {
+			e.log.Error("alert dispatch panicked",
+				"target", ev.Target.ID(), "alert", ev.AlertName, "panic", v)
+		}
+	}()
 	budget := time.Duration(max(len(ev.Alert.Actions), 1)) * actionTimeout
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
@@ -437,36 +450,35 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
 	}
 
-	// Queue outside the lock and off this goroutine entirely: the transition
-	// is committed above and dispatch is change-gated with no renotify, so a
-	// caller's spent deadline dropped the only notification an alert would
-	// ever send while the state read as delivered — the first payload the
-	// endpoint then saw was the resolve for a page never sent.
+	// Only transitions the queue accepted reach here: evaluate reverts the
+	// ones it refused, so the log names what an operator will actually be
+	// paged about.
 	for _, ev := range toDispatch {
 		e.log.Info("alert state change",
 			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
 			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
 			"firing", ev.Firing, "live", ev.Live)
-		e.enqueueDispatch(ev)
 	}
 }
 
-// enqueueDispatch hands one committed transition to the delivery worker. A
-// full queue means the endpoint has been unresponsive for a batch's worth of
-// notifications, so the drop is loud and counted rather than silent — and it
-// is a drop rather than a block, because blocking here is the pinned handler
-// this queue exists to prevent.
-func (e *Evaluator) enqueueDispatch(ev Event) {
+// enqueueDispatch offers one transition to the delivery worker, reporting
+// whether the queue took it. It never blocks — blocking here is the pinned
+// caller this queue exists to prevent — so a full queue refuses, and the
+// caller undoes the transition rather than keeping a state nobody was told
+// about. Called with e.mu held, which is what makes the commit and the
+// refusal one step; the worker never takes that lock.
+func (e *Evaluator) enqueueDispatch(ev Event) bool {
 	e.inflight.Add(1)
 	select {
 	case e.pending <- scrubHealthAddresses(ev):
-		return
+		return true
 	default:
 		e.inflight.Done()
-		e.log.Error("alert notification dropped, delivery queue full",
+		e.log.Error("alert notification refused, delivery queue full; transition will be retried",
 			"target", ev.Target.ID(), "alert", ev.AlertName,
 			"prev", ev.Prev, "next", ev.Next,
-			"dropped_total", e.dispatchDrops.Add(1), "depth", dispatchQueueDepth)
+			"refused_total", e.dispatchDrops.Add(1), "depth", dispatchQueueDepth)
+		return false
 	}
 }
 
@@ -536,7 +548,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 
 		if !alertCfg.Quorum.Enabled() {
 			if prev != st.state {
-				toDispatch = append(toDispatch, Event{
+				ev := Event{
 					Time:      cy.Time,
 					Target:    cy.Target,
 					AlertName: name,
@@ -549,7 +561,17 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 					// resolve from the state kept here, so evicting a source
 					// that went quiet while firing would drop that resolve.
 					FiringSources: firingSources(bySource, now, window),
-				})
+				}
+				if e.enqueueDispatch(ev) {
+					toDispatch = append(toDispatch, ev)
+				} else {
+					// Undo the transition rather than keep a state the
+					// operator was never told about: dispatch is change-gated
+					// with no renotify, so a committed-but-undelivered
+					// transition is a page that never happens. Reverted, the
+					// next cycle re-detects it and dispatches again.
+					st.state = prev
+				}
 			}
 			continue
 		}
@@ -580,7 +602,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 
 		if prevAgg != next {
 			e.agg[key] = next
-			toDispatch = append(toDispatch, Event{
+			ev := Event{
 				Time:      cy.Time,
 				Target:    cy.Target,
 				AlertName: name,
@@ -593,7 +615,12 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 				// tally has already evicted the stale sources, so this sees
 				// exactly the set the quorum decision was made on.
 				FiringSources: firingSources(bySource, now, window),
-			})
+			}
+			if e.enqueueDispatch(ev) {
+				toDispatch = append(toDispatch, ev)
+			} else {
+				e.agg[key] = prevAgg
+			}
 		}
 	}
 	return toDispatch, skipped
