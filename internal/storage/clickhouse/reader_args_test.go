@@ -291,16 +291,29 @@ func TestQueryHopsTimelineRefusesARawGrid(t *testing.T) {
 }
 
 // A future-dated row from a hostile slave pinned itself as that source's
-// "latest" until the lie expired. The ingest bound stops new ones; the reader
-// ceiling is what keeps rows already in the table off the endpoint.
-func TestQueryLatestHopsBoundsFutureRows(t *testing.T) {
-	conn := &recordConn{}
-	if _, err := (&Reader{conn: conn}).QueryLatestHops(context.Background(),
-		config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}, storage.QueryFilter{}); err != nil {
-		t.Fatal(err)
+// "latest" until the lie expired — and QueryHopsAt's ±window around a pin
+// near now reaches the same rows. The ingest bound stops new ones; the reader
+// ceiling is what keeps rows already in the table off both pinned reads.
+func TestPinnedHopReadsBoundFutureRows(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	calls := map[string]func(*Reader) error{
+		"QueryLatestHops": func(r *Reader) error {
+			_, err := r.QueryLatestHops(context.Background(), ref, storage.QueryFilter{})
+			return err
+		},
+		"QueryHopsAt": func(r *Reader) error {
+			_, err := r.QueryHopsAt(context.Background(), ref, time.Now(), 30*time.Minute, storage.QueryFilter{})
+			return err
+		},
 	}
-	if !strings.Contains(conn.query, "timestamp <= now() + INTERVAL") {
-		t.Errorf("no future ceiling in the latest-hops CTE:\n%s", conn.query)
+	for name, call := range calls {
+		conn := &recordConn{}
+		if err := call(&Reader{conn: conn}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(conn.queries[0], "timestamp <= now() + INTERVAL") {
+			t.Errorf("%s: no future ceiling in the pinning CTE:\n%s", name, conn.queries[0])
+		}
 	}
 }
 

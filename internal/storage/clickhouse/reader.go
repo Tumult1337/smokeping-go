@@ -442,6 +442,8 @@ func (r *Reader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at time.
 	// Centre and both window edges are dtMilli bounds: a centre rounded off
 	// the cycle it names leaves a neighbouring cycle nearer than that cycle,
 	// and edges rounded the other way make that neighbour the only candidate.
+	// The now() ceiling mirrors QueryLatestHops': ingest stops new
+	// future-dated rows, this keeps ones already in the table off the pin.
 	q := `
 WITH nearest AS (
   SELECT source,
@@ -450,6 +452,7 @@ WITH nearest AS (
   WHERE target_id = ?
     AND target_group = ?` + srcClause + `
     AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + `
+    AND timestamp <= now() + INTERVAL ` + maxFutureSkewSeconds + ` SECOND
   GROUP BY source
 )
 SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,
