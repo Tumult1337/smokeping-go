@@ -332,7 +332,8 @@ Key points a reader can't derive from a single file:
   no icmp probe is still unbound by the budget, but
   `config.ValidatePingCount` bounds `pings` for **every** schedule at
   `config.MaxPingsPerCycle`: the scheduler stamps `Sent = cfg.Pings` on
-  any probe error, so an unbounded count produced cycles cluster ingest
+  a probe error taken while the cycle context was still live, so an
+  unbounded count produced cycles cluster ingest
   refuses (`sent` past its UInt16 column) and each refusal dropped the
   slave's whole drained batch. That ceiling is the icmp sequence space
   even for a config defining no icmp probe, which over-restricts a
@@ -347,7 +348,16 @@ Key points a reader can't derive from a single file:
   fail-closed at both layers: `Store.Reload` keeps the last-good config, and
   `scheduler.RunLifecycle` keeps the previous targets when `Build` errors.
 
-  **A cycle that sent nothing is not a healthy cycle.** `Sent == 0` means no
+  **A cycle that sent nothing is not a healthy cycle.** A probe that returns
+  no result at all is stamped `Sent = cfg.Pings` — a target that did not
+  answer — **unless the cycle's own context ended first**, which is a
+  measurement never taken rather than a failed one. `probe.resolveIPAddr`
+  honors that context, so every SIGHUP and every debounced registry change
+  cancels the in-flight resolves; without the distinction a config reload
+  wrote a fleet-wide outage into `probe_cycle` and fired `sustained: 1`
+  alerts off cycles that never sent a packet.
+
+  `Sent == 0` means no
   measurement — neither 0% nor 100% loss — so `alert.Evaluator.OnCycle`
   returns before touching any state and the writer omits the `probe_cycle`
   row entirely, leaving a gap rather than a fabricated point. Hop rows still

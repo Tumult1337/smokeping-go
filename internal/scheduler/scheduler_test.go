@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -155,4 +156,69 @@ func TestFanoutIsolatesSinkPanic(t *testing.T) {
 	if got := len(rec.snapshot()); got != 1 {
 		t.Fatalf("downstream sink should still receive the cycle after an upstream panic; got %d cycles", got)
 	}
+}
+
+// nilProbe returns no result at all, the shape every probe takes when it bails
+// before building one — a failed resolve, a refused socket.
+type nilProbe struct {
+	name string
+	err  error
+	// block holds Probe until the cycle context ends, so the failure and the
+	// cancellation are the same event rather than a race the test has to win.
+	block bool
+}
+
+func (n *nilProbe) Name() string { return n.name }
+func (n *nilProbe) Probe(ctx context.Context, _ probe.Target, _ int) (*probe.Result, error) {
+	if n.block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return nil, n.err
+}
+
+// A probe that bails before measuring is a full-loss cycle, but only when the
+// cycle itself was still alive to measure in. resolveIPAddr honors the cycle
+// context now, so every in-flight resolve fails the moment RunLifecycle
+// cancels the scheduler — which it does on every SIGHUP and on every debounced
+// slave registration. Stamping Sent=pings there wrote a fleet-wide outage into
+// probe_cycle and fired a sustained:1 alert on a config reload, off cycles
+// that never sent a packet.
+func TestCancelledCycleIsAGapNotFabricatedLoss(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{Interval: time.Minute, Pings: 20}
+	ref := config.TargetRef{Group: "g", Target: config.Target{Name: "a", Host: "h", Probe: "p"}}
+
+	t.Run("cancelled", func(t *testing.T) {
+		sink := &recordingSink{}
+		s := New(log, probe.NewRegistry(), sink, cfg)
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
+		s.runCycle(ctx, ref, &nilProbe{name: "p", block: true})
+		got := sink.snapshot()
+		if len(got) != 1 {
+			t.Fatalf("recorded %d cycles, want 1", len(got))
+		}
+		if got[0].Sent != 0 || got[0].LossCount != 0 {
+			t.Fatalf("cancelled cycle recorded sent=%d lost=%d, want 0/0 — a cycle that measured nothing was stored as a total outage",
+				got[0].Sent, got[0].LossCount)
+		}
+	})
+
+	t.Run("live", func(t *testing.T) {
+		sink := &recordingSink{}
+		s := New(log, probe.NewRegistry(), sink, cfg)
+		s.runCycle(context.Background(), ref, &nilProbe{name: "p", err: errors.New("no such host")})
+		got := sink.snapshot()
+		if len(got) != 1 {
+			t.Fatalf("recorded %d cycles, want 1", len(got))
+		}
+		if got[0].Sent != cfg.Pings || got[0].LossCount != cfg.Pings {
+			t.Fatalf("a live cycle whose probe failed recorded sent=%d lost=%d, want %d/%d — an unreachable target must still read as loss",
+				got[0].Sent, got[0].LossCount, cfg.Pings, cfg.Pings)
+		}
+	})
 }
