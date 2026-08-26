@@ -277,12 +277,27 @@ func (e *Evaluator) refreshConditions() error {
 // every cycle regardless of quorum mode, so a real recovery still dispatches
 // a correct resolve without any reset — only the cross-source aggregate
 // needs a clean slate.
+//
+// The warm-up map is swept by the same rule, and independently: a quorum
+// alert that never dispatched has a warmup entry but no agg entry, so
+// sweeping only agg's keys both leaked those entries for alerts that left
+// the config and kept a stale firstSeen across a disable/re-enable — making
+// the 3×-interval window look long-elapsed, so the first partial-data
+// evaluation paged immediately, the exact flap warm-up exists to prevent.
 func (e *Evaluator) pruneStaleAggregates(oldEnabled map[string]bool) {
+	stale := func(alert string) bool {
+		was, existed := oldEnabled[alert]
+		now, stillExists := e.quorumEnabled[alert]
+		return !existed || !stillExists || was != now
+	}
 	for key := range e.agg {
-		was, existed := oldEnabled[key.alert]
-		now, stillExists := e.quorumEnabled[key.alert]
-		if !existed || !stillExists || was != now {
+		if stale(key.alert) {
 			delete(e.agg, key)
+			delete(e.warmup, key)
+		}
+	}
+	for key := range e.warmup {
+		if stale(key.alert) {
 			delete(e.warmup, key)
 		}
 	}
@@ -305,7 +320,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	// One read for the whole pass, and the only clock any state below is keyed
 	// on — never cy.Time, which the pushing slave chose.
 	now := e.nowFn()
-	window := stalenessWindow(cfg.Interval)
+	liveness := livenessWindow(cfg.Interval)
 	aheadLimit := aheadCap(cfg.Interval)
 	// Skipped whole like a cycle that sent nothing, so the source ages out
 	// rather than voting on data it replayed out of its own history.
@@ -314,11 +329,39 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		return
 	}
 
-	var toDispatch []Event
-	var skipped []time.Duration
+	toDispatch, skipped := e.evaluate(cfg, cy, now, liveness, aheadLimit)
 
+	if len(skipped) > 0 {
+		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
+	}
+
+	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
+	// for other targets running concurrently, and detached from the caller's
+	// context: the transition is committed above and dispatch is change-gated
+	// with no renotify, so an ingest deadline spent by earlier cycles in the
+	// batch dropped the only notification the alert would ever send while the
+	// state read as delivered — the first payload the endpoint then saw was
+	// the resolve for a page never sent. Each action still bounds its own
+	// delivery (the dispatcher's 10s HTTP client timeout / exec deadline).
+	dispatchCtx := context.WithoutCancel(ctx)
+	for _, ev := range toDispatch {
+		e.log.Info("alert state change",
+			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
+			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
+			"firing", ev.Firing, "live", ev.Live)
+		e.dispatcher.Dispatch(dispatchCtx, scrubHealthAddresses(ev))
+	}
+}
+
+// evaluate runs the per-alert state machine under e.mu, held via defer because
+// scheduler.Fanout recovers sink panics — a panic here must not leave the
+// evaluator locked forever inside a process that keeps reporting healthy.
+func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration, aheadLimit int) (toDispatch []Event, skipped []time.Duration) {
+	warmupWindow := stalenessWindow(cfg.Interval)
+	freshness := alertFreshness(cfg.Interval)
 	e.mu.Lock()
-	for _, name := range alerts {
+	defer e.mu.Unlock()
+	for _, name := range cy.Target.Target.Alerts {
 		alertCfg, ok := cfg.Alerts[name]
 		if !ok {
 			continue
@@ -391,7 +434,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			continue
 		}
 
-		firing, live := e.tally(bySource, now, window)
+		firing, live := e.tally(bySource, now, window, freshness)
 		next := StateOK
 		if live > 0 && firing >= alertCfg.Quorum.Threshold(live) {
 			next = StateFiring
@@ -411,7 +454,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		// Only a *new* FIRING transition is gated — an already-firing
 		// aggregate staying firing, and any transition to OK, pass through
 		// untouched so a real resolve can never get stuck behind warm-up.
-		if next == StateFiring && prevAgg != StateFiring && !w.ready(now, window) {
+		if next == StateFiring && prevAgg != StateFiring && !w.ready(now, warmupWindow) {
 			next = prevAgg
 		}
 
@@ -433,21 +476,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 			})
 		}
 	}
-	e.mu.Unlock()
-
-	if len(skipped) > 0 {
-		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
-	}
-
-	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
-	// for other targets running concurrently.
-	for _, ev := range toDispatch {
-		e.log.Info("alert state change",
-			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
-			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
-			"firing", ev.Firing, "live", ev.Live)
-		e.dispatcher.Dispatch(ctx, scrubHealthAddresses(ev))
-	}
+	return toDispatch, skipped
 }
 
 // warnExcluded reports at Warn that a source's cycles are being stored but not
@@ -518,18 +547,34 @@ func scrubHealthAddresses(ev Event) Event {
 	return ev
 }
 
-// tally counts firing and live sources, evicting any that have gone stale.
+// tally counts firing and live sources, pruning any that have gone stale.
 // now is the master's receive clock: a slave choosing this value could date a
 // cycle forward and age every honest source out of the denominator, becoming a
 // majority of itself. Must be called with e.mu held.
 //
 // Pruning is essential rather than cosmetic: a slave that dies while healthy
 // would otherwise sit in the denominator forever, so a real outage seen by
-// every remaining source could never reach a majority.
-func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window time.Duration) (firing, live int) {
+// every remaining source could never reach a majority. But pruning drops only
+// participation — the evaluation state a recreated entry would start from
+// anyway — never the replay identity (seenCycle/lastCycle/pastCycle/ahead):
+// deleting the whole entry recreated it with seenCycle false, which admits
+// anything, so the redelivery of a pruned source's cycle was applied a second
+// time and could resolve a live alert or refire a sustained one. The identity
+// is deleted only once no stamp it holds could pass the freshness gate —
+// every stamp is at most lastCycle, so past lastCycle+freshness any replay is
+// refused upstream and the entry buys nothing. Retention is bounded by the
+// same fact: ingest accepts a stamp at most config.MaxFutureSkew ahead of the
+// receive time, so an entry outlives its last cycle by at most
+// freshness+MaxFutureSkew.
+func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window, freshness time.Duration) (firing, live int) {
 	for src, st := range bySource {
 		if now.Sub(st.lastSeen) > window {
-			delete(bySource, src)
+			if now.Sub(st.lastCycle) > freshness {
+				delete(bySource, src)
+			} else {
+				st.state = StateOK
+				st.consecHits = 0
+			}
 			continue
 		}
 		live++
@@ -565,13 +610,26 @@ func firingSources(bySource map[string]*alertState, now time.Time, window time.D
 // clock, and still be evaluated for alerting. Alerting is a statement about
 // now: ingest accepts a cycle up to config.MaxCycleAge (7d) old, and
 // evaluating one replays a historical transition as if it were current, which
-// a slave can do at will. It is never tighter than the liveness window it
-// feeds — a slow-interval deployment must still be able to keep a source live
-// — nor than the skew ingest already tolerates, since master and slave clocks
-// are compared here and an honest slave at the accepted limit must not be
+// a slave can do at will. It is never tighter than the warm-up window — a
+// slow-interval deployment must still be able to keep a source live — nor
+// than the skew ingest already tolerates, since master and slave clocks are
+// compared here and an honest slave at the accepted limit must not be
 // silently excluded.
 func alertFreshness(interval time.Duration) time.Duration {
 	return max(stalenessWindow(interval), config.MaxFutureSkew)
+}
+
+// livenessWindow is how long a source's last cycle keeps it counted in tally
+// and firingSources, measured from when the master received it. It is the
+// freshness window rather than the bare 3×interval because cycles arrive in
+// pushed batches on the slave's own cluster.push_every cadence, which config
+// does not bound: any cadence that keeps a source's cycles young enough to
+// evaluate at all must also keep the source live, or every bursty-but-healthy
+// slave is pruned between pushes and a "majority" quorum collapses to
+// whichever source delivers continuously. A cadence past this window is
+// already losing cycles to the freshness gate, and warnExcluded reports it.
+func livenessWindow(interval time.Duration) time.Duration {
+	return alertFreshness(interval)
 }
 
 // aheadCeiling is the hard ceiling on that count whatever the interval, since
@@ -600,9 +658,9 @@ func aheadCap(interval time.Duration) int {
 	return int(min(derived, aheadCeiling))
 }
 
-// stalenessWindow is how long a source's last cycle stays counted, measured
-// from when the master received it. Three intervals tolerates one missed cycle
-// plus scheduling jitter and one push cadence.
+// stalenessWindow is the quorum warm-up horizon: three intervals tolerates
+// one missed cycle plus scheduling jitter. Liveness pruning uses
+// livenessWindow, which is never tighter than this.
 func stalenessWindow(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		interval = time.Minute

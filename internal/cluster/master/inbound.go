@@ -38,11 +38,6 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 		}
 	}
 
-	// Use a detached context for sink delivery so a slave TCP disconnect
-	// mid-POST doesn't cancel cycles that are already being processed.
-	sinkCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	accepted, duplicates := 0, 0
 	for _, p := range batch.Cycles {
 		key := p.Group + "/" + p.Name
@@ -74,7 +69,7 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 			duplicates++
 			continue
 		}
-		s.deliver(sinkCtx, p.ToCycle(target), batch.Source, key, p.Time.UnixNano())
+		s.deliver(p.ToCycle(target), batch.Source, key, p.Time.UnixNano())
 		accepted++
 	}
 	return accepted, duplicates
@@ -88,7 +83,14 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 // It reaches as far as the fanout and no further: OnCycle reports nothing, so
 // a row the writer drops on a full channel is delivered as far as this can
 // see.
-func (s *Server) deliver(ctx context.Context, cycle scheduler.Cycle, source, key string, nano int64) {
+//
+// The context is detached from the request — a slave TCP disconnect mid-POST
+// must not cancel cycles already being processed — and scoped per cycle, not
+// per batch: one budget over a MaxCyclesPerBatch backlog let a few stalled
+// sink deliveries spend it all and starve every cycle behind them.
+func (s *Server) deliver(cycle scheduler.Cycle, source, key string, nano int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	delivered := false
 	defer func() {
 		if !delivered {

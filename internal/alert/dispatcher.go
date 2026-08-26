@@ -62,7 +62,7 @@ func (d *ActionDispatcher) Dispatch(ctx context.Context, e Event) {
 		case "discord":
 			d.discord(ctx, action, body, e)
 		case "exec":
-			d.exec(ctx, action, body, e)
+			d.exec(ctx, name, action, body, e)
 		case "log":
 			d.log.Info("alert",
 				"target", e.Target.ID(), "alert", e.AlertName,
@@ -115,7 +115,7 @@ func (d *ActionDispatcher) webhook(ctx context.Context, a config.Action, body st
 	}
 }
 
-func (d *ActionDispatcher) exec(ctx context.Context, a config.Action, body string, e Event) {
+func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Action, body string, e Event) {
 	if a.Command == "" {
 		return
 	}
@@ -136,9 +136,27 @@ func (d *ActionDispatcher) exec(ctx context.Context, a config.Action, body strin
 		fmt.Sprintf("ALERT_SOURCE=%s", e.Cycle.Source),
 		fmt.Sprintf("ALERT_SOURCES=%s", strings.Join(e.FiringSources, ",")),
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		d.log.Warn("exec", "command", a.Command, "err", err, "output", string(out))
+	// a.Command was env-expanded from the raw config bytes and can embed
+	// credentials, exec.Error quotes argv[0], and the command's own output is
+	// unbounded free text — so the log carries the action name and a fixed
+	// category only, like its webhook/discord siblings.
+	if _, err := cmd.CombinedOutput(); err != nil {
+		d.log.Warn("exec failed", "action", name, "err", execFailureCategory(execCtx, err))
 	}
+}
+
+// execFailureCategory names why an exec action failed using only fixed text
+// plus the numeric exit code, never anything derived from the command line or
+// the process.
+func execFailureCategory(ctx context.Context, err error) string {
+	if ctx.Err() != nil {
+		return "timeout"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return fmt.Sprintf("exit %d", exitErr.ExitCode())
+	}
+	return "start failed"
 }
 
 // discord posts a Discord-flavored embed to a webhook URL. If the action's

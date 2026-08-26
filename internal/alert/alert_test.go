@@ -607,25 +607,36 @@ func TestQuorumAbsoluteAboveLiveCount(t *testing.T) {
 }
 
 // Per-source sustained counters must stay independent under quorum: a laggy
-// slave's hit streak must not advance the master's. The previous version of
-// this test alternated lossy/healthy per source, which resets on every
-// healthy cycle — a merged counter would also reset there and the test would
-// pass either way. This sequence never sends a healthy cycle, so a merged
-// counter (lossy, lossy, lossy = 3) and independent per-source counters
-// (master=2, tokyo-1=1) diverge, and only a real bug (merging) fires.
+// slave's hit streak must not advance the master's. This sequence never sends
+// a healthy cycle (which would reset a merged counter too), every cycle
+// carries a distinct timestamp — stamped identically, the third was skipped
+// by the duplicate guard before any state mutation and the test passed
+// against the very bug it names — and the counters are asserted directly,
+// because under quorum a single wrongly-advanced source dispatches nothing.
 func TestQuorumKeepsPerSourceSustainedIndependent(t *testing.T) {
-	ev, disp := newTestEvaluator(t, config.Alert{
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
 		Quorum: config.Quorum{Majority: true},
 	})
 
 	ctx := context.Background()
-	ev.OnCycle(ctx, lossyCycle("master", 100))  // master: 1
-	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100)) // tokyo-1: 1
-	ev.OnCycle(ctx, lossyCycle("master", 100))  // master: 2 (still short of 3)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100)) // master: 1
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100)) // tokyo-1: 1
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100)) // master: 2 (still short of 3)
 
 	if got := len(disp.events()); got != 0 {
 		t.Fatalf("got %d events, want 0 (master=2, tokyo-1=1 consecutive hits; merged would be 3)", got)
+	}
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	bySource := ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]
+	if got := bySource["master"].consecHits; got != 2 {
+		t.Fatalf("master consecHits = %d, want 2", got)
+	}
+	if got := bySource["tokyo-1"].consecHits; got != 1 {
+		t.Fatalf("tokyo-1 consecHits = %d, want 1", got)
 	}
 }
 
@@ -767,9 +778,12 @@ func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
 		t.Fatalf("refresh (quorum on): %v", err)
 	}
 
-	// One more healthy cycle to force the aggregate to re-evaluate. Both
-	// sources are already OK, so a correct evaluator dispatches nothing.
-	ev.OnCycle(ctx, healthyCycle("master"))
+	// One more healthy cycle — with a fresh timestamp, or the duplicate guard
+	// skips it before the aggregate ever re-evaluates and the assertion below
+	// is vacuous. Both sources are already OK, so a correct evaluator
+	// dispatches nothing.
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
 	if got := disp.events(); len(got) != 0 {
 		t.Fatalf("got %d events, want 0 (no phantom resolve from stale pre-toggle aggregate): %+v", len(got), got)
 	}
@@ -1747,7 +1761,7 @@ func TestDuplicateCycleDoesNotRefreshLiveness(t *testing.T) {
 
 	// frankfurt-1 goes silent past the liveness window and replays its last
 	// cycle instead of producing a new one.
-	clk.advance(stalenessWindow(time.Minute) + time.Second)
+	clk.advance(livenessWindow(time.Minute) + time.Second)
 	ev.OnCycle(ctx, healthy)
 
 	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
@@ -2367,5 +2381,308 @@ func TestFullForwardDatedBatchIsRecognisedOnRedelivery(t *testing.T) {
 	}
 	if after := hits(); after != before {
 		t.Errorf("redelivered batch drove consecHits %d -> %d; the ceiling is under one batch", before, after)
+	}
+}
+
+// A panic inside the state machine is recovered by scheduler.Fanout, so the
+// process survives — with the evaluator's mutex held forever unless the
+// unlock is deferred, after which every cycle blocks while health reports OK.
+func TestPanicInEvaluationDoesNotHoldTheStateLock(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	// A nil bySource map panics on insert inside the critical section — the
+	// survivable shape the fanout's recover() turns into a stuck lock.
+	ev.states[aggKey{target: "core/gw", alert: "quorum-test"}] = nil
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected the seeded nil map to panic")
+			}
+		}()
+		ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", 100))
+	}()
+
+	if !ev.mu.TryLock() {
+		t.Fatal("evaluator mutex still held after a recovered panic")
+	}
+	ev.mu.Unlock()
+}
+
+// Slaves deliver cycles in pushed batches on their own cluster.push_every
+// cadence, which config does not bound. With liveness at a bare 3×interval, a
+// 20s-interval fleet bursting every 90s collapsed the quorum denominator to
+// the continuously-delivering master between pushes, and Threshold(1) == 1
+// fired a "majority" alert off a single source. Any cadence whose cycles the
+// freshness gate still evaluates must also keep its source live.
+func TestBurstyPushCadenceKeepsASourceLive(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorInterval(t, 20*time.Second, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	// One push from every slave, then only the master's local cycles until
+	// the slaves' next 90s push is due.
+	for _, src := range []string{"master", "tokyo-1", "frankfurt-1"} {
+		ev.OnCycle(ctx, cycleAt(clk, src, 0))
+	}
+	for range 4 {
+		clk.advance(20 * time.Second)
+		ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	}
+
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %+v, want none — one firing source out of three is not a majority", evs)
+	}
+}
+
+// tally's prune must drop only quorum participation, never the replay
+// identity: deleting the whole alertState recreated it with seenCycle false,
+// which admits anything, so the redelivery of a pruned source's cycle — still
+// inside the freshness gate whenever its stamp ran ahead of the receive time
+// — was applied as if never seen.
+func TestPrunedSourceStillRefusesItsReplayedCycle(t *testing.T) {
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	// tokyo-1's healthy cycle arrives forward-dated by the skew ingest
+	// accepts, then tokyo-1 dies while the master sees a real outage.
+	poison := healthyCycle("tokyo-1")
+	poison.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, poison)
+	for range 6 {
+		clk.advance(time.Minute)
+		ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	}
+	evs := disp.events()
+	if len(evs) != 1 || evs[0].Next != StateFiring {
+		t.Fatalf("setup: got %+v, want the master's FIRING once tokyo-1 aged out", evs)
+	}
+	disp.reset()
+
+	// The lost-ack redelivery: its stamp is one minute in the past now, well
+	// inside the freshness gate. Applied a second time it re-enters the
+	// denominator healthy and resolves a page off replayed data.
+	ev.OnCycle(ctx, poison)
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %+v, want none — a replayed measurement must not resolve a live alert", evs)
+	}
+}
+
+// The retained identity is bounded: past lastCycle+freshness every stamp the
+// entry holds is refused by the freshness gate itself, so keeping it buys
+// nothing and holding it longer is the unbounded per-source memory the prune
+// exists to avoid.
+func TestPrunedIdentityIsEventuallyDeleted(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	poison := healthyCycle("tokyo-1")
+	poison.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, poison)
+
+	clk.advance(config.MaxFutureSkew + alertFreshness(time.Minute) + time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	if _, ok := ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"]; ok {
+		t.Fatal("replay identity retained past the freshness gate that makes it useless")
+	}
+}
+
+// What the prune does drop is the evaluation state: a pruned source that
+// comes back starts from StateOK with a zero streak, exactly as the deleted
+// entry used to — only the replay identity survives.
+func TestPruneResetsEvaluationStateButKeepsIdentity(t *testing.T) {
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
+		Quorum: config.Quorum{Majority: true},
+	})
+	ctx := context.Background()
+
+	bad := lossyCycle("tokyo-1", 100)
+	bad.Time = clk.t.Add(config.MaxFutureSkew)
+	ev.OnCycle(ctx, bad) // tokyo-1: consecHits 1
+
+	// A master cycle after tokyo-1 went stale (but its identity is still
+	// fresh) runs the prune.
+	clk.advance(livenessWindow(time.Minute) + 30*time.Second)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
+
+	// tokyo-1 revives with a genuine cycle: a fresh streak, not a resumed one.
+	clk.advance(30 * time.Second)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	st, ok := ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"]
+	if !ok {
+		t.Fatal("tokyo-1's state missing entirely")
+	}
+	if st.consecHits != 1 {
+		t.Fatalf("consecHits = %d after a prune and one bad cycle, want 1", st.consecHits)
+	}
+	if !st.seenCycle {
+		t.Fatal("replay identity did not survive the prune")
+	}
+}
+
+// Ingest hands the evaluator a bounded sink context, and a backlog flushed
+// after an outage can spend it on earlier cycles' dispatches. The transition
+// commits before dispatch and the path is change-gated with no renotify, so
+// an expired context turned the only FIRING notification an alert would ever
+// send into silence — the first payload the endpoint saw was the resolve for
+// a page never sent. Dispatch must survive the caller's context.
+func TestTransitionStillNotifiesWhenTheIngestContextHasExpired(t *testing.T) {
+	var mu sync.Mutex
+	delivered := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		delivered++
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    20,
+		Alerts:   map[string]config.Alert{"quorum-test": {Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"hook"}}},
+		Actions:  map[string]config.Action{"hook": {Type: "webhook", URL: srv.URL}},
+	}
+	store := config.NewStore("", cfg)
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, NewDispatcher(slog.New(slog.DiscardHandler), store))
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	clk := pinClock(ev, testBase)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if delivered != 1 {
+		t.Fatalf("webhook delivered %d times, want 1 — the transition committed but the notification was dropped", delivered)
+	}
+}
+
+// The credential-scrubbing pass that sanitized the webhook/discord failure
+// logs left exec byte-identical: expandEnv runs over the raw config bytes, so
+// a.Command can embed a resolved secret, exec.Error quotes argv[0], and the
+// command's stdout+stderr is unbounded operator-script output. The log must
+// still say which action failed and roughly why.
+func TestDispatcherExecFailureLogsCarryNoCommandLineOrOutput(t *testing.T) {
+	const secret = "s3cr3t-pagerduty-key"
+	cases := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		// start failure: exec.Error quotes argv[0], which embeds the secret.
+		{"start", "/nonexistent-gosmokeping --token " + secret, `err="start failed"`},
+		// exit failure: ls prints the secret-bearing path on stderr.
+		{"exit", "ls /nonexistent-" + secret, `err="exit `},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			d := &ActionDispatcher{log: slog.New(slog.NewTextHandler(&logs, nil))}
+			d.exec(context.Background(), "pager", config.Action{Type: "exec", Command: tc.command}, "body", Event{})
+
+			got := logs.String()
+			if got == "" {
+				t.Fatal("no failure was logged at all")
+			}
+			if strings.Contains(got, secret) {
+				t.Fatalf("log leaks the expanded command line or its output: %q", got)
+			}
+			if !strings.Contains(got, "action=pager") {
+				t.Fatalf("log does not identify the failed action: %q", got)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("log = %q, want category %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The deadline branch: CommandContext reports a killed process as
+// "signal: killed", which is neither an ExitError worth an exit code nor a
+// start failure.
+func TestExecFailureCategoryNamesATimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := execFailureCategory(ctx, errors.New("signal: killed")); got != "timeout" {
+		t.Fatalf("got %q, want timeout", got)
+	}
+}
+
+// A quorum alert that never dispatched has a warmup entry but no agg entry,
+// so a sweep over agg's keys alone leaves it behind across a quorum toggle:
+// the stale firstSeen makes the 3×-interval window look long-elapsed, and the
+// first partial-data evaluation after re-enabling pages immediately — the
+// restart flap warm-up exists to prevent. The leftover is also a leak for
+// alerts that leave the config entirely.
+func TestQuorumToggleResetsWarmup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	writeQuorumTestConfig(t, path, true)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+	disp := &recordingDispatcher{}
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, disp)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	clk := pinClock(ev, testBase)
+	ctx := context.Background()
+
+	// One healthy cycle from a single source: warm-up bookkeeping exists, but
+	// nothing ever dispatched, so e.agg holds no key.
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
+
+	writeQuorumTestConfig(t, path, false)
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload (quorum off): %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh (quorum off): %v", err)
+	}
+	ev.mu.Lock()
+	leftover := len(ev.warmup)
+	ev.mu.Unlock()
+	if leftover != 0 {
+		t.Fatalf("%d warm-up entries survived the quorum toggle", leftover)
+	}
+
+	clk.advance(time.Hour)
+	writeQuorumTestConfig(t, path, true)
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload (quorum on): %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh (quorum on): %v", err)
+	}
+
+	// First evaluation after re-enable is partial data: one firing source,
+	// Threshold(1) == 1. Warm-up must hold it.
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100))
+	if evs := disp.events(); len(evs) != 0 {
+		t.Fatalf("got %+v, want none — warm-up must restart with the toggled aggregate", evs)
 	}
 }
