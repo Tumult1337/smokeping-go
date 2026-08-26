@@ -58,3 +58,45 @@ with:
 > RTT mirror and became the target's percentiles, with `len(RTTs)` exceeding
 > `Sent−LossCount`. The per-round one-responder-per-TTL bound is unchanged, so
 > `MaxHopRowsPerCycle`'s rounds × TTLs derivation still holds;
+
+## "A cycle that sent nothing" bullet (A4)
+
+Replace:
+
+> and MTR's `Sent` is the rounds that actually sent — zero when `traceHops`'
+> resolve, which takes no context, spends the cycle deadline before the first
+> probe goes out.
+
+with:
+
+> and MTR's `Sent` is the rounds that actually sent — zero when `traceHops`'
+> resolve spends the cycle deadline before the first probe goes out
+> (`probe.resolveIPAddr` honors the context, so the resolve now fails *at*
+> the deadline instead of overrunning it).
+
+## Path discovery bullet, addition (A4)
+
+After the sentence ending "…the walk keeps the whole interval." (ICMP cycle
+budget context) or in the path-discovery bullet, add:
+
+> Resolution inside the walk and the icmp echo path goes through
+> `probe.resolveIPAddr` — `net.ResolveIPAddr` semantics with the context
+> honored. The trace goroutine is joined by an unconditional defer on every
+> `ICMP.Probe` return path, so a resolver call that ignored a cancelled cycle
+> blocked shutdown (`Scheduler.Run`'s `wg.Wait`, `RunLifecycle`'s
+> `<-schedDone`) and every SIGHUP rebuild for the resolver's own timeout —
+> tens of seconds per hostname-addressed target against a blackholed
+> nameserver.
+
+## Address-family pinning bullet (A4)
+
+Replace:
+
+> ICMP/MTR via `net.ResolveIPAddr("ip"|"ip4"|"ip6")` (shared `traceHops`
+> takes family as a parameter);
+
+with:
+
+> ICMP/MTR via `probe.resolveIPAddr("ip"|"ip4"|"ip6")`, `net.ResolveIPAddr`'s
+> selection with the context honored (shared `traceHops` takes family as a
+> parameter);

@@ -159,7 +159,7 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	if t.Host == "" {
 		return nil, errors.New("icmp: host required")
 	}
-	ip, err := net.ResolveIPAddr(familyNetwork("ip", t.Family), t.Host)
+	ip, err := resolveIPAddr(ctx, familyNetwork("ip", t.Family), t.Host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %q: %w", t.Host, err)
 	}

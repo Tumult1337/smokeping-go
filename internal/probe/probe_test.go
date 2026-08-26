@@ -234,6 +234,98 @@ func TestBuildRejectsUnschedulablePingBudget(t *testing.T) {
 	})
 }
 
+func swapLookupIPAddr(t *testing.T, fn func(context.Context, string) ([]net.IPAddr, error)) {
+	t.Helper()
+	orig := lookupIPAddrFn
+	lookupIPAddrFn = fn
+	t.Cleanup(func() { lookupIPAddrFn = orig })
+}
+
+// blackholedLookup behaves like the real resolver against a dead nameserver:
+// it honors the context and otherwise takes far longer than any cycle.
+func blackholedLookup(ctx context.Context, host string) ([]net.IPAddr, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(5 * time.Second):
+		return []net.IPAddr{{IP: net.IPv4(127, 0, 0, 1)}}, nil
+	}
+}
+
+// The trace goroutine is joined on every return path, so a resolve that does
+// not honor the cycle's context blocks shutdown and every SIGHUP rebuild for
+// the resolver's own timeout — tens of seconds per hostname-addressed target.
+func TestTraceHopsHonorsCancelledContextDuringResolve(t *testing.T) {
+	swapLookupIPAddr(t, blackholedLookup)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	_, _, err := traceHops(ctx, "blackhole.example", "", 1, 1, time.Millisecond, 0)
+	if err == nil {
+		t.Fatal("a cancelled cycle must not resolve successfully")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("resolve outlived the cancelled cycle by %v", elapsed)
+	}
+}
+
+func TestICMPProbeHonorsCancelledContextDuringResolve(t *testing.T) {
+	swapLookupIPAddr(t, blackholedLookup)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if _, err := NewICMP("icmp", time.Second, true).Probe(ctx, Target{Host: "blackhole.example"}, 1); err == nil {
+		t.Fatal("a cancelled cycle must not resolve successfully")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("resolve outlived the cancelled cycle by %v", elapsed)
+	}
+}
+
+// resolveIPAddr must keep net.ResolveIPAddr's selection: family networks
+// filter, a bare "ip" prefers IPv4 for a hostname and falls back across
+// families rather than failing.
+func TestResolveIPAddrSelectsLikeNetResolveIPAddr(t *testing.T) {
+	v4 := net.IPAddr{IP: net.IPv4(192, 0, 2, 9)}
+	v6 := net.IPAddr{IP: net.ParseIP("2001:db8::1")}
+	swapLookupIPAddr(t, func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{v6, v4}, nil
+	})
+	ctx := context.Background()
+
+	if got, err := resolveIPAddr(ctx, "ip4", "dual.example"); err != nil || !got.IP.Equal(v4.IP) {
+		t.Fatalf("ip4: got %v, %v", got, err)
+	}
+	if got, err := resolveIPAddr(ctx, "ip6", "dual.example"); err != nil || !got.IP.Equal(v6.IP) {
+		t.Fatalf("ip6: got %v, %v", got, err)
+	}
+	if got, err := resolveIPAddr(ctx, "ip", "dual.example"); err != nil || !got.IP.Equal(v4.IP) {
+		t.Fatalf("ip must prefer IPv4 for a hostname: got %v, %v", got, err)
+	}
+
+	swapLookupIPAddr(t, func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{v6}, nil
+	})
+	if got, err := resolveIPAddr(ctx, "ip", "six.example"); err != nil || !got.IP.Equal(v6.IP) {
+		t.Fatalf("ip must fall back to the only family: got %v, %v", got, err)
+	}
+	if _, err := resolveIPAddr(ctx, "ip4", "six.example"); err == nil {
+		t.Fatal("ip4 with only AAAA answers must fail like net.ResolveIPAddr")
+	}
+}
+
+// The destination side of the walk's peer check comes from here, so the zone
+// check is inert unless resolution keeps the zone the operator wrote.
+func TestResolveIPAddrKeepsIPv6Zone(t *testing.T) {
+	got, err := resolveIPAddr(context.Background(), "ip6", "fe80::1%eth0")
+	if err != nil {
+		t.Skipf("resolve fe80::1%%eth0: %v", err)
+	}
+	if got.Zone != "eth0" || !got.IP.Equal(net.ParseIP("fe80::1")) {
+		t.Fatalf("resolved to %v, want fe80::1%%eth0", got)
+	}
+}
+
 // The invariant that actually broke: a schedule config.Validate stores is one
 // probe.Build must accept, or the store serves every slave a config that fails
 // at its next restart, hours after the edit looked green.

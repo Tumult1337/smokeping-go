@@ -31,7 +31,7 @@ func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, tim
 	if host == "" {
 		return nil, roundStats{}, errors.New("trace: host required")
 	}
-	ip, err := net.ResolveIPAddr(familyNetwork("ip", family), host)
+	ip, err := resolveIPAddr(ctx, familyNetwork("ip", family), host)
 	if err != nil {
 		return nil, roundStats{}, fmt.Errorf("resolve %q: %w", host, err)
 	}
