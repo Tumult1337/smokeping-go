@@ -195,8 +195,12 @@ func (r *Runner) refreshLoop(ctx context.Context, cancelRun context.CancelCauseF
 }
 
 // registerForever retries /register with exponential backoff capped at 30s.
-// Returns non-nil only when ctx is cancelled before the first success, or
-// when the master returns 401 (fatal — operator must rotate the token).
+// Returns non-nil only when ctx is cancelled before the first success, or on
+// a verdict retrying cannot change: 401 (operator must rotate the token) and
+// ErrRejected — the master answers the same bytes identically forever (an
+// invalid cluster.name, an oversized advertise), so retrying leaves a
+// "running" slave that never registers and probes nothing, where exiting
+// non-zero with the master's message tells the operator what to fix.
 func (r *Runner) registerForever(ctx context.Context) error {
 	backoff := time.Second
 	for {
@@ -205,6 +209,10 @@ func (r *Runner) registerForever(ctx context.Context) error {
 			return nil
 		}
 		if errors.Is(err, ErrAuth) {
+			return err
+		}
+		if errors.Is(err, ErrRejected) {
+			r.log.Error("master permanently rejected registration, exiting", "err", err)
 			return err
 		}
 		r.log.Warn("register failed, will retry", "err", err, "backoff", backoff)
@@ -222,6 +230,9 @@ func (r *Runner) registerForever(ctx context.Context) error {
 
 // pullConfigInitial keeps trying until a non-304 /config comes back. Matches
 // the "do not probe before first successful config pull" rule from the plan.
+// ErrRejected is fatal like in registerForever: with no config ever pulled
+// there is nothing stale to keep running on, so a permanent 4xx retried
+// forever is a slave that never probes.
 func (r *Runner) pullConfigInitial(ctx context.Context) (cluster.ClusterConfigResp, string, error) {
 	backoff := time.Second
 	for {
@@ -230,6 +241,10 @@ func (r *Runner) pullConfigInitial(ctx context.Context) (cluster.ClusterConfigRe
 			return resp, etag, nil
 		}
 		if errors.Is(err, ErrAuth) {
+			return cluster.ClusterConfigResp{}, "", err
+		}
+		if errors.Is(err, ErrRejected) {
+			r.log.Error("master permanently rejected the initial config pull, exiting", "err", err)
 			return cluster.ClusterConfigResp{}, "", err
 		}
 		r.log.Warn("initial config pull failed, will retry", "err", err, "backoff", backoff)
