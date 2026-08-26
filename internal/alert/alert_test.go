@@ -2562,3 +2562,54 @@ func TestTransitionStillNotifiesWhenTheIngestContextHasExpired(t *testing.T) {
 		t.Fatalf("webhook delivered %d times, want 1 — the transition committed but the notification was dropped", delivered)
 	}
 }
+
+// The credential-scrubbing pass that sanitized the webhook/discord failure
+// logs left exec byte-identical: expandEnv runs over the raw config bytes, so
+// a.Command can embed a resolved secret, exec.Error quotes argv[0], and the
+// command's stdout+stderr is unbounded operator-script output. The log must
+// still say which action failed and roughly why.
+func TestDispatcherExecFailureLogsCarryNoCommandLineOrOutput(t *testing.T) {
+	const secret = "s3cr3t-pagerduty-key"
+	cases := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		// start failure: exec.Error quotes argv[0], which embeds the secret.
+		{"start", "/nonexistent-gosmokeping --token " + secret, `err="start failed"`},
+		// exit failure: ls prints the secret-bearing path on stderr.
+		{"exit", "ls /nonexistent-" + secret, `err="exit `},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			d := &ActionDispatcher{log: slog.New(slog.NewTextHandler(&logs, nil))}
+			d.exec(context.Background(), "pager", config.Action{Type: "exec", Command: tc.command}, "body", Event{})
+
+			got := logs.String()
+			if got == "" {
+				t.Fatal("no failure was logged at all")
+			}
+			if strings.Contains(got, secret) {
+				t.Fatalf("log leaks the expanded command line or its output: %q", got)
+			}
+			if !strings.Contains(got, "action=pager") {
+				t.Fatalf("log does not identify the failed action: %q", got)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("log = %q, want category %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The deadline branch: CommandContext reports a killed process as
+// "signal: killed", which is neither an ExitError worth an exit code nor a
+// start failure.
+func TestExecFailureCategoryNamesATimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := execFailureCategory(ctx, errors.New("signal: killed")); got != "timeout" {
+		t.Fatalf("got %q, want timeout", got)
+	}
+}
