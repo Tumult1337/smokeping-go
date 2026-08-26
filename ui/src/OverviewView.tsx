@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { getOverview, type OverviewRow, type OverviewWindow } from "./api";
 import { lossTextColor } from "./palette";
 
@@ -401,8 +401,11 @@ function skeletonRows(): React.ReactNode[] {
 
 // Sparkline is a 60x16 inline SVG. Values are normalized to the row's own
 // max so each row tells its own latency story without being squashed by a
-// neighbouring spike. Nulls become gaps in the polyline.
-function Sparkline({ values, silent }: { values: Array<number | null>; silent: boolean }) {
+// neighbouring spike. Nulls become gaps in the polyline. Memoized because the
+// 15s relative-time tick re-renders every Row while `values` stays the same
+// array — rebuilding every path string per tick is the landing view's one
+// recurring cost.
+const Sparkline = memo(function Sparkline({ values, silent }: { values: Array<number | null>; silent: boolean }) {
   if (silent || values.length === 0) {
     return <span className="overview-na">—</span>;
   }
@@ -448,4 +451,4 @@ function Sparkline({ values, silent }: { values: Array<number | null>; silent: b
       ))}
     </svg>
   );
-}
+});
