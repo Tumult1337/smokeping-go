@@ -21,10 +21,11 @@ func (s *deadlineSink) OnCycle(ctx context.Context, _ scheduler.Cycle) {
 	time.Sleep(5 * time.Millisecond)
 }
 
-// One sink budget over a whole batch let a few stalled deliveries — the alert
-// evaluator dispatches synchronously inside OnCycle — spend the 30s and hand
+// One budget over a whole batch let a few stalled deliveries spend it and hand
 // every cycle behind them an already-expired context. Each cycle gets its own
-// deadline, taken when its delivery starts.
+// deadline, taken when its delivery starts, nested inside the batch's — which
+// is what keeps their sum bounded, since MaxCyclesPerBatch per-cycle budgets
+// alone is ~8.5 hours of handler.
 func TestIngestGivesEachCycleItsOwnSinkBudget(t *testing.T) {
 	store := config.NewStore("", &config.Config{
 		Cluster: &config.Cluster{Token: "tok"},

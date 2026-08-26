@@ -15,6 +15,15 @@ import (
 // and the number recognised as redeliveries; silently drops any whose
 // group/name no longer resolves (stale slave config vs. fresh master config).
 // That's acceptable — the slave will refresh and stop sending within 60s.
+// sinkCycleBudget bounds one cycle's trip through the fanout; sinkBatchBudget
+// bounds the whole POST's. The batch value is api's WriteTimeout: past it the
+// connection is closed and the slave requeues, so work continuing beyond it is
+// work nobody is waiting for.
+const (
+	sinkCycleBudget = 30 * time.Second
+	sinkBatchBudget = 120 * time.Second
+)
+
 func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, int) {
 	cfg := s.store.Current()
 	targets := make(map[string]config.Target, len(cfg.AllTargets()))
@@ -37,6 +46,15 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 			}
 		}
 	}
+
+	// One budget for the whole batch, with each cycle bounded inside it. Per
+	// cycle alone bounded nothing in aggregate: MaxCyclesPerBatch × the per-
+	// cycle budget is ~8.5 hours of handler, and the write timeout that would
+	// close the connection does not stop the goroutine, so PushSink.Requeue
+	// resends and each retry starts another one. sinkBatchBudget is that
+	// write timeout, because past it nobody is waiting for the result.
+	batchCtx, cancelBatch := context.WithTimeout(context.Background(), sinkBatchBudget)
+	defer cancelBatch()
 
 	accepted, duplicates := 0, 0
 	for _, p := range batch.Cycles {
@@ -69,7 +87,7 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 			duplicates++
 			continue
 		}
-		s.deliver(p.ToCycle(target), batch.Source, key, p.Time.UnixNano())
+		s.deliver(batchCtx, p.ToCycle(target), batch.Source, key, p.Time.UnixNano())
 		accepted++
 	}
 	return accepted, duplicates
@@ -85,11 +103,15 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 // see.
 //
 // The context is detached from the request — a slave TCP disconnect mid-POST
-// must not cancel cycles already being processed — and scoped per cycle, not
-// per batch: one budget over a MaxCyclesPerBatch backlog let a few stalled
-// sink deliveries spend it all and starve every cycle behind them.
-func (s *Server) deliver(cycle scheduler.Cycle, source, key string, nano int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// must not cancel cycles already being processed — and bounded twice: per
+// cycle, so a few stalled deliveries cannot spend the batch and starve
+// everything behind them, and by the batch's own budget, so their sum is
+// bounded too. Today no sink reads either deadline (the fanout does not check
+// it, and both writer and evaluator hand off without blocking), so neither
+// bounds anything a caller can observe; they exist for the sink CLAUDE.md
+// invites anyone to append.
+func (s *Server) deliver(batchCtx context.Context, cycle scheduler.Cycle, source, key string, nano int64) {
+	ctx, cancel := context.WithTimeout(batchCtx, sinkCycleBudget)
 	defer cancel()
 	delivered := false
 	defer func() {

@@ -147,8 +147,14 @@ Key points a reader can't derive from a single file:
   `1h`/`1d` by `derived <= override` — rather than second copies of the
   thresholds, so widening a tier widens the override with it, and an
   override finer than the tier is a 400 rather than served. `/status`
-  scans only `api.statusRecentCycles` (50) × the live interval, the
-  count it already trims to, instead of an unbucketed 24h.
+  scans only `api.statusRecentCycles` (50) × the live interval instead of
+  an unbucketed 24h — 50 intervals is 50 cycles *per source*, so the trim
+  is per source too (`trimPerSource`); across sources it described a
+  different quantity from the window and showed 8 cycles each on a
+  6-source install. It echoes `from`/`to` for the reason `/cycles` does:
+  a target silent longer than the window comes back empty, which is the
+  honest answer but is otherwise indistinguishable from a target that
+  never existed.
   `/rtts` is tighter than its 7d siblings because `probe_rtt` stores a
   row per ping, not per cycle. Measured against a 122-target, 5-source
   install at a 15s interval: `/rtts?from=-30d` returned 206 MB and

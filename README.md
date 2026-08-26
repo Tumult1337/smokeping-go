@@ -252,7 +252,7 @@ loss.
 | GET | `/api/v1/health` | Health + uptime |
 | GET | `/api/v1/sources` | List source labels seen in storage (master + slave names) |
 | GET | `/api/v1/targets` | List all targets |
-| GET | `/api/v1/targets/{group}/{name}/status` | Latest cycle for the target |
+| GET | `/api/v1/targets/{group}/{name}/status` | Last 50 cycles per source; scans 50 probe intervals and echoes that window as `from`/`to`, so a target silent longer comes back empty |
 | GET | `/api/v1/targets/{group}/{name}/cycles?from&to` | Aggregated latency, optionally bucketed |
 | GET | `/api/v1/targets/{group}/{name}/rtts?from&to` | Raw per-ping samples (window ≤24h) |
 | GET | `/api/v1/targets/{group}/{name}/http?from&to` | Raw HTTP samples (window ≤7d) |

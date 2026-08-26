@@ -797,10 +797,46 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeQueryErr(w, "query status", err)
 		return
 	}
-	if len(points) > statusRecentCycles {
-		points = points[len(points)-statusRecentCycles:]
+	points = trimPerSource(points, statusRecentCycles)
+	// Echoed for the reason /cycles echoes its window: the scan is bounded at
+	// statusRecentCycles intervals, so a target silent longer than that comes
+	// back empty — which is the honest answer, but without the window a caller
+	// cannot tell it apart from a target that never existed.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"target": ref.ID(), "recent": points,
+		"from": from.Unix(), "to": to.Unix(),
+	})
+}
+
+// trimPerSource keeps the newest n points of each source, preserving the
+// server's row order. The window scans n intervals, which is n cycles per
+// source, so trimming to n across all of them made the window and the trim
+// describe different quantities — on a six-source install the endpoint
+// scanned six times what it returned and showed eight cycles per source.
+func trimPerSource(points []storage.CyclePoint, n int) []storage.CyclePoint {
+	counts := make(map[string]int, 4)
+	for _, p := range points {
+		counts[p.Source]++
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"target": ref.ID(), "recent": points})
+	over := false
+	for _, c := range counts {
+		if c > n {
+			over = true
+			break
+		}
+	}
+	if !over {
+		return points
+	}
+	seen := make(map[string]int, len(counts))
+	out := points[:0]
+	for _, p := range points {
+		if counts[p.Source]-seen[p.Source] <= n {
+			out = append(out, p)
+		}
+		seen[p.Source]++
+	}
+	return out
 }
 
 func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -2112,5 +2113,61 @@ func TestSignedUnixSecondsStillObeyTheWindowCaps(t *testing.T) {
 				t.Fatalf("reader ran %d queries for a refused window", reader.queries)
 			}
 		})
+	}
+}
+
+// The window scans statusRecentCycles intervals, which is that many cycles per
+// source — so trimming to that many across every source made the window and
+// the trim describe different quantities: on a six-source install the endpoint
+// scanned six times what it returned and showed eight cycles per source. It
+// also echoes the window, because a target silent longer than it comes back
+// empty and a caller cannot otherwise tell that apart from a target that never
+// existed.
+func TestStatusTrimsPerSourceAndEchoesItsWindow(t *testing.T) {
+	const sources = 6
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	r := &stubReader{}
+	for i := range statusRecentCycles + 10 {
+		for s := range sources {
+			r.cycles = append(r.cycles, storage.CyclePoint{
+				Time:   base.Add(time.Duration(i) * time.Minute),
+				Source: fmt.Sprintf("edge-%d", s),
+			})
+		}
+	}
+
+	code, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, "/api/v1/targets/core/gw/status")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", code, body)
+	}
+	var got struct {
+		Recent []storage.CyclePoint `json:"recent"`
+		From   int64                `json:"from"`
+		To     int64                `json:"to"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.From == 0 || got.To == 0 {
+		t.Fatal("/status echoes no window, so an empty recent is indistinguishable from a target that never existed")
+	}
+	per := map[string]int{}
+	for _, p := range got.Recent {
+		per[p.Source]++
+	}
+	if len(per) != sources {
+		t.Fatalf("%d sources survived the trim, want %d — the trim is across sources, not per source", len(per), sources)
+	}
+	for src, n := range per {
+		if n != statusRecentCycles {
+			t.Errorf("source %s kept %d cycles, want %d", src, n, statusRecentCycles)
+		}
+	}
+	// The newest must survive: an operator opens /status during an incident.
+	newest := base.Add(time.Duration(statusRecentCycles+9) * time.Minute).Unix()
+	for _, p := range got.Recent[len(got.Recent)-sources:] {
+		if p.Time.Unix() != newest {
+			t.Fatalf("trim dropped the newest cycles, keeping up to %s", p.Time)
+		}
 	}
 }

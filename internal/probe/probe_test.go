@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -401,6 +402,39 @@ func TestValidateAndBuildAgreeOnPingSchedule(t *testing.T) {
 		_, buildErr := Build(probes, tc.interval, tc.pings)
 		if (validateErr == nil) != (buildErr == nil) {
 			t.Errorf("interval=%s pings=%d: Validate err = %v, Build err = %v", tc.interval, tc.pings, validateErr, buildErr)
+		}
+	}
+}
+
+// A link-local target may be configured with either zone form, and net fills a
+// *received* address's Zone from zoneCache.name(sin6_scope_id), which resolves
+// the index to an interface name whenever it can. Zone is part of netip.Addr
+// equality and matchEchoReply now compares the peer against the resolved
+// destination, so an unnormalized numeric zone made every reply mismatch: the
+// target read 100% loss with nothing logged but read timeouts.
+func TestNumericLinkLocalZoneResolvesToTheNameTheKernelReports(t *testing.T) {
+	orig := interfaceNameByIndex
+	interfaceNameByIndex = func(index int) (string, error) {
+		if index == 2 {
+			return "eth0", nil
+		}
+		return "", errors.New("no such interface")
+	}
+	t.Cleanup(func() { interfaceNameByIndex = orig })
+
+	for _, tc := range []struct{ host, want string }{
+		{"fe80::1%2", "eth0"},    // numeric, resolvable
+		{"fe80::1%eth0", "eth0"}, // already a name
+		{"fe80::1%99", "99"},     // zoneCache's own fallback for an unknown index
+		{"fe80::1", ""},          // no zone
+	} {
+		got, err := resolveIPAddr(context.Background(), "ip6", tc.host)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.host, err)
+		}
+		if got.Zone != tc.want {
+			t.Errorf("%s resolved to zone %q, want %q — the send and the reply would carry different zones and never match",
+				tc.host, got.Zone, tc.want)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
@@ -140,6 +141,39 @@ func familyNetwork(base, family string) string {
 	}
 }
 
+// interfaceNameByIndex is the injectable seam over the interface table, so a
+// test can drive normalizeZone without depending on the host's own links.
+var interfaceNameByIndex = func(index int) (string, error) {
+	iface, err := net.InterfaceByIndex(index)
+	if err != nil {
+		return "", err
+	}
+	return iface.Name, nil
+}
+
+// normalizeZone rewrites a numeric zone to the interface name, because that is
+// what the read path will carry: net fills a received address's Zone from
+// zoneCache.name(sin6_scope_id), which resolves the index to a name whenever
+// it can. Zone is part of netip.Addr equality, so a target configured as
+// fe80::1%2 produced a want of zone "2" against replies arriving with zone
+// "eth0" — matchEchoReply discarded every one of them and the target read 100%
+// loss with nothing logged. The fallback is zoneCache's own: an index that
+// resolves to no interface keeps its decimal form.
+func normalizeZone(zone string) string {
+	if zone == "" {
+		return zone
+	}
+	index, err := strconv.Atoi(zone)
+	if err != nil || index <= 0 {
+		return zone
+	}
+	name, err := interfaceNameByIndex(index)
+	if err != nil {
+		return zone
+	}
+	return name
+}
+
 // lookupIPFn is the injectable seam over the resolver so tests can drive a
 // blackholed DNS lookup without one. It takes the network because the
 // resolver queries only the pinned family's record: filtering a dual lookup
@@ -161,7 +195,7 @@ func resolveIPAddr(ctx context.Context, network, host string) (*net.IPAddr, erro
 		if !matchesFamily(network, ip) {
 			return nil, noSuitable
 		}
-		return &net.IPAddr{IP: ip, Zone: a.Zone()}, nil
+		return &net.IPAddr{IP: ip, Zone: normalizeZone(a.Zone())}, nil
 	}
 	ips, err := lookupIPFn(ctx, network, host)
 	if err != nil {
