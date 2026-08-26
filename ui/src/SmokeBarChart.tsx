@@ -609,14 +609,17 @@ function buildSources(points: CyclePoint[]): Built {
     pts.forEach((p, i) => {
       const idx = xIdx.get(ts[i]);
       if (idx == null) return;
-      cols[0][idx] = p.Min;
+      cols[7][idx] = p.LossPct;
+      // 100%-loss cycles have no valid RTT; leave the latency columns null so
+      // hover reads "—" rather than presenting an outage as 0.0 ms latency.
+      if (p.LossPct >= 100) return;
+      cols[0][idx] = effectiveMin(p);
       cols[1][idx] = p.P5;
       cols[2][idx] = p.P25;
       cols[3][idx] = p.Median;
       cols[4][idx] = p.P75;
       cols[5][idx] = p.P95;
       cols[6][idx] = p.Max;
-      cols[7][idx] = p.LossPct;
     });
     cols.forEach((c) => data.push(c));
 
