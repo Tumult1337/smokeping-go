@@ -22,11 +22,11 @@ type Cycle struct {
 	// the slave name for cycles pushed in from a slave. Stored as the
 	// ClickHouse `source` column (LowCardinality) so the writer can fan
 	// out per-source and queries can filter on it.
-	Source      string
-	RTTs        []time.Duration
-	Sent        int
-	LossCount   int
-	Summary     stats.Summary
+	Source    string
+	RTTs      []time.Duration
+	Sent      int
+	LossCount int
+	Summary   stats.Summary
 	// Hops carries per-(ttl, responder) trace rows for icmp and mtr cycles;
 	// nil for every other probe type.
 	Hops []probe.Hop

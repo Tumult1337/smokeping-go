@@ -118,3 +118,13 @@ with:
 > UInt32-second DateTime). A negative value used to pass straight into the
 > `MODIFY TTL` Bootstrap re-emits on every start, a TTL in the past that
 > expires the whole table.
+
+## Path discovery bullet, addition (A6)
+
+Add (near the matchDatagram sentence about comparing as unmapped netip.Addr):
+
+> Inside the walk the responder's identity stays a `netip.Addr` end to end:
+> `ttlReply.addr` and the aggregation rows hold the parsed address from
+> `matchDatagram`, and the textual `Hop.IP` is produced once at row emission —
+> the wire/storage form is unchanged, and `""` still means "nothing answered
+> at this TTL".

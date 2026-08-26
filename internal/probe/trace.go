@@ -144,9 +144,10 @@ const (
 	replyEcho
 )
 
-// ttlReply is one TTL probe's outcome; addr is empty unless something matched.
+// ttlReply is one TTL probe's outcome; addr is the invalid zero Addr unless
+// something matched, parsed once at the read boundary (matchDatagram).
 type ttlReply struct {
-	addr    string
+	addr    netip.Addr
 	rtt     time.Duration
 	kind    replyKind
 	unreach string
@@ -173,7 +174,7 @@ type roundStats struct {
 // guaranteed to be the deepest.
 func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, step stepFunc) ([]Hop, roundStats) {
 	type respondent struct {
-		addr        string
+		addr        netip.Addr
 		targetReply bool
 		unreach     string
 		rtts        []time.Duration
@@ -196,7 +197,7 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 			}
 			r := step(ctx, round, ttl)
 			stats.attempted = round + 1
-			if r.err != nil || r.addr == "" {
+			if r.err != nil || !r.addr.IsValid() {
 				agg[ttl].losses++
 			} else {
 				// An echo and an error from the same address are two rows: the
@@ -245,7 +246,7 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 		for i, row := range a.rows {
 			h := Hop{
 				Index:       ttl,
-				IP:          row.addr,
+				IP:          row.addr.String(),
 				TargetReply: row.targetReply,
 				Unreach:     row.unreach,
 				RTTs:        row.rtts,
@@ -423,7 +424,7 @@ func matchDatagram(datagram []byte, proto int, peer net.Addr, isV6 bool, id, seq
 	if !matched {
 		return ttlReply{}, false
 	}
-	return ttlReply{addr: peerIP.String(), kind: kind, unreach: unreach}, true
+	return ttlReply{addr: peerIP, kind: kind, unreach: unreach}, true
 }
 
 // embeddedIDSeq extracts the ICMP id and sequence of the original echo request
