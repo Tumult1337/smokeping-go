@@ -168,7 +168,13 @@ func (r *Registry) Touch(name, version, addr, advertise string) error {
 	prev := info.Advertise
 	next := r.resolveAdvertise(info, advertise, addr)
 	if next != prev {
-		if prev.IsValid() {
+		// Release only an address this slave still owns, the identity match
+		// Sweep already makes. Defence in depth rather than load-bearing:
+		// the release above clears the excluded owner's Advertise, so prev
+		// is invalid by the time it heartbeats — but an unconditional delete
+		// here is one edit away from handing a live claimant's address back
+		// to nobody, and only this guard would catch it.
+		if prev.IsValid() && r.byAddr[prev] == name {
 			delete(r.byAddr, prev)
 		}
 		if next.IsValid() {
@@ -229,9 +235,14 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 	// An owner the live pins now exclude no longer holds this address, and
 	// byAddr only ever updates when that owner heartbeats — so a reload that
 	// swaps two slaves' pins locked the new rightful owner out until the old
-	// one was swept, up to a day later.
+	// one was swept, up to a day later. Clear that owner's Advertise with the
+	// map entry: byAddr[X] == name and slaves[name].Advertise == X are one
+	// fact, and releasing half of it leaves the stale half to be believed.
 	if owner, taken := r.byAddr[addr]; taken && owner != name && !r.pinAdmits(owner, addr) {
 		delete(r.byAddr, addr)
+		if prev := r.slaves[owner]; prev != nil && prev.Advertise == addr {
+			prev.Advertise = netip.Addr{}
+		}
 	}
 	if owner, taken := r.byAddr[addr]; taken && owner != name {
 		if key := advLogDup + ":" + advertise; info.AdvertiseLogState != key {

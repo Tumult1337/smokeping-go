@@ -358,6 +358,52 @@ func TestPinsFollowTheLiveConfigNotACachedCopy(t *testing.T) {
 	}
 }
 
+// The handover with the old owner still heartbeating, which is the common
+// case: slaves Touch every few seconds, so the silent-owner test below covers
+// the rare one. byAddr[X] == name and slaves[name].Advertise == X are one
+// fact; releasing half of it let the excluded owner's next heartbeat delete
+// the new owner's claim, after which nothing guarded the address and a third
+// slave could hold it too — trading a bounded lockout for a permanent break
+// of the single-claimant invariant byAddr exists for.
+func TestReloadedPinHandoverSurvivesTheOldOwnerHeartbeating(t *testing.T) {
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	pins := map[string]netip.Addr{}
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
+
+	r.Touch("frankfurt-1", "v1", "203.0.113.9:5555", "10.44.0.2")
+	pins = map[string]netip.Addr{
+		"frankfurt-1": netip.MustParseAddr("10.44.0.3"),
+		"tokyo-1":     netip.MustParseAddr("10.44.0.2"),
+	}
+	r.Touch("tokyo-1", "v1", "203.0.113.20:5555", "10.44.0.2")
+
+	// The invariant itself, before anything acts on it: releasing the map
+	// entry without the owner's own field leaves the stale half to be believed.
+	r.mu.RLock()
+	stale := r.slaves["frankfurt-1"].Advertise
+	r.mu.RUnlock()
+	if stale == netip.MustParseAddr("10.44.0.2") {
+		t.Fatal("frankfurt-1 still advertises an address byAddr no longer maps to it")
+	}
+
+	// The excluded owner keeps heartbeating at the address it still advertises.
+	r.Touch("frankfurt-1", "v1", "203.0.113.9:5555", "10.44.0.2")
+
+	// A third slave must still be refused the address tokyo-1 holds.
+	r.Touch("bridge-container", "v1", "203.0.113.77:5555", "10.44.0.2")
+
+	peers := r.Peers()
+	holders := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if p.Addr == netip.MustParseAddr("10.44.0.2") {
+			holders = append(holders, p.Name)
+		}
+	}
+	if len(holders) != 1 || holders[0] != "tokyo-1" {
+		t.Fatalf("10.44.0.2 held by %v, want only tokyo-1 — the single-claimant invariant broke", holders)
+	}
+}
+
 // The same handover with the old owner silent. byAddr only ever updates when
 // a slave heartbeats, so a reload swapping two pins left the address owned by
 // a slave the live pins no longer admit, and the new rightful owner was
