@@ -14,9 +14,11 @@ type PercentileSpec struct {
 }
 
 // PercentileSet is the single source of truth for which percentiles the
-// storage backend tracks, in what order, and under what field name. The
-// writer and reader iterate this list to build the ClickHouse column set
-// and the per-bucket quantilesExactWeighted rollup.
+// storage backend tracks, in what order, and under what field name. Cluster
+// ingest walks it to bound every percentile, and
+// clickhouse.TestCyclePercentileColumnsFollowPercentileSet fails whichever of
+// the four hand-named column lists (writer INSERT, raw and bucketed SELECTs,
+// storage.CyclePoint) misses or outgrows an entry.
 //
 // P50 is intentionally absent — use Summary.Median.
 var PercentileSet = []PercentileSpec{

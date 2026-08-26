@@ -84,6 +84,21 @@ nothing:
   same literal), so the build cache legitimately hit — which is itself proof no
   test could ever catch it.
 
+- **A new ordering or dedup guard silently neuters existing tests.** Every
+  evaluator test that applies more than one cycle per source must stamp each
+  with a distinct timestamp (`cycleAt` + `clk.advance`): the duplicate guard
+  skips a reused stamp *before* any state mutation, so the assertion after it
+  becomes unreachable. This killed two tests at once
+  (`TestQuorumKeepsPerSourceSustainedIndependent`, whose merged-counter bug it
+  was named for became unprovable, and `TestRefreshDropsAggOnQuorumToggle`'s
+  final assertion). When you add a guard that skips input, grep the suite for
+  fixtures that reuse the field it keys on and re-run them mutated.
+- **A seam that cannot express the bug hides it forever.** `resolveIPAddr`'s
+  test seam took no `network` argument, so no fake could distinguish a
+  family-scoped DNS query from a dual lookup filtered afterwards — the
+  divergence was invisible to every test that could be written against it.
+  When a fix turns on an argument, check the seam carries that argument.
+
 Mutation predictions written in a plan are guesses. Run every row. A row that
 comes back other than predicted is a finding about the plan; report it, never
 rewrite it to match.

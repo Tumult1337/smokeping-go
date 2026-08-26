@@ -101,23 +101,36 @@ Key points a reader can't derive from a single file:
   expression means deleting that exemption in the same edit.
 
   **Write buffers.** Each table's channel is sized by
-  `writerChanCap(table, pings)` (base 4096 slots × a rows-per-cycle factor,
-  clamped to [4096, 131072]) so all four absorb a comparable ClickHouse
-  stall at ordinary rates — a flat 4096 gave the deployed 122-target/20s
-  install 11 minutes of cycle buffer against 96 seconds of hop buffer, and
-  hops died first. The hop factor is clamp-limited by design: 4096×32 is
-  the ceiling exactly, so a larger factor is inert and worst-case hop cycles
-  (90 rows for icmp's 3×30 walk, 300 for MTR's 10×30) still overflow first
-  — drop-oldest and the counters are the bound there, not the buffer. Those
-  per-table counters are served as `writer_drops` on `/api/v1/health`.
+  `writerChanCap(table, pings)` (base 4096 slots × a rows-per-cycle
+  factor, clamped to [4096, 131072]) so all four absorb a comparable
+  ClickHouse stall at ordinary rates — a flat 4096 gave the deployed
+  122-target/20s install 11 minutes of cycle buffer against 96 seconds of
+  hop buffer, and hops died first. The hop factor is clamp-limited by
+  design: 4096×32 is the ceiling exactly, so a larger factor is inert and
+  worst-case hop cycles (90 rows for icmp's 3×30 walk, 300 for MTR's
+  10×30) still overflow first — drop-oldest and the counters are the bound
+  there, not the buffer. Those per-table counters are served as
+  `writer_drops` on `/api/v1/health`. `Writer.offer` is genuinely
+  drop-oldest, evicting one row before enqueuing rather than discarding
+  the incoming one: a full channel means ClickHouse is stalling, and
+  dropping the newest grows a hole up to the present for as long as the
+  stall lasts — the window an operator is actually looking at.
+  `flushRetainFactor` is the same choice one layer up, retaining a failed
+  batch for the next tick and capping the backlog at `maxRows × 4` with
+  the oldest overflow dropped and counted; `slave.PushSink`'s ring is the
+  third.
 
   **Window caps.** The binary ships no auth, so on every endpoint that
   returns unbucketed rows the window cap is the only bound on an
   anonymous request's scan: `/rtts` 24h (`api.maxRTTWindow`), `/http`
   and `/hops/timeline` 7d (plus one probe origin per request — see the
-  hop row caps below), and `?step=raw` on `/cycles` bounded by
-  `storage.PickCycleStep(span) == 0` rather than a second copy of the
-  2h threshold, so widening the raw tier widens the override with it.
+  hop row caps below), and every `?step=` override on `/cycles` bounded by the ladder's own
+  tier for the window — `raw` by `storage.PickCycleStep(span) == 0`,
+  `1h`/`1d` by `derived <= override` — rather than second copies of the
+  thresholds, so widening a tier widens the override with it, and an
+  override finer than the tier is a 400 rather than served. `/status`
+  scans only `api.statusRecentCycles` (50) × the live interval, the
+  count it already trims to, instead of an unbucketed 24h.
   `/rtts` is tighter than its 7d siblings because `probe_rtt` stores a
   row per ping, not per cycle. Measured against a 122-target, 5-source
   install at a 15s interval: `/rtts?from=-30d` returned 206 MB and
@@ -160,7 +173,15 @@ Key points a reader can't derive from a single file:
 
 - **Retention:** per-table TTL set at bootstrap from
   `storage.clickhouse.retention.{cycle,rtt,hop,http}_days` (defaults
-  365/14/90/14). `Bootstrap` re-emits `ALTER TABLE … MODIFY TTL` on every
+  365/14/90/14; 0 defaults, anything else must be inside `[1,
+  config.MaxRetentionDays]`). A negative value used to pass straight
+  into the `MODIFY TTL` Bootstrap re-emits on every start — a TTL
+  already in the past, which expires the whole table. `MaxRetentionDays`
+  is a sanity bound and **not** a derived maximum: the TTL is evaluated
+  against each row's own timestamp, so what is representable depends on
+  when the row was written and no compile-time constant knows it.
+  `clickhouse.ttlWithinDateTime` holds the real check, against a clock
+  and `toDateTime`'s 2106 ceiling. `Bootstrap` re-emits `ALTER TABLE … MODIFY TTL` on every
   start so a config change takes effect on the next process restart. The
   writer/reader bind the rest of the config once at startup.
 
@@ -191,8 +212,13 @@ Key points a reader can't derive from a single file:
 - **ICMP sockets:** `probe.listen` prefers unprivileged UDP ping sockets
   (`udp4`/`udp6`) before falling back to raw ICMP. When using UDP sockets,
   the kernel rewrites the ICMP ID to the source port, so `sendOne` matches
-  replies by **sequence number only**, not ID. Don't "fix" this — it's
-  correct for both socket types.
+  replies by **sequence number only**, not ID — don't "fix" that, it is
+  correct for both socket types — plus the same
+  peer-is-the-resolved-destination check `matchDatagram` applies on the
+  walk (`matchEchoReply`, the echo read path's trust boundary). Type, id
+  and seq are all visible to any router on the path, so one could answer
+  from its own address and a fully-down target read 0% loss with
+  plausible RTTs.
 
 - **Path discovery (MTR + opportunistic trace):** `probe.traceHops` is the
   shared TTL-walk helper in `internal/probe/trace.go`; the round loop itself
@@ -221,8 +247,15 @@ Key points a reader can't derive from a single file:
   30-hop path at zero loss out of one router. An unreachable never counts a
   round as reached, so MTR still reports full target loss.
 
-  Rows are per `(ttl, responder address)` in first-seen order, so ECMP
-  siblings each carry their own samples; a TTL's losses have no responder to
+  Rows are per `(ttl, responder address, echo-vs-error)` in first-seen
+  order, so ECMP siblings each carry their own samples and a responder
+  that both echoes and rejects — a rate-limiting firewall answering
+  admin-prohibited from the target's own address — yields two rows;
+  mixed onto one, the unreachable's error-generation time rode the
+  `TargetReply` marker into MTR's RTT mirror and became the target's
+  percentiles, with `len(RTTs)` exceeding `Sent−LossCount`. One
+  responder per round per TTL still holds, so `MaxHopRowsPerCycle`'s
+  rounds × TTLs derivation is unchanged; a TTL's losses have no responder to
   blame and fold onto its first-seen row, which keeps single-responder
   numbers identical to the pre-split shape, and a TTL nothing answered emits
   one `IP: ""` row. Rows the target itself answered carry `TargetReply` —
@@ -246,18 +279,23 @@ Key points a reader can't derive from a single file:
   destination.** `matchDatagram` is the read path's whole trust boundary —
   bytes and source address both come off the wire — and it sits apart from
   `sendTTL`'s read loop precisely so hostile input can drive it without a
-  socket. Type, id and seq are all visible to any router on the path, so one
-  could answer from its own address; the round stopped there, the row was
-  marked `TargetReply`, and MTR reported a target that never replied. That
-  marker is persisted and drives `/hops` redaction, so it is a disclosure
-  input, not only a display one. `TimeExceeded` and unreachable are exempt —
-  they legitimately come from routers along the path. Addresses compare as
-  unmapped `netip.Addr` via `peerAddr`, which is what reconciles the socket
-  asymmetry: an unprivileged ping socket reports `*net.UDPAddr` (and the
-  kernel has rewritten the ICMP id), a raw one `*net.IPAddr`. Any other shape
-  resolves to the invalid zero `Addr` and matches nothing — without that,
-  `Addr.String()` would write the literal `"invalid IP"` into `probe_hop` as
-  an error's hop address.
+  socket. Type, id and seq are all visible to any router on the path, so
+  one could answer from its own address; the round stopped there, the row
+  was marked `TargetReply`, and MTR reported a target that never replied.
+  That marker is persisted and drives `/hops` redaction, so it is a
+  disclosure input, not only a display one. `TimeExceeded` and unreachable
+  are exempt — they legitimately come from routers along the path.
+  Addresses compare as unmapped `netip.Addr` via `peerAddr`, which is what
+  reconciles the socket asymmetry: an unprivileged ping socket reports
+  `*net.UDPAddr` (and the kernel has rewritten the ICMP id), a raw one
+  `*net.IPAddr`. Any other shape resolves to the invalid zero `Addr` and
+  matches nothing — without that, `Addr.String()` would write the literal
+  `"invalid IP"` into `probe_hop` as an error's hop address. The
+  responder's identity stays a `netip.Addr` end to end inside the walk:
+  `ttlReply.addr` and the aggregation rows hold the parsed address, and
+  the textual `Hop.IP` is produced once at row emission, so the wire and
+  storage form are unchanged and `""` still means nothing answered at that
+  TTL.
 
 - **ICMP cycle budget:** the echo batch and the TTL walk run concurrently
   and share one context whose deadline is `cfg.Interval`. Each echo's
@@ -277,8 +315,24 @@ Key points a reader can't derive from a single file:
   the master serves it to every slave and the whole fleet fails at its next
   restart while the operator sees green. `probe.Build` calls the same function
   as defence in depth — a slave builds from a master-supplied config it never
-  validated. Both gate on the config defining an icmp probe; neither binds a
-  config with none. `pings` is bounded twice before that multiplication: at
+  validated. `config.Validate` gates on the config defining an icmp probe *or* on a
+  cluster master (a cluster block with a token), because the health mesh
+  injects `slavehealth.ProbeDef`'s icmp probe at scheduler-build time —
+  gating on the stored map alone let a validated master config become
+  unbuildable fleet-wide at the first slave registration, and a slave
+  booting into a >=2-peer mesh exit non-zero on every restart.
+  `probe.Build` gates on the map it actually receives, which on both
+  master and slave is the post-injection one. A standalone config with
+  no icmp probe is still unbound by the budget, but
+  `config.ValidatePingCount` bounds `pings` for **every** schedule at
+  `config.MaxPingsPerCycle`: the scheduler stamps `Sent = cfg.Pings` on
+  any probe error, so an unbounded count produced cycles cluster ingest
+  refuses (`sent` past its UInt16 column) and each refusal dropped the
+  slave's whole drained batch. That ceiling is the icmp sequence space
+  even for a config defining no icmp probe, which over-restricts a
+  standalone non-icmp schedule by 92 pings — accepted, because
+  conditioning it is what made the gate above wrong, and no real
+  schedule sends 65,444 pings a cycle. `pings` is bounded twice before that multiplication: at
   `interval/200ms + 1`, which the product would otherwise overflow into a
   passing budget, and at `config.MaxPingsPerCycle`, the echo sequence space
   left above the TTL walk's window, which a long enough interval would
@@ -300,14 +354,26 @@ Key points a reader can't derive from a single file:
   is the only signal. The per-ping budget floor does not close that gap:
   `HasICMPProbe` gates it on a config defining an `icmp` probe, so an
   MTR-only schedule is never checked against it, and MTR's `Sent` is the
-  rounds that actually sent — zero when `traceHops`' resolve, which takes
-  no context, spends the cycle deadline before the first probe goes out.
+  rounds that actually sent — zero when `traceHops`' resolve spends the
+  cycle deadline before the first probe goes out. Resolution goes
+  through `probe.resolveIPAddr`, which honors the context, so it now
+  fails *at* the deadline instead of overrunning it: the trace goroutine
+  is joined by an unconditional defer on every `ICMP.Probe` return path,
+  so a resolver call that ignored a cancelled cycle blocked shutdown
+  (`Scheduler.Run`'s `wg.Wait`, `RunLifecycle`'s `<-schedDone`) and
+  every SIGHUP rebuild behind it.
 
 - **Address-family pinning:** `Target.Family` is `""` / `"v4"` / `"v6"` and
   every probe routes it through the shared `familyNetwork(base, family)`
   helper in `internal/probe/probe.go`. Interpretation is per-probe and
-  intentional, not accidental: ICMP/MTR via `net.ResolveIPAddr("ip"|"ip4"|"ip6")`
-  (shared `traceHops` takes family as a parameter); TCP via dialer network
+  intentional, not accidental: ICMP/MTR via `probe.resolveIPAddr("ip"|"ip4"|"ip6")` —
+  `net.ResolveIPAddr`'s selection with the context honored, shared
+  `traceHops` taking family as a parameter. It queries **only the pinned
+  family's record**, as the real resolver does: filtering a dual lookup
+  instead made an unrelated blackholed AAAA path fail every v4-pinned
+  cycle, reading as total loss on a target that was answering. A literal
+  never reaches the resolver at all, which is what carries a link-local
+  zone through to the socket; TCP via dialer network
   `tcp`/`tcp4`/`tcp6`; HTTP by cloning `http.DefaultTransport` with a
   family-pinned `DialContext` (`HTTP.clientFor` — connection pool is
   per-family, acceptable because `maxHTTPRequests==2`); DNS by pinning the
@@ -349,8 +415,16 @@ Key points a reader can't derive from a single file:
   *nearest* the stamp, so rounding one to a whole second can leave the
   neighbouring bucket's cycle nearer than the cycle the column was drawn for —
   at a sub-2s cadence the click then opens a cycle outside the bucket clicked.
-  RFC3339 is the only `at` form that survives the trip, since the unix form
-  parses as an integer.
+  RFC3339 is the only `at` form that survives the trip, since the unix
+  form parses as an integer. That precision is why the pinned read's
+  cache key is milliseconds — and why only the *relative* form is
+  coalesced: `?at=-1h` names no instant, so resolving it against a fresh
+  clock minted a key per request against a 16-entry LRU shared with the
+  timeline's entries. `parseTimeParam` reports which branch parsed and
+  `getHops` applies `storage.CoalesceHopsAt` to that one alone, rather
+  than re-deriving the grammar at the call site, where the
+  `-1`-versus-`-1h` distinction is exactly what a second reading gets
+  wrong.
 
 - **Cluster mode (master/slave):** `--slave` flips the binary into a
   runner that registers with a master, pulls the target list over HTTP,
@@ -382,8 +456,12 @@ Key points a reader can't derive from a single file:
   which would otherwise create the entry it is being asked about. Every
   minted label costs a permanent ClickHouse `LowCardinality` dictionary
   entry, a `QueryLatestHops` row forever, and a source on the
-  unauthenticated API naming no real node. `Registry.Touch` returns
-  whether it accepted, and refuses *new* names past
+  unauthenticated API naming no real node. `Registry.Touch` returns an error naming why it refused —
+  `errRegistryFull` at the ceiling (503 on `/register`, retryable once
+  `Sweep` frees a name) and `errSlaveFieldTooLong` for a version or
+  advertise past `maxSlaveFieldLen` (400: the request's own bytes can
+  never succeed), so an operator is no longer told "slave registry full"
+  for an oversized advertise. It refuses *new* names past
   `master.maxRegisteredSlaves` (512, per master process, entries leaving
   only via the hourly 24h `Sweep`) — the registry is the list of legal
   labels, so its size is the cardinality bound. Refusing at the ceiling
@@ -496,10 +574,10 @@ Key points a reader can't derive from a single file:
   `maxInterfaceNameLen` (15 — `IFNAMSIZ`−1 on Linux, macOS and the BSDs, the
   only platforms this binary ships for, against 10 digits for an `int32`
   index), the same headroom `MaxHopsPerCycle` takes over its own producer.
-  It is not wider **because `hop_addr`'s width is what turns
-  `clickhouse.maxHopRows` — a bound derived in rows — into a byte ceiling on
-  an unauthenticated `/hops`**: at 30 the worst case is 485,280 × 76 B ≈
-  36.9 MB, where a zone of 256 would have made it ≈146 MB. The character
+  It is not wider **because `hop_addr`'s width is the other half of
+  `clickhouse.maxHopRows`' byte ceiling on an unauthenticated `/hops`**:
+  at 30 the worst case is 485,280 × 76 B ≈ 36.9 MB, where a zone of 256
+  would have made it ≈146 MB. The character
   class refuses ASCII control bytes and `/` for what those bytes do
   downstream, **not** as a survey of what a kernel accepts: `%` is permitted,
   because refusing a character some platform can name an interface with costs
@@ -528,28 +606,42 @@ Key points a reader can't derive from a single file:
 
   `config.MaxFutureSkew` (5m) and `config.MaxCycleAge` (7d) live in
   `config`, not `cluster`, because the reader needs the same window: a
-  future-dated row pins itself as its source's newest in
-  `QueryLatestHops` for as long as the lie lasts *and* outlives
-  `probe_hop`'s TTL, which derives from the row timestamp, so only a
-  manual ClickHouse delete clears it. Ingest stops new ones;
-  `QueryLatestHops`' CTE carries `timestamp <= now() + MaxFutureSkew` so
-  rows already in the table stop being served. `MaxCycleAge` is 7d
-  because `PushSink` is a 600-cycle drop-oldest ring — even a multi-day
-  outage delivers cycles far younger — while a row past the shortest
-  default retention (14d) is written already expired.
+  future-dated row pins itself as its source's newest in `QueryLatestHops`
+  for as long as the lie lasts *and* outlives `probe_hop`'s TTL, which
+  derives from the row timestamp, so only a manual ClickHouse delete
+  clears it. Ingest stops new ones; both pinned reads' CTEs carry
+  `timestamp <= now() + MaxFutureSkew` so rows already in the table stop
+  being served — `QueryHopsAt` needed it as much as `QueryLatestHops`,
+  since `storage.ValidQueryTime` admits an `at` far enough ahead to reach
+  them. `MaxCycleAge` is 7d because `PushSink` is a 600-cycle drop-oldest
+  ring — even a multi-day outage delivers cycles far younger — while a row
+  past the shortest default retention (14d) is written already expired.
 
-  **Every hop read carries a row cap, and each cap is a product of real
-  limits rather than a number sized against a typical read** — twice now
-  a cap picked that way sat under output the probe produces by itself.
+  **Every hop read carries a row cap, and each is derived from real
+  limits rather than sized against a typical read** — twice now a cap
+  picked that way sat under output the probe produces by itself, and
+  once a cap re-derived from the wrong limit was cut below reads that
+  already worked. Where no product bounds the read, the cap says so and
+  is guarded as a byte ceiling instead.
   Each read buffers its whole result into a `[]storage.HopPoint` for an
   unauthenticated GET, so the ceiling is what stands between one GET and
   the process's memory.
 
   `clickhouse.maxHopRows` (485,280) covers the two pinned reads,
-  `QueryLatestHops` and `QueryHopsAt`. They return one cycle per source,
-  and cluster ingest refuses a cycle carrying more than
-  `MaxHopsPerCycle` (600) hop rows, so the cap clears 808 sources —
-  above the 512 live names `maxRegisteredSlaves` admits at once.
+  `QueryLatestHops` and `QueryHopsAt`. It is the one cap here that is a
+  **memory ceiling rather than a product of producer limits**, and
+  deliberately so: both reads group by `source` over `probe_hop` itself,
+  so the group count is every label the table still holds within its
+  TTL, which operator churn — renames, re-provisioned nodes, restarts —
+  raises past the live names `maxRegisteredSlaves` admits at once.
+  Deriving it from the registry encoded a bound the query does not have
+  and cut the cap below reads it used to serve.
+  `TestMaxHopRowsClearsEverySourcesPinnedCycle` guards it from both
+  sides instead: at or above the rows a full live fleet's pinned read
+  holds (`maxHopSources × cluster.MaxHopsPerCycle`), and under the byte
+  ceiling `maxHopRows × cluster.MaxHopAddrLen` names. Extreme churn can
+  still reach it, and reaching it is `ErrHopsTruncated` → 400 with the
+  remedy, never a silent prefix.
 
   `clickhouse.maxHopTimelineRows` (172,288) covers `/hops/timeline`, and
   is `maxHopTimelineBuckets × maxHopTTLs`: the endpoint caps its window
@@ -747,9 +839,15 @@ Key points a reader can't derive from a single file:
   classified before `retryable4xx` is consulted, so listing one there would
   make its own handling unreachable. The cost of a wrong entry is the
   head-of-line block above; the `push failed, requeueing` Warn on every
-  flush is the signal. A 401 on any endpoint cancels the runner's
-  context with cause = `ErrAuth` so the process exits non-zero and the
-  operator must rotate the token. Target-set fingerprint changes (group
+  flush is the signal. A 401 on any endpoint cancels the runner's context with cause =
+  `ErrAuth` so the process exits non-zero and the operator must rotate
+  the token. `ErrRejected` is likewise fatal at boot: `registerForever`
+  and `pullConfigInitial` exit non-zero carrying the master's own
+  message rather than retrying a verdict the master answers identically
+  forever — an invalid `cluster.name` or an oversized advertise
+  otherwise left a slave "running" while probing nothing. Mid-flight,
+  `refreshLoop` still keeps the last-good config on any pull error,
+  matching `Store.Reload`. Target-set fingerprint changes (group
   + name + probe + host + url + interval + pings) trigger a scheduler
   rebuild without tearing down the push loop.
 
@@ -771,8 +869,13 @@ Key points a reader can't derive from a single file:
   container reports `172.17.0.2` and no range check distinguishes that
   from a legitimate private peer address; empty opts a slave out entirely.
   `cluster.slave_addrs` optionally pins a slave to one address — a
-  mismatch is refused a health entry, but unpinned slaves are accepted
-  so the feature works zero-config. `cluster.health_hops` (default true)
+  mismatch is refused a health entry, unpinned slaves are accepted so
+  the feature works zero-config, and the pins follow the config
+  hot-reload contract: the registry reads them through a live closure
+  over `store.Current()` (`Registry.SetPinsFn`), re-checked both at
+  `Touch` time and in `Peers()`, so a SIGHUP-edited pin drops a
+  mismatched peer on the next scheduler signal without waiting for that
+  slave's next heartbeat. `cluster.health_hops` (default true)
   drops traceroute-hop collection for health targets at the probe, for
   meshes where N slaves would otherwise write N² hop streams (the master
   probes all N, each slave probes the other N−1).
@@ -784,6 +887,12 @@ Key points a reader can't derive from a single file:
   alert evaluator scrubs `Host`/`URL`/`Family`/`Cycle.Hops` off every
   Event for a health target before dispatch, because action templates
   render over the raw `Event` and would otherwise publish the address.
+  Exec failures log only the action name and a fixed `execFailureCategory`
+  (timeout / exit code / start failed), matching the webhook and discord
+  `httpFailureCategory` siblings: `a.Command` is env-expanded from the raw
+  config bytes and can embed a resolved secret, `exec.Error` quotes
+  argv[0], and the command's stdout+stderr is unbounded operator-script
+  output.
 
   The master's own scheduler builds its probe registry from
   `master.LocalTargets`' returned config, not from `cfg.Probes` — the
@@ -850,9 +959,19 @@ Key points a reader can't derive from a single file:
 - **Alert quorum:** `alerts.<name>.quorum` accepts `"majority"`
   (strictly more than half the live sources) or a positive integer
   (absolute minimum), gating dispatch only — per-source `sustained`
-  counters stay independent. Sources stale beyond 3× the probe interval
-  are pruned from the live count so a dead slave can't suppress a real
-  alert.
+  counters stay independent. Sources stale beyond the liveness window — `livenessWindow`, which is
+  `alertFreshness` = max(3× interval, `config.MaxFutureSkew`) — are
+  pruned from the live count so a dead slave can't suppress a real
+  alert. It is the freshness window rather than a bare 3× interval
+  because cycles arrive in pushed batches on the slave's own
+  `cluster.push_every` cadence, which config does not bound: any cadence
+  whose cycles the freshness gate still evaluates must also keep its
+  source live, or a bursty-but-healthy slave is pruned between pushes
+  and a `"majority"` quorum collapses to whichever source delivers
+  continuously, where `Threshold(1) == 1` fires on one. A cadence past
+  the window is already losing cycles to the freshness gate and is
+  warned about as `alert.source_excluded`. The quorum warm-up window
+  stays 3× interval.
 
   **Every clock the evaluator keys on is the master's receive clock**
   (`Evaluator.nowFn`, injected, `time.Now` in production; read once per
@@ -911,8 +1030,23 @@ Key points a reader can't derive from a single file:
   incremented `consecHits` twice and fired a `sustained: 2` alert off one bad
   cycle, and an older healthy batch delivered late cleared a newer firing
   state. Skipping before `lastSeen` is what makes it fail closed — a source
-  that only replays ages out of the quorum denominator rather than voting
-  healthy from its ring. The cost is that a producer whose clock steps
+  that only replays ages out of the quorum denominator rather than
+  voting healthy from its ring. `tally`'s staleness prune drops only
+  quorum participation — `state` and `consecHits` reset to what a
+  recreated entry would hold — never the replay identity: deleting the
+  whole `alertState` recreated it with `seenCycle` false, which admits
+  anything, so a lost-ack redelivery of a pruned source's cycle was
+  applied a second time whenever its stamp was still alert-fresh,
+  resolving a live alert or refiring a sustained one off replayed data.
+  The identity is deleted only once `now − lastCycle` exceeds
+  `alertFreshness`, past which every stamp it holds is refused by the
+  freshness gate upstream and retention buys nothing. A *time-based*
+  global sweep was tried and reverted: retention is load-bearing,
+  because a silent source's `StateFiring` is what dispatches its
+  eventual resolve. `pruneDepartedTargets` sweeps on `Refresh` instead,
+  dropping only a target or alert the reloaded config no longer names —
+  those can produce no further cycle — with the health group exempt
+  because it lives outside the stored config. The cost is that a producer whose clock steps
   backwards contributes nothing until its clock passes the newest timestamp
   accepted from it, which is why that skip is warned about rather than counted
   silently.
@@ -964,11 +1098,31 @@ Key points a reader can't derive from a single file:
   and an accepted forward-dated one, for as long as those stamps are
   themselves still ahead — not merely one landing on the same nanosecond.
 
-  A quorum alert also has a warm-up: it won't dispatch FIRING
-  until either 2 distinct sources have reported for that target+alert or
-  the 3×-interval window has elapsed, so a master restart doesn't page
-  and immediately resolve on partial data. Webhook/log templates get
-  `{{.Firing}}` and `{{.Live}}` (both 0 for non-quorum alerts).
+  A quorum alert also has a warm-up: it won't dispatch FIRING until either
+  2 distinct sources have reported for that target+alert or the
+  3×-interval window has elapsed, so a master restart doesn't page and
+  immediately resolve on partial data. Warm-up state is swept on `Refresh`
+  by the same rule as the aggregate: a quorum alert that never dispatched
+  has a warmup entry and no agg entry, so sweeping only agg's keys leaked
+  entries for alerts that left the config and kept a stale `firstSeen`
+  across a disable/re-enable — the elapsed-window arm then paged on the
+  first partial-data evaluation, the exact flap warm-up exists to prevent.
+  Webhook/log templates get `{{.Firing}}` and `{{.Live}}` (both 0 for
+  non-quorum alerts).
+
+  Dispatch is detached from the caller's context and separately
+  budgeted. The transition is committed before dispatch and the path is
+  change-gated with no renotify, so an expired ingest deadline silently
+  dropped the only FIRING notification an alert would ever send while
+  the state read as delivered — the first payload the endpoint saw was
+  the resolve for a page never sent. But `context.WithoutCancel` drops
+  the deadline along with the cancellation, so `dispatchDetached`
+  re-imposes one derived from the event's own action count: `Dispatch`
+  runs an event's actions in sequence and each bounds itself at
+  `alert.actionTimeout`. Master ingest scopes its detached 30s sink
+  budget per cycle inside `deliver`, not per batch, so a few stalled
+  deliveries cannot starve the up-to-`MaxCyclesPerBatch` cycles behind
+  them.
 
   `Event.FiringSources` names the sources firing at dispatch time
   (sorted; stale and unnamed sources excluded) and is populated on both
