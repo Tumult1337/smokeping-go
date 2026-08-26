@@ -607,25 +607,36 @@ func TestQuorumAbsoluteAboveLiveCount(t *testing.T) {
 }
 
 // Per-source sustained counters must stay independent under quorum: a laggy
-// slave's hit streak must not advance the master's. The previous version of
-// this test alternated lossy/healthy per source, which resets on every
-// healthy cycle — a merged counter would also reset there and the test would
-// pass either way. This sequence never sends a healthy cycle, so a merged
-// counter (lossy, lossy, lossy = 3) and independent per-source counters
-// (master=2, tokyo-1=1) diverge, and only a real bug (merging) fires.
+// slave's hit streak must not advance the master's. This sequence never sends
+// a healthy cycle (which would reset a merged counter too), every cycle
+// carries a distinct timestamp — stamped identically, the third was skipped
+// by the duplicate guard before any state mutation and the test passed
+// against the very bug it names — and the counters are asserted directly,
+// because under quorum a single wrongly-advanced source dispatches nothing.
 func TestQuorumKeepsPerSourceSustainedIndependent(t *testing.T) {
-	ev, disp := newTestEvaluator(t, config.Alert{
+	ev, disp, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 3, Actions: []string{"log"},
 		Quorum: config.Quorum{Majority: true},
 	})
 
 	ctx := context.Background()
-	ev.OnCycle(ctx, lossyCycle("master", 100))  // master: 1
-	ev.OnCycle(ctx, lossyCycle("tokyo-1", 100)) // tokyo-1: 1
-	ev.OnCycle(ctx, lossyCycle("master", 100))  // master: 2 (still short of 3)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100)) // master: 1
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100)) // tokyo-1: 1
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 100)) // master: 2 (still short of 3)
 
 	if got := len(disp.events()); got != 0 {
 		t.Fatalf("got %d events, want 0 (master=2, tokyo-1=1 consecutive hits; merged would be 3)", got)
+	}
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	bySource := ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]
+	if got := bySource["master"].consecHits; got != 2 {
+		t.Fatalf("master consecHits = %d, want 2", got)
+	}
+	if got := bySource["tokyo-1"].consecHits; got != 1 {
+		t.Fatalf("tokyo-1 consecHits = %d, want 1", got)
 	}
 }
 
@@ -767,9 +778,12 @@ func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
 		t.Fatalf("refresh (quorum on): %v", err)
 	}
 
-	// One more healthy cycle to force the aggregate to re-evaluate. Both
-	// sources are already OK, so a correct evaluator dispatches nothing.
-	ev.OnCycle(ctx, healthyCycle("master"))
+	// One more healthy cycle — with a fresh timestamp, or the duplicate guard
+	// skips it before the aggregate ever re-evaluates and the assertion below
+	// is vacuous. Both sources are already OK, so a correct evaluator
+	// dispatches nothing.
+	clk.advance(time.Minute)
+	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
 	if got := disp.events(); len(got) != 0 {
 		t.Fatalf("got %d events, want 0 (no phantom resolve from stale pre-toggle aggregate): %+v", len(got), got)
 	}
