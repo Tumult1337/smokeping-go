@@ -578,31 +578,15 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// cycleLossDTO is one source's target-level loss for the cycle its hop rows
-// came from. Named for the quantity rather than the row so it cannot be read
-// as a hop's own sent/lost.
-type cycleLossDTO struct {
-	Source    string    `json:"Source"`
-	Time      time.Time `json:"Time"`
-	Sent      int64     `json:"Sent"`
-	LossCount int64     `json:"LossCount"`
-	LossPct   float64   `json:"LossPct"`
-}
-
-// cycleCounterDTOs always returns a non-nil slice so the key is an empty array
-// rather than JSON null when no cycle recorded a measurement.
-func cycleCounterDTOs(cycles []storage.CycleCounters) []cycleLossDTO {
-	out := make([]cycleLossDTO, 0, len(cycles))
-	for _, c := range cycles {
-		out = append(out, cycleLossDTO{
-			Source:    c.Source,
-			Time:      c.Time,
-			Sent:      c.Sent,
-			LossCount: c.LossCount,
-			LossPct:   c.LossPct,
-		})
+// cycleCounterDTOs serves storage.CycleCounters as-is (its five fields are
+// exactly the target_loss wire shape) and always returns a non-nil slice so
+// the key is an empty array rather than JSON null when no cycle recorded a
+// measurement.
+func cycleCounterDTOs(cycles []storage.CycleCounters) []storage.CycleCounters {
+	if cycles == nil {
+		return []storage.CycleCounters{}
 	}
-	return out
+	return cycles
 }
 
 // hopTimelineDTO is the wire shape returned by /hops/timeline. Distinct
@@ -629,62 +613,28 @@ type hopTimelineDTO struct {
 	WorstTime time.Time `json:"WorstTime"`
 }
 
-// redactTerminalHops blanks the union of three row sets per (source,
-// timestamp): every TargetReply row, the furthest-index row, and every row
-// sharing an address with either. A group in which neither the marker nor the
-// furthest-index row yields an address has no identifiable terminal, so every
-// address in it is blanked instead.
+// redactTerminalHops blanks, per (source, timestamp) group, the union of:
+//   - every TargetReply row (a per-round walk can put the target's echo below
+//     a deeper all-silent round, where no positional rule finds it),
+//   - the furthest-index row (covers rows written before the marker existed),
+//   - every row sharing an address with either (a TimeExceeded quoting the
+//     target's own address on an unmarked row).
 //
-// For a health target those rows are the slave itself, and it is the one
-// address this whole feature exists to keep out of the API. The marker arm
-// carries the weight because a per-round walk can put the target's echo below
-// a deeper all-silent round, where no positional rule finds it; the positional
-// arm keeps rows written before the marker existed covered exactly as before;
-// the address-mates arm catches a TimeExceeded quoting the target's own
-// address on an unmarked row. Every comparison is against the served rows
-// themselves, never against a configured address, so the Probe/Public split
-// still holds.
+// A group in which no arm yields an address has no identifiable terminal, so
+// every address in it is blanked — that group-wide arm is what makes the
+// set-membership arms fail closed against a token holder crafting a silent
+// terminal. Every comparison is against the served rows themselves, never a
+// configured address, so the Probe/Public split holds, and addresses compare
+// as parsed values (canonHopAddr) so spelling variants cannot split a row
+// from its mate. A blanked row loses Unreach with its address but keeps
+// TargetReply, which discloses nothing the surviving rows do not already
+// carry. Intermediates survive on purpose — /hops feeds the MTR path table;
+// /hops/timeline blanks everything via redactAllHopAddresses instead.
 //
-// The group-wide arm is what makes the other three fail closed. Rows arrive
-// from a slave holding the shared cluster token, which is free to submit a
-// trace whose deepest row is silent and whose only address sits on an
-// unmarked intermediate — under set membership alone that address is the
-// slave's own and is served publicly.
-//
-// Addresses are compared as parsed values, so the equivalent spellings of one
-// address (`::ffff:10.0.0.1` for `10.0.0.1`, `2001:0db8::0001` for
-// `2001:db8::1`, a scoped `fe80::1%eth0`) cannot split a row from its mate.
-// An address the parser rejects keeps its exact text as its identity, which
-// mates it only with a byte-identical twin — the fail-closed reading, since
-// nothing else can be established about it.
-//
-// A blanked row loses Unreach with its address — an unreachable reason that
-// outlives its address describes the slave's transit. TargetReply survives: it
-// is the only thing left naming which row the trace ended at once the address
-// is gone, and it discloses nothing this response does not already carry —
-// intermediates keep their real addresses, and a blanked row that answered
-// keeps its RTTs and sub-100% loss, so the answering ttl is readable from the
-// rows regardless. Target loss is not read from it; that comes from
-// target_loss, which no hop row can reconstruct.
-//
-// On a trace that never reached the slave the furthest hop is an intermediate,
-// so this over-redacts by one row. That is the fail-closed direction.
-//
-// Intermediate hops survive, which is the whole point: /hops feeds the MTR
-// path table, and a path with every address blanked tells an operator nothing.
-// /hops/timeline is the asymmetric case and does not call this — it blanks
-// every address via redactAllHopAddresses, because its bucketed rows make
-// "terminal" ambiguous within a bucket.
-//
-// The maximum is keyed by (source, timestamp), not source alone, even though
-// every current caller — QueryLatestHops and QueryHopsAt, the only two feeding
-// this — pins exactly one timestamp per source, which makes the two keyings
-// identical today. It stays per-timestamp because it is the keying that is
-// correct for *any* row set: over rows spanning multiple traces, path length
-// varies (ECMP, route flaps, added/removed hops), and a source-wide maximum
-// would leave the terminal hop of every shorter trace unredacted. A future
-// caller handing this multi-timestamp rows therefore cannot reintroduce that
-// leak.
+// Groups key on UnixMilli, the reader's own timestamp identity (DateTime64(3)
+// stores ms), and stay per (source, timestamp) even though both current
+// callers pin one timestamp per source: over multi-trace rows a source-wide
+// maximum would leave every shorter trace's terminal unredacted.
 func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 	if len(hops) == 0 {
 		return hops
@@ -695,14 +645,14 @@ func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 	}
 	maxIndex := make(map[sourceTime]int64, 4)
 	for _, h := range hops {
-		key := sourceTime{h.Source, h.Time.UnixNano()}
+		key := sourceTime{h.Source, h.Time.UnixMilli()}
 		if cur, ok := maxIndex[key]; !ok || h.Index > cur {
 			maxIndex[key] = h.Index
 		}
 	}
 	targetIPs := make(map[sourceTime]map[hopAddr]bool, len(maxIndex))
 	for _, h := range hops {
-		key := sourceTime{h.Source, h.Time.UnixNano()}
+		key := sourceTime{h.Source, h.Time.UnixMilli()}
 		if (h.TargetReply || h.Index == maxIndex[key]) && h.IP != "" {
 			if targetIPs[key] == nil {
 				targetIPs[key] = make(map[hopAddr]bool, 1)
@@ -713,7 +663,7 @@ func redactTerminalHops(hops []storage.HopPoint) []storage.HopPoint {
 	out := make([]storage.HopPoint, len(hops))
 	copy(out, hops)
 	for i := range out {
-		key := sourceTime{out[i].Source, out[i].Time.UnixNano()}
+		key := sourceTime{out[i].Source, out[i].Time.UnixMilli()}
 		mates := targetIPs[key]
 		if out[i].TargetReply || out[i].Index == maxIndex[key] || len(mates) == 0 ||
 			(out[i].IP != "" && mates[canonHopAddr(out[i].IP)]) {
