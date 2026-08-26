@@ -509,7 +509,12 @@ Key points a reader can't derive from a single file:
   per-slave credential is the only real fix and is out of scope until the
   threat model changes.
   A slave **running this binary or newer** gets 403, re-registers and
-  requeues the batch rather than dropping it; registration is otherwise
+  requeues the batch rather than dropping it — unless that re-registration
+  is itself refused with `ErrRejected`, which exits non-zero like
+  `registerForever` and `pullConfigInitial` do at boot: the master answers
+  those bytes identically forever, so retrying leaves the ring
+  head-of-line blocked while drop-oldest eats the live cycles behind the
+  batch, under a process reporting healthy; registration is otherwise
   attempted only at boot, so under `cluster.pull_every` `"0"` — where no
   `/config` heartbeat exists either — that path is the only thing that
   recovers a slave after a master restart, and
@@ -907,7 +912,13 @@ Key points a reader can't derive from a single file:
   over `store.Current()` (`Registry.SetPinsFn`), re-checked both at
   `Touch` time and in `Peers()`, so a SIGHUP-edited pin drops a
   mismatched peer on the next scheduler signal without waiting for that
-  slave's next heartbeat. `cluster.health_hops` (default true)
+  slave's next heartbeat. A pin also **beats an unpinned claim**: adding
+  one is the documented remedy for a squatter, so `Touch` releases an
+  address whose current owner is unpinned when the heartbeating slave is
+  pinned to it. Releasing only from an owner whose *own* pin excluded the
+  address left an unpinned squatter holding it permanently — it keeps
+  heartbeating, so `Sweep` never frees it, and the SIGHUP the operator
+  was told to apply changed nothing. `cluster.health_hops` (default true)
   drops traceroute-hop collection for health targets at the probe, for
   meshes where N slaves would otherwise write N² hop streams (the master
   probes all N, each slave probes the other N−1).

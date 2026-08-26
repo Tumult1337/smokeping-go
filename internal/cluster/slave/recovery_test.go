@@ -2,6 +2,7 @@ package slave
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -134,5 +135,42 @@ func TestSlaveRecoversFromMasterRestartWithoutConfigPull(t *testing.T) {
 	}
 	if n := m.configs.Load(); n != 0 {
 		t.Fatalf("%d /config requests — recovery must not depend on a heartbeat this config disables", n)
+	}
+}
+
+// A re-registration the master refuses permanently must exit, not loop. The
+// same range made handleRegister answer 400 for every Touch refusal except
+// registry-full, and registerForever and pullConfigInitial both exit on
+// ErrRejected — this third caller of Register did not, so an oversized
+// advertise (or any 4xx an intermediary injects) requeued the batch and
+// retried forever: the ring head-of-line blocks and drop-oldest eats the live
+// cycles behind it while the process reports healthy.
+func TestPermanentlyRejectedReRegisterExitsRatherThanLooping(t *testing.T) {
+	m := newMasterUnderTest(t)
+	r := NewRunner(slog.New(slog.DiscardHandler), &config.Config{
+		Cluster: &config.Cluster{
+			MasterURL: m.srv.URL, Token: "tok", Name: "tokyo-1", PullEvery: "0",
+			Advertise: strings.Repeat("a", 300),
+		},
+	}, "v9")
+
+	ctx := context.Background()
+	r.sink.OnCycle(ctx, scheduler.Cycle{
+		Time:   time.Now(),
+		Target: config.TargetRef{Group: "g", Target: config.Target{Name: "t", Probe: "icmp"}},
+		Sent:   5,
+	})
+
+	// The master has never seen this slave, so /cycles answers 403 and the
+	// re-register that follows is refused for the oversized advertise.
+	err := r.flushOnce(ctx)
+	if err == nil {
+		t.Fatal("flushOnce returned nil on a permanently refused re-registration — the runner keeps going and pushes nothing forever")
+	}
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("flushOnce returned %v, want ErrRejected so the process exits with the master's own message", err)
+	}
+	if got := r.sink.Len(); got != 1 {
+		t.Fatalf("buffered cycles = %d, want the batch requeued (1) — the process is exiting, not discarding data", got)
 	}
 }

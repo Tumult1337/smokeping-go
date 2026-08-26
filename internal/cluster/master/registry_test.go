@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
 // countLogLines returns the number of non-empty lines written to buf — one
@@ -449,4 +451,47 @@ func TestReloadedPinFreesTheAddressAtNextHeartbeat(t *testing.T) {
 	if len(peers) != 1 || peers[0].Name != "tokyo-1" {
 		t.Fatalf("peers = %v, want only tokyo-1 holding the freed address", peers)
 	}
+}
+
+// A pin is the operator naming an address's rightful holder, and adding one is
+// the documented remedy for a squatter. It must therefore beat an *unpinned*
+// claim: releasing only from an owner whose own pin excludes the address left
+// an unpinned squatter holding it permanently — it keeps heartbeating, so
+// Sweep never frees it, and the SIGHUP the operator was told to apply changed
+// nothing.
+func TestANewPinTakesTheAddressFromAnUnpinnedSquatter(t *testing.T) {
+	addr := netip.MustParseAddr("10.44.0.2")
+	pins := map[string]netip.Addr{}
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
+
+	// Both unpinned; the squatter advertises alpha's address and gets there first.
+	if err := r.Touch("squatter", "v1", "10.0.0.9:1", addr.String()); err != nil {
+		t.Fatalf("touch squatter: %v", err)
+	}
+	if err := r.Touch("alpha", "v1", "10.0.0.8:1", addr.String()); err != nil {
+		t.Fatalf("touch alpha: %v", err)
+	}
+	if got := peerNames(r.Peers()); len(got) != 1 || got[0] != "squatter" {
+		t.Fatalf("setup: peers = %v, want only squatter", got)
+	}
+
+	// The operator applies the documented remedy.
+	pins["alpha"] = addr
+	if err := r.Touch("alpha", "v1", "10.0.0.8:1", addr.String()); err != nil {
+		t.Fatalf("touch alpha after pin: %v", err)
+	}
+
+	got := peerNames(r.Peers())
+	if len(got) != 1 || got[0] != "alpha" {
+		t.Fatalf("peers = %v, want only alpha — the pin did not take the address back from the unpinned squatter", got)
+	}
+}
+
+func peerNames(peers []slavehealth.Peer) []string {
+	out := make([]string, 0, len(peers))
+	for _, p := range peers {
+		out = append(out, p.Name)
+	}
+	return out
 }

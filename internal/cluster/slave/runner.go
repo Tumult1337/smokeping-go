@@ -327,7 +327,18 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 	if errors.Is(err, ErrUnregistered) {
 		r.log.Warn("master does not know this slave, re-registering", "count", len(batch))
 		if rerr := r.client.Register(ctx); rerr != nil {
+			// ErrRejected is fatal here for the reason it is in
+			// registerForever: the master answers these bytes identically
+			// forever, so retrying leaves a slave that pushes nothing while
+			// the ring head-of-line blocks and drop-oldest eats the live
+			// cycles behind this batch — silent data loss under a process
+			// reporting healthy. Requeued because the process is exiting.
 			if errors.Is(rerr, ErrAuth) {
+				r.sink.Requeue(batch)
+				return rerr
+			}
+			if errors.Is(rerr, ErrRejected) {
+				r.log.Error("master permanently rejected re-registration, exiting", "err", rerr)
 				r.sink.Requeue(batch)
 				return rerr
 			}

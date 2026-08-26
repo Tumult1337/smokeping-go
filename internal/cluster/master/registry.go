@@ -224,7 +224,9 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 		}
 		return netip.Addr{}
 	}
-	if pin, pinned := r.currentPins()[name]; pinned && pin != addr {
+	pins := r.currentPins()
+	_, isPinned := pins[name]
+	if pin, pinned := pins[name]; pinned && pin != addr {
 		if key := advLogPin + ":" + advertise; info.AdvertiseLogState != key {
 			r.log.Warn("slave advertise address does not match its pin, excluded from health mesh",
 				"slave", name, "claimed", addr, "pinned", pin)
@@ -238,10 +240,22 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 	// one was swept, up to a day later. Clear that owner's Advertise with the
 	// map entry: byAddr[X] == name and slaves[name].Advertise == X are one
 	// fact, and releasing half of it leaves the stale half to be believed.
-	if owner, taken := r.byAddr[addr]; taken && owner != name && !r.pinAdmits(owner, addr) {
-		delete(r.byAddr, addr)
-		if prev := r.slaves[owner]; prev != nil && prev.Advertise == addr {
-			prev.Advertise = netip.Addr{}
+	if owner, taken := r.byAddr[addr]; taken && owner != name {
+		_, ownerPinned := pins[owner]
+		// Two ways an owner loses its claim. Its own pin may now exclude the
+		// address — the swap case. Or this slave may be pinned to it while the
+		// owner is not: a pin is the operator naming the rightful holder, and
+		// it is the documented remedy for a squatter, so it must beat an
+		// unpinned claim. Checking only the first arm left an unpinned
+		// squatter holding an address a newly added pin assigned elsewhere,
+		// permanently — it keeps heartbeating, so Sweep never frees it, and
+		// the SIGHUP the operator was told to apply did nothing.
+		// isPinned implies pins[name] == addr: the mismatch was refused above.
+		if !pinAdmitsIn(pins, owner, addr) || (isPinned && !ownerPinned) {
+			delete(r.byAddr, addr)
+			if prev := r.slaves[owner]; prev != nil && prev.Advertise == addr {
+				prev.Advertise = netip.Addr{}
+			}
 		}
 	}
 	if owner, taken := r.byAddr[addr]; taken && owner != name {
@@ -272,16 +286,18 @@ func (r *Registry) resolveAdvertise(info *SlaveInfo, advertise, remoteAddr strin
 	return addr
 }
 
-// Peers returns the slaves eligible for health probing, sorted by name. The
-// sort is load-bearing: the scheduler fingerprint is derived from this list,
-// and map iteration order would otherwise force a rebuild on every signal.
-// pinAdmits reports whether name may still hold addr under the live pins.
-// An unpinned slave holds whatever it advertised.
-func (r *Registry) pinAdmits(name string, addr netip.Addr) bool {
-	pin, pinned := r.currentPins()[name]
+// pinAdmitsIn reports whether name may still hold addr under the given pins.
+// An unpinned slave holds whatever it advertised. Takes the map rather than
+// reading it, so one Touch resolves the live pins once and every arm decides
+// from the same snapshot.
+func pinAdmitsIn(pins map[string]netip.Addr, name string, addr netip.Addr) bool {
+	pin, pinned := pins[name]
 	return !pinned || pin == addr
 }
 
+// Peers returns the slaves eligible for health probing, sorted by name. The
+// sort is load-bearing: the scheduler fingerprint is derived from this list,
+// and map iteration order would otherwise force a rebuild on every signal.
 func (r *Registry) Peers() []slavehealth.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
