@@ -56,8 +56,11 @@ SELECT
   -- Two parallel arrays so the handler can assemble a fixed-length sparkline
   -- without losing "this slot had no data" — Array(Nullable(Float64)) round-
   -- trips inconsistently through the driver, but two plain arrays work.
-  groupArray(toUInt32(bucket_idx))                           AS spark_idx,
-  groupArray(b_median)                                       AS spark_val
+  -- A fully-lost bucket (b_recv_total 0) measured no latency, so it is
+  -- excluded from both arrays: its zero-valued b_median otherwise arrives as a
+  -- non-nil 0.0 that the row-min normalization draws as the best latency.
+  groupArrayIf(toUInt32(bucket_idx), b_recv_total > 0)       AS spark_idx,
+  groupArrayIf(b_median, b_recv_total > 0)                   AS spark_val
 FROM (
   SELECT
     target_group, target_id, source,
