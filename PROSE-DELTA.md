@@ -46,3 +46,25 @@ in principle name more than 512 historical sources — reaching the cap is
 still reported as ErrHopsTruncated -> 400, never truncated, exactly as
 before (the old literal had the same property at a higher number with no
 derivation at all).
+
+## C11 — `stats.PercentileSet`'s doc claims iteration that does not happen
+
+`internal/stats/percentiles.go` (owned elsewhere; storage only adds the
+guard): the sentence "The writer and reader iterate this list to build the
+ClickHouse column set and the per-bucket quantilesExactWeighted rollup." is
+false — the writer INSERT, raw SELECT, bucketed rollup and DTO are four
+hand-named lists. Replace it with:
+
+> Cluster ingest walks it to bound every percentile, and
+> `clickhouse.TestCyclePercentileColumnsFollowPercentileSet` fails whichever
+> of the four hand-named column lists (writer INSERT, raw and bucketed
+> SELECTs, `storage.CyclePoint`) misses or outgrows an entry.
+
+CLAUDE.md's ingest-bounds sentence ("walked through stats.PercentileSet so a
+new percentile is covered the day it is added") is about `boundSummary` and
+stays true as written.
+
+Known limit of the guard: the raw SELECT's *scan destination list* cannot be
+checked without a live server (the fake conn returns no rows), so a column
+added to the SELECT but not to Scan still only fails against ClickHouse —
+same seam the skill already documents.
