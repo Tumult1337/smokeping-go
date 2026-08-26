@@ -257,12 +257,14 @@ function PathHeatmap({
     // spacing can only be measured when there are at least two rows, and a
     // wide window holding a single bucket has none — sizing that by row count
     // painted one bucket across the whole span, reading as hours of history
-    // that had not been collected yet. Raw-tier responses report step 0, where
-    // the median inter-cycle gap is the right estimate because cycles are not
-    // aligned to a grid. With neither available, draw a thin mark: under-
-    // drawing one cycle is honest, overdrawing invents history.
+    // that had not been collected yet. The current server always buckets, but
+    // a v2.2.0 server omits step_sec entirely (read as 0), so the median
+    // inter-cycle gap is the live fallback that keeps a rolling upgrade
+    // rendering. With neither available, draw a thin mark: under-drawing one
+    // cycle is honest, overdrawing invents history.
     // The same step fixes the offset: bucket timestamps are bucket starts, so
-    // a bucketed column is drawn from t, and only the raw tier is centred.
+    // a bucketed column is drawn from t; only the version-skew fallback is
+    // centred, since its rows sit on no known grid.
     let colW = Math.max(1, MIN_COL_PX);
     if (stepSec > 0) {
       colW = Math.max(1, colWForSec(stepSec));
