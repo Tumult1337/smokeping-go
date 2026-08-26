@@ -506,10 +506,43 @@ func TestEmptyHopReadIssuesNoCounterQuery(t *testing.T) {
 // The counters budget must clear a full live fleet, or a pinned read loses
 // target loss for sources it could have named. It trims rather than refuses,
 // so nothing else reddens when it is cut too low.
+// A pinned read holds one cycle per source, however many hop rows that cycle
+// wrote, so a full live fleet costs maxHopSources keys and must come back
+// untrimmed — target loss silently omitted for a fleet that is merely at its
+// registered size is the endpoint answering an incident with unknown loss.
+// Comparing the two constants proves nothing on its own: maxCycleCounterKeys
+// is defined as a multiple of maxHopSources, so the arithmetic holds by
+// construction whatever cycleKeys does. This drives the real function instead,
+// which is what catches the case the budget exists for — cycleKeys collapsing
+// per row rather than per (source, cycle) puts a single fleet-wide read
+// straight past it.
 func TestCycleCounterBudgetClearsAFullFleet(t *testing.T) {
-	if maxCycleCounterKeys < maxHopSources {
-		t.Fatalf("maxCycleCounterKeys = %d, under the %d live sources a pinned read can name",
-			maxCycleCounterKeys, maxHopSources)
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	ts := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	hops := make([]storage.HopPoint, 0, maxHopSources*cluster.MaxHopsPerCycle)
+	for src := range maxHopSources {
+		for ttl := range cluster.MaxHopsPerCycle {
+			hops = append(hops, storage.HopPoint{
+				Source: strconv.Itoa(src), Time: ts, Index: int64(ttl),
+			})
+		}
+	}
+	if got := len(cycleKeys(hops)); got != maxHopSources {
+		t.Fatalf("a %d-source pinned read yielded %d counter keys, want one per source",
+			maxHopSources, got)
+	}
+
+	conn := &recordConn{}
+	if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops); err != nil {
+		t.Fatalf("a full live fleet's pinned read was refused: %v", err)
+	}
+	// Two bound arguments per key after the target, group and range bounds. A
+	// short count is the trim, which for this fleet size must not happen.
+	if want := 4 + 2*maxHopSources; len(conn.args) != want {
+		t.Fatalf("counters query bound %d args, want %d — a full live fleet was trimmed", len(conn.args), want)
+	}
+	if got := strings.Count(conn.query, "?"); got != len(conn.args) {
+		t.Fatalf("%d placeholders against %d args", got, len(conn.args))
 	}
 }
 
