@@ -84,6 +84,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	if err != nil {
 		return fmt.Errorf("init alert evaluator: %w", err)
 	}
+	defer evaluator.Close()
 	sinks = append(sinks, evaluator)
 
 	// Build the fanout once — slave-inbound cycles flow through the exact same

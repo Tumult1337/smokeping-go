@@ -113,14 +113,16 @@ Key points a reader can't derive from a single file:
   `writer_drops` on `/api/v1/health`, alongside `cache` — the read cache's
   hit/miss counters, which are what distinguish a 503 under real load from
   one a cache minting a key per request caused. `Writer.offer` is
-  genuinely drop-oldest, evicting one row before enqueuing rather than
-  discarding the incoming one: a full channel means ClickHouse is
-  stalling, and dropping the newest grows a hole up to the present for as
-  long as the stall lasts — the window an operator is actually looking at.
-  `flushRetainFactor` is the same choice one layer up, retaining a failed
-  batch for the next tick and capping the backlog at `maxRows × 4` with
-  the oldest overflow dropped and counted; `slave.PushSink`'s ring is the
-  third.
+  drop-oldest, evicting one row before enqueuing rather than discarding
+  the incoming one: a full channel means ClickHouse is stalling, and
+  dropping the newest grows a hole up to the present for as long as the
+  stall lasts — the window an operator is actually looking at. Overflow
+  takes no lock, so two producers overlapping can invert one pair;
+  serialising the fast path costs more than the one row of recency it
+  would buy. `flushRetainFactor` is the same choice one layer up,
+  retaining a failed batch for the next tick and capping the backlog at
+  `maxRows × 4` with the oldest overflow dropped and counted;
+  `slave.PushSink`'s ring is the third.
 
   **Window caps.** The binary ships no auth, so on every endpoint that
   returns unbucketed rows the window cap is the only bound on an
@@ -1112,19 +1114,27 @@ Key points a reader can't derive from a single file:
   Webhook/log templates get `{{.Firing}}` and `{{.Live}}` (both 0 for
   non-quorum alerts).
 
-  Dispatch is detached from the caller's context and separately
-  budgeted. The transition is committed before dispatch and the path is
-  change-gated with no renotify, so an expired ingest deadline silently
-  dropped the only FIRING notification an alert would ever send while
-  the state read as delivered — the first payload the endpoint saw was
-  the resolve for a page never sent. But `context.WithoutCancel` drops
-  the deadline along with the cancellation, so `dispatchDetached`
-  re-imposes one derived from the event's own action count: `Dispatch`
-  runs an event's actions in sequence and each bounds itself at
-  `alert.actionTimeout`. Master ingest scopes its detached 30s sink
-  budget per cycle inside `deliver`, not per batch, so a few stalled
-  deliveries cannot starve the up-to-`MaxCyclesPerBatch` cycles behind
-  them.
+  Dispatch does not run on the caller's goroutine. The transition is
+  committed before it and the path is change-gated with no renotify, so a
+  caller's spent deadline silently dropped the only FIRING notification an
+  alert would ever send while the state read as delivered — the first
+  payload the endpoint saw was the resolve for a page never sent.
+  Detaching the context alone was not enough: `Dispatch` runs an event's
+  actions in sequence under `alert.actionTimeout` each, and ingest
+  delivers a batch's cycles in sequence, so bounding one transition left
+  their sum unbounded and one push against an endpoint that accepts but
+  never answers pinned the ingest handler for hours. `Evaluator` therefore
+  queues committed transitions to a single delivery worker — single so a
+  firing still precedes its own resolve — depth
+  `cluster.MaxCyclesPerBatch`, the same constant `aheadCeiling` derives
+  from and for the same reason: one push is the redelivery unit, so a
+  batch's worth is the most transitions one ingest can queue. Past that
+  depth the notification is dropped, counted on `DispatchDrops` and logged
+  at Error, because blocking the producer is the pinned handler the queue
+  exists to prevent; reaching it means the endpoint has been unresponsive
+  for a batch's worth of pages. `Close` signals the worker and returns
+  without waiting — the worker may be inside a delivery that never
+  answers, which is the wait every other goroutine is being spared.
 
   `Event.FiringSources` names the sources firing at dispatch time
   (sorted; stale and unnamed sources excluded) and is populated on both

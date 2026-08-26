@@ -7,6 +7,7 @@ import (
 	"path"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/cluster"
@@ -183,6 +184,18 @@ type Evaluator struct {
 	agg    map[aggKey]State                  // target+alert → last dispatched aggregate state (quorum alerts only)
 	warmup map[aggKey]*aggWarmup             // target+alert → warm-up bookkeeping (quorum alerts only)
 
+	// pending carries committed transitions to the delivery worker. Dispatch
+	// is deliberately off the caller's goroutine: it ran inline under the
+	// ingest handler, where a batch of MaxCyclesPerBatch transitions against
+	// an unresponsive endpoint pinned that handler for hours — each cycle
+	// bounded, their sum not. One worker, so firing still precedes its own
+	// resolve.
+	pending       chan Event
+	quit          chan struct{}
+	closeOnce     sync.Once
+	inflight      sync.WaitGroup
+	dispatchDrops atomic.Uint64
+
 	// excludedMu guards excluded, which rate-limits the warning below. It is
 	// separate from mu because the freshness check runs before the state lock
 	// is taken.
@@ -222,12 +235,68 @@ func NewEvaluator(log *slog.Logger, store *config.Store, dispatcher Dispatcher) 
 		agg:        make(map[aggKey]State),
 		warmup:     make(map[aggKey]*aggWarmup),
 		excluded:   make(map[exclusionKey]exclusionRecord),
+		pending:    make(chan Event, dispatchQueueDepth),
+		quit:       make(chan struct{}),
 	}
 	if err := e.refreshConditions(); err != nil {
 		return nil, err
 	}
+	go e.deliverLoop()
 	return e, nil
 }
+
+// dispatchQueueDepth bounds notifications awaiting delivery. One push is the
+// redelivery unit, so a batch's worth is the most transitions a single ingest
+// can queue — the same reasoning aheadCeiling takes from the same constant.
+const dispatchQueueDepth = cluster.MaxCyclesPerBatch
+
+// Close signals the delivery worker to stop and returns without waiting for
+// it: the worker may be inside a delivery to an endpoint that never answers,
+// which is the wait this queue exists to keep off every other goroutine. It
+// exits after that delivery's own budget, abandoning whatever is queued.
+func (e *Evaluator) Close() {
+	e.closeOnce.Do(func() {
+		if queued := len(e.pending); queued > 0 {
+			e.log.Error("alert notifications undelivered at shutdown", "queued", queued)
+		}
+		close(e.quit)
+	})
+}
+
+func (e *Evaluator) deliverLoop() {
+	for {
+		select {
+		case ev := <-e.pending:
+			e.deliver(ev)
+		case <-e.quit:
+			// Balance inflight for whatever is still queued so a caller
+			// waiting on it cannot hang past shutdown.
+			for {
+				select {
+				case <-e.pending:
+					e.inflight.Done()
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// deliver bounds one event by its own action count: Dispatch runs an event's
+// actions in sequence and each bounds itself at actionTimeout.
+func (e *Evaluator) deliver(ev Event) {
+	defer e.inflight.Done()
+	budget := time.Duration(max(len(ev.Alert.Actions), 1)) * actionTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	e.dispatcher.Dispatch(ctx, ev)
+}
+
+// flush blocks until every queued notification has been delivered or
+// abandoned by Close. It is the synchronisation point tests take instead of
+// sleeping on the worker.
+func (e *Evaluator) flush() { e.inflight.Wait() }
 
 // Refresh re-parses conditions from the current config — call after a config
 // reload to pick up new or changed alerts.
@@ -368,35 +437,41 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		e.warnExcluded(now, reasonDuplicate, cy, "alerts", len(skipped), "behind", slices.Max(skipped))
 	}
 
-	// Dispatch outside the lock so a slow webhook doesn't stall evaluation
-	// for other targets running concurrently, and detached from the caller's
-	// context: the transition is committed above and dispatch is change-gated
-	// with no renotify, so an ingest deadline spent by earlier cycles in the
-	// batch dropped the only notification the alert would ever send while the
-	// state read as delivered — the first payload the endpoint then saw was
-	// the resolve for a page never sent. Each action still bounds its own
-	// delivery (the dispatcher's 10s HTTP client timeout / exec deadline).
+	// Queue outside the lock and off this goroutine entirely: the transition
+	// is committed above and dispatch is change-gated with no renotify, so a
+	// caller's spent deadline dropped the only notification an alert would
+	// ever send while the state read as delivered — the first payload the
+	// endpoint then saw was the resolve for a page never sent.
 	for _, ev := range toDispatch {
 		e.log.Info("alert state change",
 			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
 			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
 			"firing", ev.Firing, "live", ev.Live)
-		e.dispatchDetached(ctx, ev)
+		e.enqueueDispatch(ev)
 	}
 }
 
-// dispatchDetached delivers one event on a context detached from the caller's
-// but not unbounded: context.WithoutCancel drops the deadline along with the
-// cancellation, which left outbound HTTP and exec work with no ceiling at all
-// and able to outlive shutdown. Dispatch runs an event's actions in sequence
-// and each bounds itself at actionTimeout, so the event's own action count is
-// the budget.
-func (e *Evaluator) dispatchDetached(ctx context.Context, ev Event) {
-	budget := time.Duration(max(len(ev.Alert.Actions), 1)) * actionTimeout
-	dispatchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
-	defer cancel()
-	e.dispatcher.Dispatch(dispatchCtx, scrubHealthAddresses(ev))
+// enqueueDispatch hands one committed transition to the delivery worker. A
+// full queue means the endpoint has been unresponsive for a batch's worth of
+// notifications, so the drop is loud and counted rather than silent — and it
+// is a drop rather than a block, because blocking here is the pinned handler
+// this queue exists to prevent.
+func (e *Evaluator) enqueueDispatch(ev Event) {
+	e.inflight.Add(1)
+	select {
+	case e.pending <- scrubHealthAddresses(ev):
+		return
+	default:
+		e.inflight.Done()
+		e.log.Error("alert notification dropped, delivery queue full",
+			"target", ev.Target.ID(), "alert", ev.AlertName,
+			"prev", ev.Prev, "next", ev.Next,
+			"dropped_total", e.dispatchDrops.Add(1), "depth", dispatchQueueDepth)
+	}
 }
+
+// DispatchDrops reports notifications the delivery queue could not hold.
+func (e *Evaluator) DispatchDrops() uint64 { return e.dispatchDrops.Load() }
 
 // evaluate runs the per-alert state machine under e.mu, held via defer because
 // scheduler.Fanout recovers sink panics — a panic here must not leave the

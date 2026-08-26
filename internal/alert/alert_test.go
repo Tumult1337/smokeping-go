@@ -78,6 +78,7 @@ func TestConditionEval(t *testing.T) {
 type fakeDispatcher struct {
 	mu     sync.Mutex
 	events []Event
+	ev     *Evaluator
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -93,6 +94,9 @@ func (f *fakeDispatcher) Dispatch(_ context.Context, e Event) {
 }
 
 func (f *fakeDispatcher) snapshot() []Event {
+	if f.ev != nil {
+		f.ev.flush()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]Event(nil), f.events...)
@@ -124,6 +128,8 @@ func TestEvaluatorLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	disp.ev = e
+	t.Cleanup(e.Close)
 	clk := pinClock(e, testBase)
 
 	ref := cfg.AllTargets()[0]
@@ -185,6 +191,8 @@ func TestEvaluatorPerSourceState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	disp.ev = e
+	t.Cleanup(e.Close)
 	clk := pinClock(e, testBase)
 
 	ref := cfg.AllTargets()[0]
@@ -735,6 +743,8 @@ func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
+	disp.ev = ev
+	t.Cleanup(ev.Close)
 	clk := pinClock(ev, testBase)
 
 	ctx := context.Background()
@@ -873,6 +883,10 @@ func writeQuorumTestConfig(t *testing.T, path string, quorum bool) {
 type recordingDispatcher struct {
 	mu  sync.Mutex
 	evs []Event
+	// ev is the evaluator whose worker delivers to this dispatcher. Delivery
+	// is asynchronous, so every read of the recorded events syncs on it
+	// first rather than sleeping.
+	ev *Evaluator
 }
 
 func (d *recordingDispatcher) Dispatch(_ context.Context, e Event) {
@@ -882,6 +896,9 @@ func (d *recordingDispatcher) Dispatch(_ context.Context, e Event) {
 }
 
 func (d *recordingDispatcher) events() []Event {
+	if d.ev != nil {
+		d.ev.flush()
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	out := make([]Event, len(d.evs))
@@ -890,6 +907,9 @@ func (d *recordingDispatcher) events() []Event {
 }
 
 func (d *recordingDispatcher) reset() {
+	if d.ev != nil {
+		d.ev.flush()
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.evs = nil
@@ -942,6 +962,10 @@ func newTestEvaluatorClock(t *testing.T, a config.Alert) (*Evaluator, *recording
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
+	disp.ev = ev
+	t.Cleanup(ev.Close)
+	disp.ev = ev
+	t.Cleanup(ev.Close)
 	return ev, disp, pinClock(ev, testBase)
 }
 
@@ -988,6 +1012,8 @@ func TestDispatchedHealthEventCarriesNoAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	disp.ev = e
+	t.Cleanup(e.Close)
 	pinClock(e, time.Time{})
 
 	// Exactly what master.LocalTargets hands the scheduler: the synthetic
@@ -1079,6 +1105,8 @@ func TestDispatchedOrdinaryEventKeepsAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	disp.ev = e
+	t.Cleanup(e.Close)
 	pinClock(e, time.Time{})
 
 	ref := cfg.AllTargets()[0]
@@ -1549,6 +1577,8 @@ func TestNoMeasurementCycleDoesNotResetSustained(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	disp.ev = e
+	t.Cleanup(e.Close)
 	ref := cfg.AllTargets()[0]
 	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	pinClock(e, base.Add(2*time.Minute))
@@ -1578,6 +1608,8 @@ func TestNoMeasurementCycleDoesNotResolveFiring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new evaluator: %v", err)
 	}
+	disp.ev = e
+	t.Cleanup(e.Close)
 	ref := cfg.AllTargets()[0]
 	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
 	pinClock(e, base.Add(time.Minute))
@@ -2333,6 +2365,8 @@ func newTestEvaluatorInterval(t *testing.T, interval time.Duration, a config.Ale
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
+	disp.ev = ev
+	t.Cleanup(ev.Close)
 	return ev, disp, pinClock(ev, testBase)
 }
 
@@ -2604,6 +2638,7 @@ type deadlineDispatcher struct {
 	deadline time.Time
 	hadOne   bool
 	seen     bool
+	ev       *Evaluator
 }
 
 func (d *deadlineDispatcher) Dispatch(ctx context.Context, _ Event) {
@@ -2613,10 +2648,84 @@ func (d *deadlineDispatcher) Dispatch(ctx context.Context, _ Event) {
 	d.deadline, d.hadOne = ctx.Deadline()
 }
 
-// Detaching dispatch from the ingest budget must not leave it unbounded:
-// context.WithoutCancel drops the deadline with the cancellation, so outbound
-// HTTP and exec work had no ceiling and could outlive shutdown.
-func TestDetachedDispatchKeepsABudget(t *testing.T) {
+// A batch's cycles are delivered in sequence, so notification delivery must
+// not sit on that goroutine: bounding each transition separately left their
+// sum unbounded, and one push against an endpoint that accepts but never
+// answers pinned the ingest handler for hours.
+func TestBatchOfTransitionsDoesNotBlockOnDelivery(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	hung := dispatcherFunc(func(ctx context.Context, _ Event) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	})
+	cfg := &config.Config{
+		Interval: time.Minute,
+		Pings:    20,
+		Alerts:   map[string]config.Alert{"quorum-test": {Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"}}},
+		Actions:  map[string]config.Action{"log": {Type: "log"}},
+	}
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), config.NewStore("", cfg), hung)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	t.Cleanup(ev.Close)
+	clk := pinClock(ev, testBase)
+
+	// Alternating loss drives one transition per cycle at sustained: 1.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 64 {
+			clk.advance(time.Second)
+			loss := 0.0
+			if i%2 == 0 {
+				loss = 100
+			}
+			ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", loss))
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("delivering a batch of transitions blocked on the notification endpoint")
+	}
+}
+
+type dispatcherFunc func(context.Context, Event)
+
+func (f dispatcherFunc) Dispatch(ctx context.Context, e Event) { f(ctx, e) }
+
+// Past the queue depth a notification is dropped rather than blocking the
+// producer, and the drop is counted rather than silent.
+func TestFullDeliveryQueueDropsLoudlyRatherThanBlocking(t *testing.T) {
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+	})
+	ev.dispatcher = dispatcherFunc(func(context.Context, Event) { <-block })
+
+	// One event reaches the worker and blocks there; the queue then absorbs
+	// dispatchQueueDepth more before the next is refused.
+	for i := range dispatchQueueDepth + 8 {
+		clk.advance(time.Second)
+		loss := 0.0
+		if i%2 == 0 {
+			loss = 100
+		}
+		ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", loss))
+	}
+	if got := ev.DispatchDrops(); got == 0 {
+		t.Fatal("queue past its depth dropped nothing — the producer blocked instead")
+	}
+}
+
+// Taking dispatch off the caller's goroutine must not leave it unbounded:
+// outbound HTTP and exec work with no ceiling can outlive shutdown.
+func TestQueuedDispatchKeepsABudget(t *testing.T) {
 	cfg := &config.Config{
 		Interval: time.Minute,
 		Pings:    20,
@@ -2632,12 +2741,15 @@ func TestDetachedDispatchKeepsABudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
+	d.ev = ev
+	t.Cleanup(ev.Close)
 	clk := pinClock(ev, testBase)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	before := time.Now()
 	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+	ev.flush()
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -2675,11 +2787,13 @@ func TestTransitionStillNotifiesWhenTheIngestContextHasExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
+	t.Cleanup(ev.Close)
 	clk := pinClock(ev, testBase)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
+	ev.flush()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -2760,6 +2874,8 @@ func TestQuorumToggleResetsWarmup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
+	disp.ev = ev
+	t.Cleanup(ev.Close)
 	clk := pinClock(ev, testBase)
 	ctx := context.Background()
 
