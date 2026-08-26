@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
+	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
@@ -318,15 +322,39 @@ func TestPinnedHopReadsBoundFutureRows(t *testing.T) {
 }
 
 // A pinned hop read returns one cycle per source, and cluster ingest refuses a
-// cycle carrying more than 600 hop rows, so the ceiling has to clear that
-// product across every source name the master's registry admits at once.
+// cycle carrying more than cluster.MaxHopsPerCycle hop rows, so the ceiling is
+// that product across every source name the master's registry admits at once —
+// referenced from the source constants, never hand-copied, so mutating either
+// reddens this rather than leaving a literal that silently drifts under them.
 func TestMaxHopRowsClearsEverySourcesPinnedCycle(t *testing.T) {
-	const (
-		rowsPerCycle      = 600 // cluster.MaxHopsPerCycle, twice the producer's own 300
-		registeredSources = 512 // master's maxRegisteredSlaves
-	)
-	if want := rowsPerCycle * registeredSources; maxHopRows < want {
-		t.Fatalf("maxHopRows = %d, under the %d rows a full fleet's pinned read holds", maxHopRows, want)
+	if want := maxHopSources * cluster.MaxHopsPerCycle; maxHopRows != want {
+		t.Fatalf("maxHopRows = %d, want the %d rows a full fleet's pinned read holds", maxHopRows, want)
+	}
+}
+
+// maxHopSources mirrors a constant this package cannot import (master's
+// maxRegisteredSlaves is unexported), so the pin is the same source-parsing
+// guard internal/config/tracebounds_test.go uses for probe's trace bounds.
+func TestMaxHopSourcesMirrorsTheMasterRegistry(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "../../cluster/master/registry.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse master/registry.go: %v", err)
+	}
+	found := -1
+	ast.Inspect(file, func(n ast.Node) bool {
+		if v, ok := n.(*ast.ValueSpec); ok && len(v.Names) == 1 && v.Names[0].Name == "maxRegisteredSlaves" && len(v.Values) == 1 {
+			if lit, ok := v.Values[0].(*ast.BasicLit); ok && lit.Kind == token.INT {
+				found, _ = strconv.Atoi(lit.Value)
+			}
+		}
+		return true
+	})
+	if found < 0 {
+		t.Fatal("could not find maxRegisteredSlaves in master/registry.go — the mirror can no longer be checked")
+	}
+	if found != maxHopSources {
+		t.Errorf("master maxRegisteredSlaves = %d, maxHopSources = %d: update the mirror and maxHopRows follows", found, maxHopSources)
 	}
 }
 

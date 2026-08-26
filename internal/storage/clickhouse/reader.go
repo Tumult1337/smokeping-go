@@ -12,6 +12,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
@@ -318,11 +319,16 @@ ORDER BY timestamp, seq`
 	return out, rows.Err()
 }
 
-// maxHopRows bounds a pinned hop read. QueryLatestHops and QueryHopsAt return
-// one cycle per source, and cluster ingest refuses a cycle carrying more than
-// 600 hop rows, so the cap clears 808 sources — above the 512 live names the
-// master's registry admits at once.
-const maxHopRows = 485_280
+// maxHopSources mirrors master's unexported maxRegisteredSlaves: the registry
+// is the list of legal source labels, so its ceiling is the sources a pinned
+// read can return one cycle for, and TestMaxHopSourcesMirrorsTheMasterRegistry
+// parses the master's source and fails naming this value on drift.
+const maxHopSources = 512
+
+// maxHopRows bounds a pinned hop read at the product of its two real limits:
+// QueryLatestHops and QueryHopsAt return one cycle per source, and cluster
+// ingest refuses a cycle carrying more than MaxHopsPerCycle hop rows.
+const maxHopRows = maxHopSources * cluster.MaxHopsPerCycle
 
 // maxHopTTLs is the ttl column's whole domain: probe_hop stores it as UInt8
 // and cluster ingest refuses an index outside [0, 255], so nothing a source
