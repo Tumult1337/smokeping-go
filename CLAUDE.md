@@ -117,9 +117,11 @@ Key points a reader can't derive from a single file:
   the incoming one: a full channel means ClickHouse is stalling, and
   dropping the newest grows a hole up to the present for as long as the
   stall lasts — the window an operator is actually looking at. Overflow
-  takes no lock, so two producers overlapping can invert one pair;
-  serialising the fast path costs more than the one row of recency it
-  would buy. `flushRetainFactor` is the same choice one layer up,
+  takes no lock, so two producers overlapping can invert one pair, and can
+  also refill the freed slot before the offered row reaches it, losing both
+  and counting both drops — the incoming row is preferred over the oldest,
+  not guaranteed a place; serialising the fast path costs more than the one
+  row of recency it would buy. `flushRetainFactor` is the same choice one layer up,
   retaining a failed batch for the next tick and capping the backlog at
   `maxRows × 4` with the oldest overflow dropped and counted;
   `slave.PushSink`'s ring is the third.

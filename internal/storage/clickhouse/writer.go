@@ -224,7 +224,10 @@ func rttMS(d time.Duration) float64 {
 // the channel holds by then, which a producer that got in between may have
 // made newer than the row being offered. Strictness there would mean
 // serialising the fast path against a stall that has already cost more than
-// one row of recency. Rows offered after Close are dropped immediately and
+// one row of recency; the same overlap can also refill the freed slot before
+// the offered row reaches it, which loses both rows and counts both drops, so
+// the incoming row is preferred over the oldest but not guaranteed a place.
+// Rows offered after Close are dropped immediately and
 // counted — the channel is still open at that point but its consumer
 // goroutines have exited, so a naive send would queue forever-unflushed bytes
 // with no observability.
