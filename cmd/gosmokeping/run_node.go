@@ -50,6 +50,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	sinks := []scheduler.Sink{&scheduler.LogSink{Log: log}}
 	var reader storage.Reader
 	var writerStats api.WriterStats
+	var readerStats api.ReaderStats
 
 	backend, err := openStorage(ctx, log, cfg.Storage, cfg.Pings)
 	switch {
@@ -63,7 +64,9 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		// keep worst-case resident memory bounded (~1.5GB upper bound vs.
 		// ~25GB if both caps were 256). Inner reader lifetime is still
 		// managed by backend.close.
-		reader = storage.NewCachingReader(backend.reader, 256, 16)
+		caching := storage.NewCachingReader(backend.reader, 256, 16)
+		reader = caching
+		readerStats = caching
 		writerStats = backend.stats
 	case errors.Is(err, storage.ErrDisabled):
 		log.Warn("storage backend disabled, running without persistent storage",
@@ -168,6 +171,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		Slaves:         slaveLister,
 		Health:         healthLister,
 		WriterStats:    writerStats,
+		ReaderStats:    readerStats,
 		Version:        version,
 	})
 	serverDone := make(chan error, 1)

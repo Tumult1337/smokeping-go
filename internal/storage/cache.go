@@ -112,12 +112,14 @@ type CachingReader struct {
 // CacheStats is a point-in-time snapshot of the LRU's hit/miss counters.
 // Counters are monotonic since process start and never reset.
 type CacheStats struct {
-	CyclesHits, CyclesMisses int64
-	HopsHits, HopsMisses     int64
+	CyclesHits   int64 `json:"cycles_hits"`
+	CyclesMisses int64 `json:"cycles_misses"`
+	HopsHits     int64 `json:"hops_hits"`
+	HopsMisses   int64 `json:"hops_misses"`
 }
 
-// Stats returns a snapshot of cache hit/miss counters. Useful for exposing
-// cache effectiveness to operators (status page, metrics scrape, etc.).
+// Stats returns a snapshot of cache hit/miss counters, served as `cache` on
+// /api/v1/health.
 func (c *CachingReader) Stats() CacheStats {
 	return CacheStats{
 		CyclesHits:   c.cyclesHits.Load(),

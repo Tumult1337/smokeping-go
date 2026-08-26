@@ -115,6 +115,14 @@ func withWriterStats(s WriterStats) testOpt {
 	return func(o *Options) { o.WriterStats = s }
 }
 
+func withReaderStats(s ReaderStats) testOpt {
+	return func(o *Options) { o.ReaderStats = s }
+}
+
+type cacheStatStub storage.CacheStats
+
+func (c cacheStatStub) Stats() storage.CacheStats { return storage.CacheStats(c) }
+
 func newTestServer(t *testing.T, opts ...testOpt) http.Handler {
 	t.Helper()
 	cfg := &config.Config{
@@ -1492,6 +1500,28 @@ func TestHealthOmitsWriterDropsWithoutWriter(t *testing.T) {
 	doJSON(t, srv, "GET", "/api/v1/health", &body)
 	if _, ok := body["writer_drops"]; ok {
 		t.Fatal("writer_drops present with no writer wired")
+	}
+}
+
+func TestHealthReportsCacheStats(t *testing.T) {
+	srv := newTestServer(t, withReaderStats(cacheStatStub{CyclesHits: 9, CyclesMisses: 2, HopsHits: 4, HopsMisses: 1}))
+	var body struct {
+		Cache storage.CacheStats `json:"cache"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/health", &body)
+	if body.Cache.CyclesHits != 9 || body.Cache.HopsMisses != 1 {
+		t.Fatalf("cache = %+v, want cycles_hits=9 hops_misses=1", body.Cache)
+	}
+}
+
+// A slave and a storage-disabled master hold no caching reader, so the field
+// must be absent rather than four zeroes reading as a cache that never hits.
+func TestHealthOmitsCacheStatsWithoutACachingReader(t *testing.T) {
+	srv := newTestServer(t)
+	var body map[string]any
+	doJSON(t, srv, "GET", "/api/v1/health", &body)
+	if _, ok := body["cache"]; ok {
+		t.Fatal("cache present with no caching reader wired")
 	}
 }
 

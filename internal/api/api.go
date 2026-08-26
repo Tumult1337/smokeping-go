@@ -42,6 +42,14 @@ type WriterStats interface {
 	Dropped() map[string]uint64
 }
 
+// ReaderStats exposes the read cache's hit/miss counters to /health; nil when
+// the reader is not a caching one. A miss detaches its query for up to
+// queryMaxDuration against a fixed inflight budget, so the ratio is what tells
+// an operator whether a 503 is load or a cache minting a key per request.
+type ReaderStats interface {
+	Stats() storage.CacheStats
+}
+
 type Server struct {
 	log            *slog.Logger
 	store          *config.Store
@@ -51,6 +59,7 @@ type Server struct {
 	slaves         SlaveLister
 	healthLister   HealthLister
 	writerStats    WriterStats
+	readerStats    ReaderStats
 	version        string
 	startAt        time.Time
 }
@@ -74,6 +83,9 @@ type Options struct {
 	// WriterStats reports the storage writer's drop counters on /health. Nil
 	// in slave mode and when storage is disabled.
 	WriterStats WriterStats
+	// ReaderStats reports the read cache's hit/miss counters on /health. Nil
+	// when the reader is not a caching one.
+	ReaderStats ReaderStats
 	// Version is the build version reported by /health. Empty falls back to "dev".
 	Version string
 }
@@ -92,6 +104,7 @@ func New(opts Options) *Server {
 		slaves:         opts.Slaves,
 		healthLister:   opts.Health,
 		writerStats:    opts.WriterStats,
+		readerStats:    opts.ReaderStats,
 		version:        v,
 		startAt:        time.Now(),
 	}
@@ -195,6 +208,9 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.writerStats != nil {
 		payload["writer_drops"] = s.writerStats.Dropped()
+	}
+	if s.readerStats != nil {
+		payload["cache"] = s.readerStats.Stats()
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

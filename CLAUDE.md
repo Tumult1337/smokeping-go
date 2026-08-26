@@ -110,11 +110,13 @@ Key points a reader can't derive from a single file:
   worst-case hop cycles (90 rows for icmp's 3×30 walk, 300 for MTR's
   10×30) still overflow first — drop-oldest and the counters are the bound
   there, not the buffer. Those per-table counters are served as
-  `writer_drops` on `/api/v1/health`. `Writer.offer` is genuinely
-  drop-oldest, evicting one row before enqueuing rather than discarding
-  the incoming one: a full channel means ClickHouse is stalling, and
-  dropping the newest grows a hole up to the present for as long as the
-  stall lasts — the window an operator is actually looking at.
+  `writer_drops` on `/api/v1/health`, alongside `cache` — the read cache's
+  hit/miss counters, which are what distinguish a 503 under real load from
+  one a cache minting a key per request caused. `Writer.offer` is
+  genuinely drop-oldest, evicting one row before enqueuing rather than
+  discarding the incoming one: a full channel means ClickHouse is
+  stalling, and dropping the newest grows a hole up to the present for as
+  long as the stall lasts — the window an operator is actually looking at.
   `flushRetainFactor` is the same choice one layer up, retaining a failed
   batch for the next tick and capping the backlog at `maxRows × 4` with
   the oldest overflow dropped and counted; `slave.PushSink`'s ring is the

@@ -18,7 +18,7 @@ build-nui:
 	$(GO) build -ldflags="$(LDFLAGS)" -o $(BIN) $(PKG)
 
 test:
-	$(GO) test ./...
+	$(GO) test -race ./...
 
 test-integration:
 	@if [ -z "$$CLICKHOUSE_ADDR" ]; then \
