@@ -471,7 +471,12 @@ func (c *Config) ValidateMinimal() error {
 }
 
 // validateClusterHeaders bounds the two cluster fields that travel as request
-// headers. The master refuses either past its own limit, and since that
+// headers. Called from ValidateMinimal only — the slave path — because that is
+// where the invariant lives: a *slave's* name must be one the master accepts.
+// Applying it from Validate as well refused a MASTER config over cluster.name,
+// a field nothing on the master path reads, with the message "cluster.name
+// \"master\" is one the master refuses" on the node that is the master. The
+// fix belonged at the invariant, not at the shared helper that was in scope. The master refuses either past its own limit, and since that
 // refusal became fatal the slave exits non-zero on it — so a config this
 // package accepts would have systemd restarting it forever. The bound lives
 // here as well as at the master for the reason ICMPPingBudget does.
@@ -719,9 +724,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("interval %s exceeds %s, past which a measured rtt is no longer storable", c.Interval, MaxProbeInterval)
 	}
 	if err := ValidatePingCount(c.Pings); err != nil {
-		return err
-	}
-	if err := validateClusterHeaders(c.Cluster); err != nil {
 		return err
 	}
 	// A cluster master's probe map gains slavehealth's icmp probe at

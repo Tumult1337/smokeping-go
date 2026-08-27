@@ -706,7 +706,16 @@ func (e *Evaluator) enqueueDispatch(cfg *config.Config, ev Event) (bool, *dispat
 	// templates is ~82 KB retained and counted as zero — past the shard's own
 	// 8 MiB ceiling before a single Cycle byte was charged.
 	size := eventBytes(ev) + actionsBytes(actions)
-	if held := e.queuedBytes[shard].Add(size); held > dispatchShardBytes {
+	// held == size means the counter was zero before this Add: the shard is
+	// empty and this one event is the whole backlog. Such an event is admitted
+	// even past the ceiling, because a bounded queue needs a progress
+	// condition — config bounds neither the number of actions an alert names
+	// nor any Template's length, so an alert whose snapshot alone exceeds the
+	// budget was refused, reverted and re-detected forever, and dispatch is
+	// change-gated with no renotify, so it could never page for the life of
+	// the process. Admitting it costs one oversized event resident at a time;
+	// refusing it costs the page.
+	if held := e.queuedBytes[shard].Add(size); held > dispatchShardBytes && held != size {
 		e.queuedBytes[shard].Add(-size)
 		return false, e.refuseDispatch(ev, "bytes", held, dispatchShardBytes)
 	}
@@ -1025,11 +1034,11 @@ func scrubHealthAddresses(ev Event) Event {
 // deletion, which is how a redelivery reached a recreated entry. Retention is bounded by the
 // same fact: ingest accepts a stamp at most config.MaxFutureSkew ahead of the
 // receive time, so an entry outlives its last cycle by at most
-// alertIdentityRetention+MaxFutureSkew — fixed at 3h34m44.9s, not the live
-// freshness window, which sits on the MaxFutureSkew floor at 5m for any
-// interval up to 100s. Deleting on the live value is unsound because a SIGHUP
-// can widen it after the fact; the cost is that a churning source's entry is
-// held roughly 43x longer.
+// alertIdentityRetention+MaxFutureSkew, which is fixed — not the live
+// freshness window, which sits on the MaxFutureSkew floor for any short
+// interval. Deleting on the live value is unsound because a SIGHUP can widen
+// it after the fact; the cost is that a churning source's entry is held
+// longer, bounded by alertIdentityRetention rather than by the interval.
 func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window time.Duration) (firing, live int) {
 	for src, st := range bySource {
 		if now.Sub(st.lastSeen) > window {

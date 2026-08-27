@@ -365,10 +365,15 @@ func (r *Registry) Peers() []slavehealth.Peer {
 	// a stale pinsFn or a future caller that skips validation would otherwise
 	// make peer selection depend on map iteration order, which is the one
 	// thing this function's own doc comment says the sort exists to prevent.
-	pinnedTo := make(map[netip.Addr]string, len(pins))
-	for _, name := range slices.Sorted(maps.Keys(pins)) {
-		if _, taken := pinnedTo[pins[name]]; !taken {
-			pinnedTo[pins[name]] = name
+	// Skipped entirely when unpinned, which is the default and the common
+	// case: Peers runs on every unauthenticated /targets and /overview poll.
+	var pinnedTo map[netip.Addr]string
+	if len(pins) > 0 {
+		pinnedTo = make(map[netip.Addr]string, len(pins))
+		for _, name := range slices.Sorted(maps.Keys(pins)) {
+			if _, taken := pinnedTo[pins[name]]; !taken {
+				pinnedTo[pins[name]] = name
+			}
 		}
 	}
 	for _, info := range r.slaves {

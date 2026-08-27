@@ -2330,3 +2330,46 @@ func TestStepOverrideRefusesAtItsDocumentedBoundary(t *testing.T) {
 		}
 	}
 }
+
+// The response caps, pinned to literals for the same reason as config's: every
+// other assertion sizes its fixture from the constant under test, so none of
+// them redden when it drifts.
+func TestStatusCapsHoldTheirDocumentedValues(t *testing.T) {
+	if statusRecentCycles != 50 {
+		t.Errorf("statusRecentCycles = %d, want 50 — it is both the per-source trim and the window multiplier", statusRecentCycles)
+	}
+	if statusMaxSources != 32 {
+		t.Errorf("statusMaxSources = %d, want 32 — the product with the trim is what one anonymous GET marshals", statusMaxSources)
+	}
+	if statusWindowCap != 24*time.Hour {
+		t.Errorf("statusWindowCap = %s, want 24h — the ceiling the fixed window carried", statusWindowCap)
+	}
+	if maxOverrideBuckets != 1000 {
+		t.Errorf("maxOverrideBuckets = %d, want 1000 — the ladder's own upper target", maxOverrideBuckets)
+	}
+}
+
+// Both arms of keepRecentSources' count. The no-omission arm is the one
+// essentially every real request takes, and a wrong non-zero value there tells
+// every caller that origins were hidden when none were — inverting the signal
+// the field exists to give.
+func TestStatusReportsZeroOmittedWhenNothingWasDropped(t *testing.T) {
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	r := &stubReader{}
+	for s := range 3 {
+		r.cycles = append(r.cycles, storage.CyclePoint{
+			Time:   base.Add(time.Duration(s) * time.Minute),
+			Source: fmt.Sprintf("edge-%d", s),
+		})
+	}
+	_, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, "/api/v1/targets/core/gw/status")
+	var got struct {
+		Omitted int `json:"sources_omitted"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Omitted != 0 {
+		t.Fatalf("sources_omitted = %d with 3 sources under a cap of %d — the field says origins were hidden when none were", got.Omitted, statusMaxSources)
+	}
+}

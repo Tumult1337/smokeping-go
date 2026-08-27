@@ -125,6 +125,13 @@ func batchInterval(b config.ClickHouseBatch) (time.Duration, error) {
 }
 
 func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pings int) (*Writer, error) {
+	// Before the dial, which is what the doc on batchInterval claims and what
+	// makes the guard reachable without a server: a bad batch block should not
+	// need ClickHouse to be up before it is reported.
+	maxInterval, err := batchInterval(cfg.Batch)
+	if err != nil {
+		return nil, err
+	}
 	// Pool must be at least numTables so all four flushers can run
 	// concurrently on the ticker without queueing on the connection
 	// pool. On larger hosts GOMAXPROCS wins; on 1-2 vCPU containers
@@ -155,11 +162,6 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pin
 	loopCtx, cancel := context.WithCancel(context.Background())
 	w := &Writer{log: log, conn: conn, cfg: cfg, cancel: cancel, chans: newWriterChans(pings)}
 
-	maxInterval, err := batchInterval(cfg.Batch)
-	if err != nil {
-		conn.Close() //nolint:errcheck // best-effort cleanup
-		return nil, err
-	}
 	for i := 0; i < numTables; i++ {
 		w.wg.Add(1)
 		go w.runTable(loopCtx, i, cfg.Batch.MaxRows, maxInterval)

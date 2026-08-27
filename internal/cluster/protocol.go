@@ -34,9 +34,11 @@ const HeaderRefusal = "X-Cluster-Refusal"
 const RefusalPermanent = "permanent"
 
 // PushTimeout is how long a slave waits on any master request before giving up
-// and requeueing. It bounds the master's ingest work too: past it nobody is
-// reading the response, so a handler still running is an orphan holding a
-// whole batch. Lives here because both peers derive from it.
+// and requeueing. The master derives its ingest deadlines from it — past this
+// nobody is reading the response, so a handler still running is an orphan
+// holding a whole batch — but note that no sink reads those deadlines today,
+// so they bound nothing observable and exist for the blocking Sink CLAUDE.md
+// invites anyone to append. Lives here because both peers derive from it.
 const PushTimeout = 15 * time.Second
 
 // RegisterReq is posted by a slave on boot and repeated as a heartbeat. The

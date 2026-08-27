@@ -574,11 +574,13 @@ Key points a reader can't derive from a single file:
   400 for a malformed request line, so keying on 400 reproduced the
   crash loop through the exact status those proxies rewrite to. A master
   predating the header is never fatal, which is the safe direction —
-  the slave retries with backoff instead of exiting. `config.Validate`
+  the slave retries with backoff instead of exiting. `config.ValidateMinimal` — the **slave** path only —
   bounds `cluster.name` and `cluster.advertise` at the same limits the
-  master enforces (`config.MaxSlaveNameLen`, `config.MaxSlaveFieldLen`,
+  master enforces (`config.ValidSlaveName`, `config.MaxSlaveFieldLen`,
   which master's own constants are defined from), because a field the
-  master refuses is now a field the slave exits on; registration is otherwise
+  master refuses is now a field the slave exits on. Not from `Validate`:
+  applying it there refused a *master* config over `cluster.name`, a
+  field nothing on the master path reads; registration is otherwise
   attempted only at boot, so under `cluster.pull_every` `"0"` — where no
   `/config` heartbeat exists either — that path is the only thing that
   recovers a slave after a master restart, and
@@ -1230,12 +1232,14 @@ Key points a reader can't derive from a single file:
   after the clock passes it, when no ordering mark separates it from a genuine
   cycle of the same age; `pastCycle` is why an ordinary replay never needs the
   set at all, so the slice stays nil for every source whose clock is not
-  ahead. It is bounded by `aheadCap` — the skew plus one `alertFreshness`
-  window, over which an honest producer emits one cycle per interval per
-  target, so 11 entries at the 1m interval and 31 at 20s — capped at
-  `min(derived, aheadCeiling)`, because config bounds no interval from below
-  and the derivation alone asks for ~6e11 int64 at a 1ns schedule, which
-  `slices.Contains` and `slices.DeleteFunc` then walk per cycle.
+  ahead. It is bounded by `aheadCeiling` **alone**. An interval-derived cap was
+  tried and removed: it *shrinks* as the interval widens (31 entries at 20s,
+  5 at 5m), so a SIGHUP truncated the slice and re-admitted every evicted
+  stamp — nothing else refuses that replay, because `pastCycle` is still
+  zero for a source that has only ever run ahead of the clock. The cap was
+  only ever a memory bound; correctness comes from the `pastCycle` sweep,
+  which drops each stamp as the clock passes it, so the fixed ceiling is
+  both sufficient and monotone.
   `aheadCeiling` is `cluster.MaxCyclesPerBatch` (1024, 8 KiB of int64 per
   target+source): an entry exists to recognise a redelivery, the redelivery
   unit is one batch, and `master.cycleDedup` holds that many identities per
@@ -1322,7 +1326,12 @@ Key points a reader can't derive from a single file:
   `e.mu` against that shard's own counter. **Per shard, for the same reason
   the depth is:** one global counter meant a single stalled shard's backlog
   refused transitions on all eight, putting the fleet-wide coupling back
-  through the memory bound. It is inert at any shape a probe emits — a
+  through the memory bound. An event alone on an empty shard is admitted even
+  past the ceiling: config bounds neither an alert's action count nor any
+  `Template`'s length, so without that progress condition an alert whose
+  snapshot exceeds the budget was refused, reverted and re-detected forever
+  — and dispatch is change-gated, so it could never page. The ceiling is
+  otherwise inert at any shape a probe emits — a
   10×30 MTR walk is ~47 KB, the deployed 20-ping cycle a few KB, so the
   depth is reached first — and a refusal on it is the same
   revert-and-retry, logged with `reason=bytes` against the depth's

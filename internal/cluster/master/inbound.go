@@ -15,9 +15,8 @@ import (
 // group/name no longer resolves (stale slave config vs. fresh master config).
 // That's acceptable — the slave will refresh and stop sending within 60s.
 // sinkCycleBudget bounds one cycle's trip through the fanout; sinkBatchBudget
-// bounds the whole POST's. The batch value is api's WriteTimeout: past it the
-// connection is closed and the slave requeues, so work continuing beyond it is
-// work nobody is waiting for.
+// bounds the whole POST's. Both are cluster.PushTimeout-derived, and both are
+// inert today — see deliver, where no sink reads either deadline.
 const (
 	// sinkBatchBudget is the slave's own client timeout, not api's write
 	// timeout: the slave abandons the request and requeues at

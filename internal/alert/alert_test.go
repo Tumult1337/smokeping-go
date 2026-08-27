@@ -3910,13 +3910,15 @@ func TestQueueChargesTheActionSnapshot(t *testing.T) {
 // tested, so setting actionBudget to an hour in the constructor stayed green
 // and every exec action would have run an hour past its event's own ceiling.
 func TestNewDispatcherWiresTheProductionBudgets(t *testing.T) {
+	// The struct fields, not budgets(): that accessor defaults a zero value to
+	// exactly these constants, so reading through it leaves deleting both
+	// wired fields green — it pins the defaulting, not the wiring.
 	d := NewDispatcher(slog.New(slog.DiscardHandler), config.NewStore("", &config.Config{}))
-	budget, wait := d.budgets()
-	if budget != actionTimeout {
-		t.Fatalf("actionBudget = %s, want actionTimeout (%s)", budget, actionTimeout)
+	if d.actionBudget != actionTimeout {
+		t.Fatalf("actionBudget = %s, want actionTimeout (%s)", d.actionBudget, actionTimeout)
 	}
-	if wait != execWaitDelay {
-		t.Fatalf("waitDelay = %s, want execWaitDelay (%s)", wait, execWaitDelay)
+	if d.waitDelay != execWaitDelay {
+		t.Fatalf("waitDelay = %s, want execWaitDelay (%s)", d.waitDelay, execWaitDelay)
 	}
 }
 
@@ -4006,5 +4008,48 @@ func TestAheadCapDoesNotShrinkUnderAWideningSighup(t *testing.T) {
 	if got := st.consecHits; got != before+1 {
 		t.Fatalf("consecHits = %d after one genuine cycle and one redelivery, want %d — the widening SIGHUP truncated st.ahead and the replay was applied, so sustained:N counts a measurement twice",
 			got, before+1)
+	}
+}
+
+// A bounded queue needs a progress condition. config bounds neither the number
+// of actions an alert names nor any Template's length, so an alert whose
+// action snapshot alone exceeds dispatchShardBytes was refused on an empty
+// shard, reverted, and re-detected every cycle — and dispatch is change-gated
+// with no renotify, so that alert could never page for the life of the
+// process. The only signal was a climbing alert_dispatch_refusals.
+func TestAnOversizedEventStillPagesOnAnEmptyShard(t *testing.T) {
+	big := strings.Repeat("x", 5<<20)
+	cfg := &config.Config{
+		Interval: time.Minute, Pings: 20,
+		Alerts: map[string]config.Alert{"page": {
+			Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"a", "b"},
+		}},
+		Actions: map[string]config.Action{
+			"a": {Type: "log", Template: big},
+			"b": {Type: "log", Template: big},
+		},
+	}
+	var delivered atomic.Int64
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), config.NewStore("", cfg),
+		dispatcherFunc(func(context.Context, Event) { delivered.Add(1) }))
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
+	clk := pinClock(ev, testBase)
+
+	// Two 5 MiB templates is past the 8 MiB shard ceiling on its own.
+	if got := actionsBytes(resolveActions(cfg, []string{"a", "b"})); got <= dispatchShardBytes {
+		t.Fatalf("fixture charges %d bytes, not past the %d ceiling — it cannot exercise the progress condition", got, dispatchShardBytes)
+	}
+
+	cy := cycleAt(clk, "tokyo-1", 100)
+	cy.Target.Target.Alerts = []string{"page"}
+	ev.OnCycle(context.Background(), cy)
+	ev.flush()
+
+	if delivered.Load() == 0 {
+		t.Fatalf("nothing delivered and %d refusals: an alert whose own action snapshot exceeds the shard ceiling can never page, for the life of the process",
+			ev.DispatchRefusals())
 	}
 }

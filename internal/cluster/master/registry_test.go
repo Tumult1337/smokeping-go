@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -639,5 +640,31 @@ func TestAnOversizedVersionWarnsOnceNotOnEveryRequest(t *testing.T) {
 	}
 	if got := strings.Count(buf.String(), "slave header field past its limit"); got != 1 {
 		t.Fatalf("%d warnings for one misconfigured slave, want 1 — Touch runs on every authenticated request, so this floods the log an operator is reading during an incident", got)
+	}
+}
+
+// config.ParsedSlaveAddrs refuses duplicate pin values, so this defends a
+// state config makes unreachable — but pinsFn is a live closure over whatever
+// the store holds, and Peers' own doc says its output feeds a scheduler
+// fingerprint that must not depend on map iteration order. Deterministic
+// under a duplicate is the property; without the sorted inversion the winner
+// is whichever name Go's iteration wrote last.
+func TestPeersIsDeterministicUnderADuplicatePin(t *testing.T) {
+	addr := netip.MustParseAddr("10.0.0.5")
+	pins := map[string]netip.Addr{"aaa": addr, "zzz": addr}
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
+
+	for _, name := range []string{"aaa", "zzz"} {
+		if err := r.Touch(name, "v1", "10.0.0.9:1", addr.String()); err != nil {
+			t.Fatalf("touch %s: %v", name, err)
+		}
+	}
+
+	first := peerNames(r.Peers())
+	for range 200 {
+		if got := peerNames(r.Peers()); !slices.Equal(got, first) {
+			t.Fatalf("Peers returned %v then %v across identical state — the winner depends on map iteration order, and this list is the scheduler's rebuild key", first, got)
+		}
 	}
 }

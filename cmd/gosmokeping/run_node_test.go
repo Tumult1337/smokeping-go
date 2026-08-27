@@ -118,10 +118,29 @@ func TestRunNodeWiresOnRebuiltToPruneDeparted(t *testing.T) {
 		t.Fatal("could not delimit the Supervisor literal")
 	}
 	lit := src[sup : sup+end]
-	if !strings.Contains(lit, "OnRebuilt:") {
+	// The OnRebuilt field's own value, not two independent Contains over the
+	// whole literal: those stayed green under a mutation that both severed the
+	// link and moved PruneDeparted into OnReload — which fires whether or not
+	// Build succeeded, so the sweep would run destructively against a config
+	// whose Build then failed and whose old scheduler keeps probing.
+	field := strings.Index(lit, "OnRebuilt:")
+	if field < 0 {
 		t.Fatal("the Supervisor sets no OnRebuilt: Evaluator.PruneDeparted is unreachable, so state for a removed or renamed (target, alert) pair is stranded for the process's life — and a stranded StateFiring resumes firing if the target comes back, making the recovery a non-transition so the page never closes")
 	}
-	if !strings.Contains(lit, "PruneDeparted") {
-		t.Fatal("OnRebuilt is set but does not call PruneDeparted")
+	value := lit[field:]
+	if nl := strings.Index(value, "\n\t\t"); nl > 0 {
+		value = value[:nl]
+	}
+	if !strings.Contains(value, "PruneDeparted") {
+		t.Fatalf("OnRebuilt does not call PruneDeparted; it is %q", strings.TrimSpace(value))
+	}
+	if onReload := strings.Index(lit, "OnReload:"); onReload >= 0 {
+		reload := lit[onReload:]
+		if end := strings.Index(reload, "\n\t\t}"); end > 0 {
+			reload = reload[:end]
+		}
+		if strings.Contains(reload, "PruneDeparted") {
+			t.Fatal("PruneDeparted is called from OnReload, which fires before Build and regardless of whether it succeeded — a failed Build then leaves the old scheduler probing targets whose state was just deleted")
+		}
 	}
 }

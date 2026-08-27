@@ -152,8 +152,10 @@ func (c *Client) PullConfig(ctx context.Context, etag string) (cluster.ClusterCo
 
 // PushCycles ships a batch of cycles to the master. On a 5xx, a network error
 // or a transient 4xx the caller should retain the batch for retry; on 404 or
-// ErrRejected the master will never accept these bytes and the caller should
-// drop them.
+// ErrRejected the caller should drop it. ErrRejected does NOT mean the master
+// issued the verdict — it is every 4xx bar 401/403/404 and the retryable set,
+// which any intermediary can produce. Only ErrMasterRefused, keyed on the
+// master's own header, is the master's own answer.
 func (c *Client) PushCycles(ctx context.Context, batch cluster.CycleBatch) error {
 	headers := map[string]string{
 		"X-Slave-Name":    c.name,

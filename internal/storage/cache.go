@@ -218,6 +218,14 @@ type cycleInflight struct {
 	err    error
 }
 
+// WithLogger sets the logger a panicked query leader is reported through. The
+// leader is detached, so without it a panic on the read path produces nothing
+// at all: the caller that started it may be gone, and nobody reads the error.
+func (c *CachingReader) WithLogger(log *slog.Logger) *CachingReader {
+	c.log = log
+	return c
+}
+
 // NewCachingReader wraps inner with two LRUs sized independently: cyclesMax
 // bounds cached `QueryCycles` results, hopsMax bounds cached hops queries.
 // Caps are entry counts, not bytes — and the two are kept separate because
@@ -548,14 +556,6 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 // an ordinary error, so the leader still releases its inflight slot and wakes
 // its waiters instead of killing the process — the same containment
 // scheduler.Fanout gives its sinks.
-// WithLogger sets the logger a panicked query leader is reported through. The
-// leader is detached, so without it a panic on the read path produces nothing
-// at all: the caller that started it may be gone, and nobody reads the error.
-func (c *CachingReader) WithLogger(log *slog.Logger) *CachingReader {
-	c.log = log
-	return c
-}
-
 // recoverToError converts a panic in the query leader into an error and logs
 // it with its stack. The log is the point: the leader is detached, so the
 // caller that started it may already be gone — a browser navigating away from

@@ -557,3 +557,22 @@ func TestBatchIntervalValidatesBothFields(t *testing.T) {
 		}
 	}
 }
+
+// NewWriter must call batchInterval, and must do it before dialing. Nothing
+// pinned the call, so reverting it to the pre-fix inline ParseDuration — which
+// never looked at MaxRows — left the whole repo green while the makeslice
+// panic it exists to prevent came back. An unreachable address is the probe:
+// a bad batch block has to be reported without a server.
+func TestNewWriterValidatesTheBatchBlockBeforeDialing(t *testing.T) {
+	cfg := config.ClickHouse{
+		Addr:  "127.0.0.1:1", // nothing listens; a dial would fail differently
+		Batch: config.ClickHouseBatch{MaxRows: -1, MaxInterval: "1s"},
+	}
+	_, err := NewWriter(context.Background(), slog.New(slog.DiscardHandler), cfg, 20)
+	if err == nil {
+		t.Fatal("NewWriter accepted max_rows=-1; runTable then panics makeslice on a goroutine with no recover")
+	}
+	if !strings.Contains(err.Error(), "max_rows") {
+		t.Fatalf("err = %v, want the batch block named — a dial error here means the guard runs after the dial and cannot be reached without a server", err)
+	}
+}

@@ -1,6 +1,6 @@
 # Migration: configs that used to load and now do not
 
-This release adds four load-time refusals. Each closes a case where the
+This release adds five load-time refusals. Each closes a case where the
 process accepted a config and then failed — at boot, at the next restart, or
 silently at runtime. Check yours against the list **before** rolling the
 binary out, because a refused config exits non-zero rather than degrading.
@@ -40,11 +40,15 @@ discovered.
 (~79 years). Any real retention is far below it; a value in that range is
 almost always a units mistake (hours or minutes written as days).
 
-## 3. `cluster.name` and `cluster.advertise` are checked against the master's rules
+## 3. A **slave's** `cluster.name` and `cluster.advertise` are checked against the master's rules
 
-`cluster.name` must satisfy exactly what the master accepts: non-empty, at most
-128 bytes, not the literal `master`, and free of control characters.
-`cluster.advertise` must be at most 256 bytes.
+This applies to a config started with `--slave` only. A master's own
+`cluster.name` is not read by anything on the master path and is not checked —
+including the common `cluster.name: "master"`.
+
+On a slave, `cluster.name` must satisfy exactly what the master accepts:
+non-empty, at most 128 bytes, not the literal `master`, and free of control
+characters. `cluster.advertise` must be at most 256 bytes.
 
 Both travel as headers on every request a slave makes. The master refuses
 either past its limit, and that refusal is now fatal to the slave process — so
@@ -56,7 +60,22 @@ string.
 **If you hit this:** rename the slave. The name is also its `source` label in
 storage, so pick the one you want on charts.
 
-## 4. A cluster node's icmp ping budget is checked even without an icmp probe
+## 4. `cluster.slave_addrs` values must be unique
+
+Two names may not pin the same address. The registry inverts this map to decide
+which peer is allowed to hold an address, and with a duplicate the survivor was
+whichever name Go's map iteration happened to write last — a different health
+mesh, and a different scheduler rebuild key, per signal.
+
+The shapes that break: a rename rollover such as
+`{"tokyo-1": "10.44.0.7", "tokyo-1-old": "10.44.0.7"}`, an HA pair behind one
+VIP, and an *invisible* collision — addresses are unmapped before comparison,
+so `{"a": "10.0.0.5", "b": "::ffff:10.0.0.5"}` is one address written twice.
+
+**If you hit this:** drop the stale name. A pin only excludes an address from
+every *other* slave; it is not needed for a node that is going away.
+
+## 5. A cluster node's icmp ping budget is checked even without an icmp probe
 
 `config.ICMPPingBudget` refuses a schedule whose full-loss derived budget
 `(interval − (pings−1) × 200ms) / pings` falls below 50ms. It is now applied

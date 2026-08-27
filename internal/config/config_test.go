@@ -855,3 +855,57 @@ func TestParsedSlaveAddrsRefusesADuplicatePin(t *testing.T) {
 		t.Fatalf("distinct pins must load: %v", err)
 	}
 }
+
+// The rule is about a SLAVE's name. Applying it from Validate too refused a
+// master config over cluster.name — a field nothing on the master path reads —
+// with a message that is nonsense on the node that IS the master. cluster.name
+// "master" is also the natural value for a master's own config to carry.
+func TestMasterConfigIsNotRefusedOverClusterName(t *testing.T) {
+	cfg := scheduleConfig(20*time.Second, 10)
+	cfg.Cluster = &Cluster{Token: "tok", Source: "master", Name: "master"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a master config was refused over a slave-only field: %v", err)
+	}
+	cfg.Cluster.Name = "node\x7f1"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a master config was refused over a control character in a field it never reads: %v", err)
+	}
+	// The slave path still applies it.
+	slave := &Config{Cluster: &Cluster{
+		MasterURL: "https://master.example", Token: "tok", Name: "master",
+	}}
+	if err := slave.ValidateMinimal(); err == nil {
+		t.Fatal("a slave named \"master\" still validated; the master refuses it and the slave now exits on that refusal")
+	}
+}
+
+// Every bound here is otherwise pinned only by an input sized from the
+// constant it guards — `MaxBatchRows + 1` exceeds the cap for every value of
+// the cap — so none of them redden when the constant drifts. These literals
+// are the second half: the test reddens both when a guard goes and when its
+// constant moves. Each figure is the consequence, not a preference.
+func TestBoundsHoldTheirDocumentedValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  int
+		want int
+		why  string
+	}{
+		{"MaxBatchRows", MaxBatchRows, 1_000_000,
+			"four flushers each preallocate make([]any, 0, maxRows); at 1e9 that is ~64 GB before a row arrives"},
+		{"MaxSlaveNameLen", MaxSlaveNameLen, 128,
+			"the cardinality bound on a LowCardinality source label, and an inbound header net/http bounds only at 1 MiB"},
+		{"MaxSlaveFieldLen", MaxSlaveFieldLen, 256,
+			"retained per registry entry, and inside the log-dedup key even when ParseAdvertise rejects it"},
+		{"MaxRetentionDays", MaxRetentionDays, 36_500,
+			"a sanity ceiling; the representable maximum is the clock check in RetentionWithinDateTime"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %d, want %d — %s. If the change is deliberate, update this literal and say why here.",
+				tc.name, tc.got, tc.want, tc.why)
+		}
+	}
+	if MaxBatchInterval != time.Hour {
+		t.Errorf("MaxBatchInterval = %s, want 1h — it is the writer's flush ticker period", MaxBatchInterval)
+	}
+}
