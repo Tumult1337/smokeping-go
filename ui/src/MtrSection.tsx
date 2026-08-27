@@ -215,7 +215,15 @@ function MultiSourceLayout({
         toSec={toSec}
         atSec={atSec}
         onResetAt={onResetAt}
-        onCyclePick={onCyclePick}
+        // Source arg dropped, exactly as the multi-source branch below does:
+        // this fallback is reached because the response happened to collapse to
+        // one source, not because the user picked one. Forwarding it set
+        // pickedSource, which flips MtrSection's own branch from
+        // MultiSourceLayout to SingleSourceLayout — a different child type at
+        // the same position, so React discards the subtree and both the path
+        // table and the heatmap remount and refetch, defeating the
+        // stale-while-revalidate guards each of them implements.
+        onCyclePick={(t) => onCyclePick(t)}
         source={groups[0].source}
       />
     );

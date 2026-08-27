@@ -405,8 +405,11 @@ function skeletonRows(): React.ReactNode[] {
 // 15s relative-time tick re-renders every Row while `values` stays the same
 // array — rebuilding every path string per tick is the landing view's one
 // recurring cost.
-const Sparkline = memo(function Sparkline({ values, silent }: { values: Array<number | null>; silent: boolean }) {
-  if (silent || values.length === 0) {
+const Sparkline = memo(function Sparkline({ values, silent }: { values: Array<number | null> | null; silent: boolean }) {
+  // The null check leads: it used to be reachable only because `silent ||`
+  // short-circuited first, so reordering the condition threw inside render,
+  // and there is no ErrorBoundary above this — the landing page went blank.
+  if (values == null || silent || values.length === 0) {
     return <span className="overview-na">—</span>;
   }
   const W = 60;

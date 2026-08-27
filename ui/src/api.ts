@@ -208,7 +208,9 @@ export interface OverviewRow {
   worst_source?: string;
   last_seen: string | null;
   silent: boolean;
-  sparkline: Array<number | null>;
+  // null, not just empty: the server's silent-row branch ships the slice
+  // unset and the field carries no omitempty.
+  sparkline: Array<number | null> | null;
 }
 
 export interface OverviewResponse {

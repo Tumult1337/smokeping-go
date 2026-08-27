@@ -80,8 +80,21 @@ export function MtrHeatmap({
   const [err, setErr] = useState<string | null>(null);
 
   const [stepSec, setStepSec] = useState(0);
+  const prevKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
+    // Blank on a genuinely different series, the rule HopsTable and MtrSection
+    // already follow: this component is not remounted when the sidebar target
+    // changes, so without it the previous target's matrix stays painted under
+    // the new target's heading for the length of a multi-MB fetch — and if that
+    // fetch fails, the error banner below is suppressed by the stale rows.
+    const key = `${targetId}|${source ?? ""}`;
+    const keyChanged = prevKeyRef.current !== key;
+    prevKeyRef.current = key;
+    if (keyChanged) {
+      setHops(null);
+      setStepSec(0);
+    }
     setErr(null);
     // The backend enforces a 7d cap for timeline queries — if the user
     // selected a wider range (30d, 1y) we just don't render anything.
@@ -161,6 +174,14 @@ function PathHeatmap({
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  // Holds the settle loop below so an unmount inside its 1.5s window cancels it.
+  const pinRafRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (pinRafRef.current != null) cancelAnimationFrame(pinRafRef.current);
+    },
+    [],
+  );
   const [repaintCount, setRepaintCount] = useState(0);
   // Hovered cell, resolved with the same pickAtX a click uses so the tooltip
   // always describes the cell a click would open.
@@ -443,6 +464,9 @@ function PathHeatmap({
     const el = wrapRef.current;
     const scroller = el?.closest(".main") as HTMLElement | null;
     if (!el || !scroller) return;
+    // Cancel any loop still settling from a previous click, so two clicks
+    // inside the window cannot drive the scroller from two `prev` baselines.
+    if (pinRafRef.current != null) cancelAnimationFrame(pinRafRef.current);
     const contentTop = () =>
       el.getBoundingClientRect().top -
       scroller.getBoundingClientRect().top +
@@ -452,6 +476,14 @@ function PathHeatmap({
     let corrected = false;
     let stableFrames = 0;
     const tick = () => {
+      // The loop outlives the click that started it by up to 1.5s and `el` is
+      // captured, so an unmount inside that window leaves it measuring a
+      // detached node — whose rect reads 0, making d the element's whole
+      // content offset and yanking the still-mounted .main scroller to the top.
+      if (wrapRef.current !== el || !el.isConnected) {
+        pinRafRef.current = null;
+        return;
+      }
       const now = contentTop();
       const d = now - prev;
       if (Math.abs(d) >= 1) {
@@ -465,10 +497,13 @@ function PathHeatmap({
       } else {
         stableFrames++;
       }
-      if ((corrected && stableFrames > 6) || performance.now() - start > 1500) return;
-      requestAnimationFrame(tick);
+      if ((corrected && stableFrames > 6) || performance.now() - start > 1500) {
+        pinRafRef.current = null;
+        return;
+      }
+      pinRafRef.current = requestAnimationFrame(tick);
     };
-    requestAnimationFrame(tick);
+    pinRafRef.current = requestAnimationFrame(tick);
   }
 
   if (visibleHops.length === 0) {

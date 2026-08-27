@@ -3,7 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series, type Band } from "u
 import type { CyclePoint } from "./api";
 import { PALETTE } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, decadeSplits, LOG_Y_FLOOR } from "./chartUtils";
 
 interface Props {
   points: CyclePoint[];
@@ -23,7 +23,6 @@ interface Props {
 // uPlot log scales reject ≤ 0; cycles may legitimately store min=0 for
 // sub-millisecond replies. Floor at 0.01ms so the band has somewhere to
 // land without obliterating the actual lower extent of the data.
-const LOG_Y_FLOOR = 0.01;
 
 // Layered smoke band: min/max (lightest) → p5/p95 → p25/p75 (darkest fill),
 // median line on top. uPlot's native "band" feature fills the area between
@@ -71,11 +70,22 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
   // Which source name is soloed (others hidden in chart). null = show all.
   const [soloSource, setSoloSource] = useState<string | null>(null);
   soloSourceRef.current = soloSource;
+  // A ref, not a dep: an empty dataset is a loading placeholder, not a new
+  // source set — build* synthesizes a single-band topology for it whose key
+  // matches no real one. App sets cycles=null on every range/zoom/source
+  // change, so keying the reset on sourcesKey alone dropped the user's soloed
+  // source and legend toggles on each navigation, and fired twice per trip
+  // (loaded -> placeholder -> loaded). Comparing against the last *loaded* key
+  // resets only when the set of real sources actually changes.
+  const lastLoadedSources = useRef<string | null>(null);
   useEffect(() => {
-    setHidden(new Set());
+    if (points.length === 0) return;
+    if (lastLoadedSources.current === sourcesKey) return;
+    lastLoadedSources.current = sourcesKey;
+    setHidden(new Set<number>());
     setSoloSource(null);
     onSoloChangeRef.current?.(null);
-  }, [sourcesKey]);
+  }, [sourcesKey, points]);
 
   useEffect(() => {
     if (!divRef.current) return;
@@ -404,37 +414,6 @@ type Built = {
 const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
 const PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max"] as const;
 
-// decadeSplits returns one tick per power-of-ten across the visible y range.
-// Replaces uPlot's default log splits (which add minor 2/3/5/7 ticks per
-// decade) so the grid stays readable at log10.
-function decadeSplits(_u: uPlot, _axisIdx: number, scaleMin: number, scaleMax: number): number[] {
-  const lo = Math.floor(Math.log10(Math.max(scaleMin, LOG_Y_FLOOR)));
-  const hi = Math.ceil(Math.log10(Math.max(scaleMax, LOG_Y_FLOOR * 10)));
-  const decades: number[] = [];
-  for (let i = lo; i <= hi; i++) decades.push(Math.pow(10, i));
-  const within = decades.filter((v) => v >= scaleMin && v <= scaleMax);
-  // A view that never crosses a decade boundary (e.g. a stable target's
-  // 25-35ms band) leaves zero power-of-ten ticks inside range — the axis
-  // would render with no labels at all. Fall back to evenly spaced ticks.
-  return within.length >= 2 ? within : niceLinearTicks(scaleMin, scaleMax);
-}
-
-// niceLinearTicks picks a human-friendly step (1/2/5 × 10^n) and returns
-// ticks at multiples of it spanning [min, max] — same heuristic most
-// charting libraries use for linear axes, used here as the log-axis
-// fallback when the visible range doesn't span a full decade.
-function niceLinearTicks(min: number, max: number, targetCount = 5): number[] {
-  if (!(max > min)) return [min];
-  const rawStep = (max - min) / targetCount;
-  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
-  const norm = rawStep / mag;
-  const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
-  const out: number[] = [];
-  for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step) {
-    out.push(Math.round(v * 1e6) / 1e6);
-  }
-  return out.length > 0 ? out : [min, max];
-}
 
 function buildAligned(points: CyclePoint[]): Built {
   const xSeries: Series = {};

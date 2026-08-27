@@ -292,12 +292,15 @@ export function HttpChart({
     });
   }, [points, fromSec, toSec]);
 
-  if (error) return <div className="error">{error}</div>;
-
   const hovered = hover && hover.idx < points.length ? points[hover.idx] : null;
 
   return (
     <div>
+      {/* Above the chart host, never instead of it: returning early here
+          unmounted the div uPlot is mounted into while the construction effect
+          is keyed on [height] alone, so it never re-ran and the chart stayed
+          blank for the life of the mount after any transient fetch error. */}
+      {error && <div className="error">{error}</div>}
       <div className="chart-host" style={{ minHeight: height, position: "relative" }}>
         <div ref={divRef} style={{ width: "100%" }} />
         {points.length === 0 &&

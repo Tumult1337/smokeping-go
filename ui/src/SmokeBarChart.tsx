@@ -3,7 +3,7 @@ import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { PALETTE, lossColor } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss, decadeSplits, LOG_Y_FLOOR } from "./chartUtils";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
@@ -28,9 +28,12 @@ interface Props {
 
 // uPlot log scales reject ≤ 0; cycles may store min=0 for sub-millisecond
 // replies. Floor at 0.01ms so the band has somewhere to land.
-const LOG_Y_FLOOR = 0.01;
 
-type Band = { lo: number; hi: number; alpha: number };
+// pair is the legend key this band toggles on. It travels on the band because
+// the array is compacted below: band 0's lo is effectiveMin, which can exceed
+// P5, so dropping it shifted every later band onto the wrong legend entry and
+// one click hid different bands on different bars of the same chart.
+type Band = { lo: number; hi: number; alpha: number; pair: { lo: string; hi: string } };
 
 // One source's worth of drawable state. The "all" view pushes one of these
 // per source into barsRef so the draw hook can paint each stack with its own
@@ -93,18 +96,33 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
   const [cursorIdx, setCursorIdx] = useState<number | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [soloSource, setSoloSource] = useState<string | null>(null);
+  // A ref, not a dep: an empty dataset is a loading placeholder, not a new
+  // source set — build* synthesizes a single-band topology for it whose key
+  // matches no real one. App sets cycles=null on every range/zoom/source
+  // change, so keying the reset on sourcesKey alone dropped the user's soloed
+  // source and legend toggles on each navigation, and fired twice per trip
+  // (loaded -> placeholder -> loaded). Comparing against the last *loaded* key
+  // resets only when the set of real sources actually changes.
+  const lastLoadedSources = useRef<string | null>(null);
   useEffect(() => {
-    setHidden(new Set());
+    if (points.length === 0) return;
+    if (lastLoadedSources.current === sourcesKey) return;
+    lastLoadedSources.current = sourcesKey;
+    setHidden(new Set<string>());
     setSoloSource(null);
     onSoloChangeRef.current?.(null);
-  }, [sourcesKey]);
+  }, [sourcesKey, points]);
   useEffect(() => {
     hiddenRef.current = hidden;
     plotRef.current?.redraw(false, true);
   }, [hidden]);
   useEffect(() => {
     soloSourceRef.current = soloSource;
-    soloIdxRef.current = soloSource != null ? built.sources.indexOf(soloSource) : null;
+    // -1 means the solo source is gone from the rebuilt set — the reset effect
+    // above has not committed yet. Treat it as no solo, or the draw hook keeps
+    // laneCount at 1 and skips every stack, blanking the plot.
+    const soloIdx = soloSource != null ? built.sources.indexOf(soloSource) : -1;
+    soloIdxRef.current = soloIdx >= 0 ? soloIdx : null;
     const raw = soloSource != null
       ? (built.sourceYRanges.get(soloSource) ?? built.yRange)
       : built.yRange;
@@ -573,16 +591,16 @@ function buildSources(points: CyclePoint[]): Built {
       if (p.LossPct >= 100) return [];
       const effMin = effectiveMin(p);
       const all: Band[] = [
-        { lo: effMin, hi: p.Max, alpha: 0.07 },
-        { lo: p.P5, hi: p.P95, alpha: 0.09 },
-        { lo: p.P10, hi: p.P90, alpha: 0.11 },
-        { lo: p.P15, hi: p.P85, alpha: 0.13 },
-        { lo: p.P20, hi: p.P80, alpha: 0.15 },
-        { lo: p.P25, hi: p.P75, alpha: 0.17 },
-        { lo: p.P30, hi: p.P70, alpha: 0.20 },
-        { lo: p.P35, hi: p.P65, alpha: 0.23 },
-        { lo: p.P40, hi: p.P60, alpha: 0.26 },
-        { lo: p.P45, hi: p.P55, alpha: 0.30 },
+        { lo: effMin, hi: p.Max, alpha: 0.07, pair: BAND_PAIRS[0] },
+        { lo: p.P5, hi: p.P95, alpha: 0.09, pair: BAND_PAIRS[1] },
+        { lo: p.P10, hi: p.P90, alpha: 0.11, pair: BAND_PAIRS[2] },
+        { lo: p.P15, hi: p.P85, alpha: 0.13, pair: BAND_PAIRS[3] },
+        { lo: p.P20, hi: p.P80, alpha: 0.15, pair: BAND_PAIRS[4] },
+        { lo: p.P25, hi: p.P75, alpha: 0.17, pair: BAND_PAIRS[5] },
+        { lo: p.P30, hi: p.P70, alpha: 0.20, pair: BAND_PAIRS[6] },
+        { lo: p.P35, hi: p.P65, alpha: 0.23, pair: BAND_PAIRS[7] },
+        { lo: p.P40, hi: p.P60, alpha: 0.26, pair: BAND_PAIRS[8] },
+        { lo: p.P45, hi: p.P55, alpha: 0.30, pair: BAND_PAIRS[9] },
       ];
       return all.filter((b) => b.hi > b.lo);
     });
@@ -698,38 +716,6 @@ function clampRangeForScale(
   return [Math.max(LOG_Y_FLOOR, range[0]), Math.max(range[1], LOG_Y_FLOOR * 10)];
 }
 
-// decadeSplits returns one tick per power-of-ten across the visible y range.
-// Replaces uPlot's default log splits (which densely fill each decade with
-// 2/3/5/7-scaled minor ticks) for a calmer grid that still conveys the
-// orders-of-magnitude scale at a glance.
-function decadeSplits(_u: uPlot, _axisIdx: number, scaleMin: number, scaleMax: number): number[] {
-  const lo = Math.floor(Math.log10(Math.max(scaleMin, LOG_Y_FLOOR)));
-  const hi = Math.ceil(Math.log10(Math.max(scaleMax, LOG_Y_FLOOR * 10)));
-  const decades: number[] = [];
-  for (let i = lo; i <= hi; i++) decades.push(Math.pow(10, i));
-  const within = decades.filter((v) => v >= scaleMin && v <= scaleMax);
-  // A view that never crosses a decade boundary (e.g. a stable target's
-  // 25-35ms band) leaves zero power-of-ten ticks inside range — the axis
-  // would render with no labels at all. Fall back to evenly spaced ticks.
-  return within.length >= 2 ? within : niceLinearTicks(scaleMin, scaleMax);
-}
-
-// niceLinearTicks picks a human-friendly step (1/2/5 × 10^n) and returns
-// ticks at multiples of it spanning [min, max] — same heuristic most
-// charting libraries use for linear axes, used here as the log-axis
-// fallback when the visible range doesn't span a full decade.
-function niceLinearTicks(min: number, max: number, targetCount = 5): number[] {
-  if (!(max > min)) return [min];
-  const rawStep = (max - min) / targetCount;
-  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
-  const norm = rawStep / mag;
-  const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
-  const out: number[] = [];
-  for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step) {
-    out.push(Math.round(v * 1e6) / 1e6);
-  }
-  return out.length > 0 ? out : [min, max];
-}
 
 // Labels that toggle each drawStack band. Index lines up with the filtered
 // bands array — hiding either end of a pair drops that band. Intermediate
@@ -803,8 +789,8 @@ function drawStack(
       w = slotX + Math.round((laneIndex + 1) * laneW) - x;
     }
 
-    bandsArr[i].forEach((band, b) => {
-      const pair = BAND_PAIRS[b];
+    bandsArr[i].forEach((band) => {
+      const pair = band.pair;
       if (pair && (hidden.has(pair.lo) || hidden.has(pair.hi))) return;
       const yHi = u.valToPos(band.hi, "y", true);
       const yLo = u.valToPos(band.lo, "y", true);
