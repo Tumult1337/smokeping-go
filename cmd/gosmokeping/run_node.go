@@ -65,7 +65,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		// keep worst-case resident memory bounded (~1.5GB upper bound vs.
 		// ~25GB if both caps were 256). Inner reader lifetime is still
 		// managed by backend.close.
-		caching := storage.NewCachingReader(backend.reader, 256, 16)
+		caching := storage.NewCachingReader(backend.reader, 256, 16).WithLogger(log)
 		reader = caching
 		readerStats = caching
 		writerStats = backend.stats

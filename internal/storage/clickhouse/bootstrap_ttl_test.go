@@ -50,7 +50,10 @@ func TestBootstrapAndValidateAgreeOnEveryRetention(t *testing.T) {
 	// Drives Config.Validate, not RetentionWithinDateTime: comparing the
 	// backstop against the function it delegates to is a tautology, and
 	// deleting the call from Validate leaves it green.
-	for _, days := range []int{-1, 0, 1, 365, last - 2, last + 1000, config.MaxRetentionDays} {
+	// The huge value is the overflow case: AddDate wraps past a large enough
+	// day count, so a comparison-only guard returns nil for an expiry far past
+	// 2106 and the backstop admits exactly what it exists to refuse.
+	for _, days := range []int{-1, 0, 1, 365, last - 2, last + 1000, config.MaxRetentionDays, 1 << 55} {
 		cfg := validatableConfig()
 		cfg.Storage.ClickHouse.Retention.CycleDays = days
 		validateOK := cfg.Validate() == nil

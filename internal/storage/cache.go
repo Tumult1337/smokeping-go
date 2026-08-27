@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -101,11 +103,19 @@ type CachingReader struct {
 	hopsInflight map[hopsCacheKey]*hopsInflight
 
 	// Hit/miss counters. Updated atomically; read via Stats(). A miss is
-	// counted on any path that reaches the inner reader (cold lookup, expired
-	// entry, error from inner). A hit is counted only when the cached slice
-	// is returned without consulting the inner reader.
+	// counted once per query actually issued to the inner reader — a caller
+	// that joins an existing leader, or that is refused by
+	// maxInflightLeaders, is neither a hit nor a miss, because counting them
+	// would inflate exactly the ratio CLAUDE.md reads to tell a 503 under
+	// real load from one a cache minting a key per request caused. A hit is
+	// counted only when the cached value is returned without consulting the
+	// inner reader.
 	cyclesHits, cyclesMisses atomic.Int64
 	hopsHits, hopsMisses     atomic.Int64
+
+	// log is nil unless WithLogger is called; recoverToError is the only user
+	// and treats nil as "no logging" so a test-built reader needs no wiring.
+	log *slog.Logger
 
 	// nowFn lets tests freeze time without monkey-patching time.Now.
 	nowFn func() time.Time
@@ -214,6 +224,14 @@ type cycleInflight struct {
 // a cycles entry is ~hundreds of KB while a 7d hops timeline entry can be
 // ~100MB, so a unified cap that's safe for hops would starve cycles. Values
 // ≤ 0 fall back to sane defaults (256 cycles, 16 hops).
+// WithLogger sets the logger a panicked query leader is reported through. The
+// leader is detached, so without it a panic on the read path produces nothing
+// at all: the caller that started it may be gone, and nobody reads the error.
+func (c *CachingReader) WithLogger(log *slog.Logger) *CachingReader {
+	c.log = log
+	return c
+}
+
 func NewCachingReader(inner Reader, cyclesMax, hopsMax int) *CachingReader {
 	if cyclesMax <= 0 {
 		cyclesMax = 256
@@ -281,8 +299,6 @@ func (c *CachingReader) fetchCycles(ctx context.Context, key cycleCacheKey, ttl 
 			return out, nil
 		}
 	}
-	c.cyclesMisses.Add(1)
-
 	call, leader := c.inflight[key], false
 	if call == nil {
 		if len(c.inflight) >= maxInflightLeaders {
@@ -292,6 +308,10 @@ func (c *CachingReader) fetchCycles(ctx context.Context, key cycleCacheKey, ttl 
 		call = &cycleInflight{done: make(chan struct{})}
 		c.inflight[key] = call
 		leader = true
+		// Counted here, not above: a waiter joins a query already paid for and
+		// a refusal issues none, so counting either inflates the ratio the
+		// /health cache stats exist to read.
+		c.cyclesMisses.Add(1)
 	}
 	c.mu.Unlock()
 
@@ -321,21 +341,31 @@ func (c *CachingReader) fetchCycles(ctx context.Context, key cycleCacheKey, ttl 
 func (c *CachingReader) runCyclesLeader(ctx context.Context, key cycleCacheKey, ttl time.Duration, call *cycleInflight, run func(context.Context) ([]CyclePoint, error)) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryMaxDuration)
 	defer cancel()
-	pts, err := recoverToError(run)(runCtx)
+	pts, err := recoverToError(c.log, run)(runCtx)
 
 	var stale []CyclePoint
+	// Explicit rather than `stale != nil`, which cannot tell a cached empty
+	// result from no entry at all.
+	staleFound := false
 	c.mu.Lock()
 	if err == nil {
 		c.storeLocked(key, pts, ttl)
 	} else if elem, ok := c.items[key]; ok && !isRefusal(err) {
-		e := elem.Value.(*cycleCacheEntry)
-		stale = make([]CyclePoint, len(e.points))
-		copy(stale, e.points)
+		// An empty cached result is not worth standing in for an error: it
+		// renders as "no data", which hides the outage completely, where a
+		// stale-but-real series at least shows history an operator can date.
+		// And only a success refreshes the expiry, so the substitution would
+		// repeat on every request for the outage's whole duration.
+		if e := elem.Value.(*cycleCacheEntry); len(e.points) > 0 {
+			stale = make([]CyclePoint, len(e.points))
+			copy(stale, e.points)
+			staleFound = true
+		}
 	}
 	delete(c.inflight, key)
 	c.mu.Unlock()
 
-	if err != nil && stale != nil {
+	if err != nil && staleFound {
 		// Serve stale silently. The stale window is unbounded: the entry
 		// stays in the LRU until displaced by fresh inserts. Operators
 		// should monitor ClickHouse availability via their own tooling.
@@ -489,8 +519,6 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 			return out, nil
 		}
 	}
-	c.hopsMisses.Add(1)
-
 	call, leader := c.hopsInflight[key], false
 	if call == nil {
 		if len(c.hopsInflight) >= maxInflightLeaders {
@@ -502,6 +530,8 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 		call = &hopsInflight{done: make(chan struct{})}
 		c.hopsInflight[key] = call
 		leader = true
+		// See the cycles path: a waiter and a refusal are neither.
+		c.hopsMisses.Add(1)
 	}
 	c.hopsMu.Unlock()
 
@@ -526,11 +556,19 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 // an ordinary error, so the leader still releases its inflight slot and wakes
 // its waiters instead of killing the process — the same containment
 // scheduler.Fanout gives its sinks.
-func recoverToError[T any](run func(context.Context) (T, error)) func(context.Context) (T, error) {
+// recoverToError converts a panic in the query leader into an error and logs
+// it with its stack. The log is the point: the leader is detached, so the
+// caller that started it may already be gone — a browser navigating away from
+// a slow timeline is the normal case — and then nobody reads the error at all.
+// Every other recover() in the tree logs; this one had no logger to reach.
+func recoverToError[T any](log *slog.Logger, run func(context.Context) (T, error)) func(context.Context) (T, error) {
 	return func(ctx context.Context) (out T, err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("%w: %v", errLeaderPanicked, r)
+				if log != nil {
+					log.Error("storage query leader panicked", "panic", r, "stack", string(debug.Stack()))
+				}
 			}
 		}()
 		return run(ctx)
@@ -560,16 +598,19 @@ func cloneHopsResult(res HopsResult) HopsResult {
 func (c *CachingReader) runHopsLeader(ctx context.Context, key hopsCacheKey, ttl time.Duration, call *hopsInflight, run func(context.Context) (HopsResult, error)) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryMaxDuration)
 	defer cancel()
-	res, err := recoverToError(run)(runCtx)
+	res, err := recoverToError(c.log, run)(runCtx)
 
 	var stale *HopsResult
 	c.hopsMu.Lock()
 	if err == nil {
 		c.hopsStoreLocked(key, res, ttl)
 	} else if elem, ok := c.hopsItems[key]; ok && !isRefusal(err) {
-		e := elem.Value.(*hopsCacheEntry)
-		clone := cloneHopsResult(e.result)
-		stale = &clone
+		// Same rule as the cycles path: an empty cached result renders as "no
+		// path data" and hides the outage, where stale rows show history.
+		if e := elem.Value.(*hopsCacheEntry); len(e.result.Hops) > 0 {
+			clone := cloneHopsResult(e.result)
+			stale = &clone
+		}
 	}
 	delete(c.hopsInflight, key)
 	c.hopsMu.Unlock()

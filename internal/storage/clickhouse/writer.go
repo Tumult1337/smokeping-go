@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"log/slog"
 	"math"
 	"runtime"
@@ -133,7 +134,14 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pin
 	loopCtx, cancel := context.WithCancel(context.Background())
 	w := &Writer{log: log, conn: conn, cfg: cfg, cancel: cancel, chans: newWriterChans(pings)}
 
-	maxInterval, _ := time.ParseDuration(cfg.Batch.MaxInterval) // validated and bounded at config-load
+	// config.Validate bounds this at both ends, but NewWriter is exported and
+	// a caller that skipped validation would otherwise reach time.NewTicker
+	// with a zero period — a panic on a goroutine with no recover().
+	maxInterval, err := time.ParseDuration(cfg.Batch.MaxInterval)
+	if err != nil || maxInterval <= 0 {
+		conn.Close() //nolint:errcheck // best-effort cleanup
+		return nil, fmt.Errorf("storage.clickhouse.batch.max_interval %q: must be a positive duration", cfg.Batch.MaxInterval)
+	}
 	for i := 0; i < numTables; i++ {
 		w.wg.Add(1)
 		go w.runTable(loopCtx, i, cfg.Batch.MaxRows, maxInterval)

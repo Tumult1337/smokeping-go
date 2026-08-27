@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1356,5 +1357,72 @@ func TestCachingReader_LeaderPanicIsNotMaskedByAStaleEntry(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "panicked") {
 		t.Fatalf("err = %v, want the contained panic", err)
+	}
+}
+
+// A cached empty result is an ordinary entry, and `stale != nil` cannot tell
+// it from no entry at all. A target with no cycles in the window cached a nil
+// slice, so the next ClickHouse outage was served as 200 with [] for its whole
+// duration — on the endpoint an operator opens during an incident — and
+// because only a success refreshes the expiry it repeated on every request.
+func TestCachingReader_EmptyCachedResultIsNotServedInPlaceOfAnError(t *testing.T) {
+	inner := &failAfterFirst{}
+	c := NewCachingReader(inner, 8, 8)
+	ref := newRef("g", "t")
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	from, to := now.Add(-time.Hour), now
+
+	got, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("warming with an empty result: %v / %d points", err, len(got))
+	}
+	c.mu.Lock()
+	for _, elem := range c.items {
+		elem.Value.(*cycleCacheEntry).expires = now.Add(-time.Hour)
+	}
+	c.mu.Unlock()
+
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{}); err == nil {
+		t.Fatal("an outage was served as 200 with an empty series because the cached empty result read as no cached entry")
+	}
+}
+
+// failAfterFirst answers once with nothing, then errors — a target with no
+// cycles in the window, followed by ClickHouse going away.
+type failAfterFirst struct {
+	fakeReader
+	calls atomic.Int64
+}
+
+func (f *failAfterFirst) QueryCycles(context.Context, config.TargetRef, time.Time, time.Time, QueryFilter) ([]CyclePoint, error) {
+	if f.calls.Add(1) > 1 {
+		return nil, errors.New("clickhouse is down")
+	}
+	return nil, nil
+}
+
+// Misses count queries actually issued. Counting waiters and ErrOverloaded
+// refusals inflates exactly the ratio /health's cache stats exist to read —
+// telling a 503 under real load from one a cache minting a key per request
+// caused.
+func TestCachingReader_MissesCountIssuedQueriesOnly(t *testing.T) {
+	c := NewCachingReader(&fakeReader{}, 8, 8)
+	ref := newRef("g", "t")
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	from, to := now.Add(-time.Hour), now
+
+	// Saturate the leader slots so the next call is refused outright.
+	c.mu.Lock()
+	for i := range maxInflightLeaders {
+		c.inflight[cycleCacheKey{group: "g", name: fmt.Sprintf("filler-%d", i)}] = &cycleInflight{done: make(chan struct{})}
+	}
+	c.mu.Unlock()
+
+	before := c.Stats().CyclesMisses
+	if _, err := c.QueryCycles(context.Background(), ref, from, to, QueryFilter{}); !errors.Is(err, ErrOverloaded) {
+		t.Fatalf("want ErrOverloaded, got %v", err)
+	}
+	if got := c.Stats().CyclesMisses; got != before {
+		t.Fatalf("a refused query counted %d misses; it issued none, so the /health ratio now reads as cache thrash that never happened", got-before)
 	}
 }

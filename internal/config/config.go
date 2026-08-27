@@ -555,6 +555,12 @@ func RetentionWithinDateTime(days int, now time.Time) error {
 	if days < 1 {
 		return fmt.Errorf("%d days is a TTL in the past, which expires the whole table", days)
 	}
+	// Above the sanity ceiling before the arithmetic: AddDate wraps on a large
+	// enough day count, so the comparison below returns nil for values far
+	// past 2106 and the backstop admits what it exists to refuse.
+	if days > MaxRetentionDays {
+		return fmt.Errorf("%d days is past the %d-day ceiling", days, MaxRetentionDays)
+	}
 	if expiry := now.UTC().AddDate(0, 0, days); expiry.After(MaxDateTime) {
 		return fmt.Errorf("%d days expires at %s, past DateTime's %s ceiling",
 			days, expiry.Format("2006-01-02"), MaxDateTime.Format("2006-01-02"))
