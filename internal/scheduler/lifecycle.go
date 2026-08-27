@@ -27,6 +27,13 @@ type LifecycleOptions struct {
 	Reloads  <-chan struct{}
 	OnReload func(cfg *config.Config)
 
+	// OnRebuilt, if set, fires only after a Build succeeded and the new
+	// scheduler is running. Anything destructive keyed on "this target is
+	// gone" belongs here rather than in OnReload: a Build that fails keeps the
+	// OLD scheduler, which goes on probing targets OnReload has already
+	// decided are departed.
+	OnRebuilt func(cfg *config.Config)
+
 	// ExtraFingerprint contributes to the rebuild decision from outside the
 	// stored config. Cluster health targets are injected inside Build and
 	// never appear in the config, so Fingerprint(cfg) cannot see a mesh
@@ -48,7 +55,7 @@ func (o LifecycleOptions) fingerprint(cfg *config.Config) string {
 //   - OnReload (if set) fires first, unconditionally.
 //   - Fingerprint unchanged → keep the running scheduler.
 //   - Fingerprint changed → Build; on error keep the old one; on success
-//     cancel old, wait, and swap in the new.
+//     cancel old, wait, swap in the new, then fire OnRebuilt (if set).
 //
 // Returns the Build error if the initial config cannot be built; otherwise
 // returns nil once ctx is done and the scheduler has exited.
@@ -111,6 +118,9 @@ func RunLifecycle(ctx context.Context, opts LifecycleOptions) error {
 			<-schedDone
 			fp = newFP
 			schedCancel, schedDone = run(newSched)
+			if opts.OnRebuilt != nil {
+				opts.OnRebuilt(newCfg)
+			}
 		}
 	}
 }

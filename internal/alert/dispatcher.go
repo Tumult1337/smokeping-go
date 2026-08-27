@@ -85,13 +85,25 @@ func (d *ActionDispatcher) Wants(e Event) bool {
 }
 
 func (d *ActionDispatcher) Dispatch(ctx context.Context, e Event) {
+	cfg := d.store.Current()
+	actions := make([]NamedAction, 0, len(e.Alert.Actions))
+	for _, name := range e.Alert.Actions {
+		a, ok := cfg.Actions[name]
+		actions = append(actions, NamedAction{Name: name, Action: a, Found: ok})
+	}
+	d.DispatchActions(ctx, e, actions)
+}
+
+// DispatchActions implements ActionSnapshotDispatcher: it runs the actions it
+// is handed rather than re-resolving them, so a config edit between commit and
+// delivery cannot silently drop a page the evaluator has already committed.
+func (d *ActionDispatcher) DispatchActions(ctx context.Context, e Event, actions []NamedAction) {
 	if !d.Wants(e) {
 		return
 	}
-	cfg := d.store.Current()
-	for _, name := range e.Alert.Actions {
-		action, ok := cfg.Actions[name]
-		if !ok {
+	for _, na := range actions {
+		name, action := na.Name, na.Action
+		if !na.Found {
 			d.log.Warn("alert action not found", "action", name, "alert", e.AlertName)
 			continue
 		}

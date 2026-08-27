@@ -60,8 +60,32 @@ type Dispatcher interface {
 	Dispatch(ctx context.Context, e Event)
 }
 
+// NamedAction is one of an alert's actions as it was configured at the moment
+// the transition was committed. Found is false for a name cfg.Actions did not
+// resolve then.
+type NamedAction struct {
+	Name   string
+	Action config.Action
+	Found  bool
+}
+
+// ActionSnapshotDispatcher receives the actions captured at commit time rather
+// than resolving them itself. Delivery can now lag the commit by minutes — a
+// stalled shard holds up to dispatchShardDepth events, each up to
+// len(Actions) x actionTimeout — so a SIGHUP that renames or removes an action
+// in that window made Dispatch fail to resolve it and drop the page silently:
+// the transition was already committed, dispatch is change-gated with no
+// renotify, and nothing counted it. A Dispatcher that does not implement this
+// still gets Dispatch and resolves live.
+type ActionSnapshotDispatcher interface {
+	DispatchActions(ctx context.Context, e Event, actions []NamedAction)
+}
+
 // DispatchFilter lets a Dispatcher decline an event before the evaluator
-// queues it. Which transitions are worth notifying about is the dispatcher's
+// queues it. Wants is called with the evaluator's state lock held, so it must
+// be a pure, non-blocking function of the Event — ActionDispatcher's is a
+// two-field comparison. Anything that reads config, takes a lock or does I/O
+// belongs in Dispatch, which runs on the delivery worker. Which transitions are worth notifying about is the dispatcher's
 // policy, not the evaluator's, but the queue is a bounded resource the
 // evaluator owns — so the policy is asked rather than duplicated. A Dispatcher
 // that does not implement this receives every transition.
@@ -323,6 +347,9 @@ type queuedEvent struct {
 	ev    Event
 	bytes int64
 	shard int
+	// actions is the alert's action set as configured at commit time; nil
+	// when the dispatcher resolves its own.
+	actions []NamedAction
 }
 
 // shardFor maps a (target, alert) pair onto a delivery worker. FNV-1a over the
@@ -377,7 +404,14 @@ func eventBytes(ev Event) int64 {
 // which is the wait this queue exists to keep off every other goroutine. Each
 // exits after that delivery's own budget, abandoning whatever is queued.
 func (e *Evaluator) Close() {
+	// Under e.mu, which enqueueDispatch also holds: without it the closed
+	// check is a TOCTOU — a producer that read false could still land an
+	// event in a shard channel after that worker returned, committing a
+	// change-gated FIRING nobody delivers and leaving inflight unbalanced for
+	// anything waiting on it.
+	e.mu.Lock()
 	e.closed.Store(true)
+	e.mu.Unlock()
 	e.closeOnce.Do(func() {
 		queued := 0
 		for _, ch := range e.pending {
@@ -429,6 +463,10 @@ func (e *Evaluator) deliver(q queuedEvent) {
 	budget := time.Duration(max(len(ev.Alert.Actions), 1)) * actionTimeout
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
+	if d, ok := e.dispatcher.(ActionSnapshotDispatcher); ok && q.actions != nil {
+		d.DispatchActions(ctx, ev, q.actions)
+		return
+	}
 	e.dispatcher.Dispatch(ctx, ev)
 }
 
@@ -447,8 +485,23 @@ func (e *Evaluator) Refresh() error {
 		return err
 	}
 	e.pruneStaleAggregates(oldEnabled)
-	e.pruneDepartedTargets()
 	return nil
+}
+
+// PruneDeparted drops state for a (target, alert) pair the current config no
+// longer names. Separate from Refresh, and called only after a scheduler
+// rebuild has succeeded: RunLifecycle fires OnReload *before* Build and keeps
+// the previous scheduler when Build fails, so pruning there deleted the state
+// of targets the old scheduler was still probing. Their next cycle recreated
+// the entry at StateOK, so a firing alert's resolve transition never existed
+// and the page stayed open — and a sustained:N alert had to re-accumulate N
+// cycles before it could fire again. config.Validate does not check
+// Probe.Type while probe.Build rejects an unknown one, so a typo in the same
+// edit that removes a target reaches this.
+func (e *Evaluator) PruneDeparted() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pruneDepartedTargets()
 }
 
 // pruneDepartedTargets drops per-source state for a target or alert the
@@ -621,7 +674,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 // keeping a state nobody was told about. Called with e.mu held, which is what
 // makes the commit and the refusal one step and what makes the byte
 // reservation single-producer; the workers never take that lock.
-func (e *Evaluator) enqueueDispatch(ev Event) (bool, *dispatchRefusal) {
+func (e *Evaluator) enqueueDispatch(cfg *config.Config, ev Event) (bool, *dispatchRefusal) {
 	if e.closed.Load() {
 		return false, e.refuseDispatch(ev, "closed", 0, 0)
 	}
@@ -638,19 +691,36 @@ func (e *Evaluator) enqueueDispatch(ev Event) (bool, *dispatchRefusal) {
 	}
 	size := eventBytes(ev)
 	shard := shardFor(ev.Target.ID(), ev.AlertName)
+	actions := resolveActions(cfg, ev.Alert.Actions)
 	if held := e.queuedBytes[shard].Add(size); held > dispatchShardBytes {
 		e.queuedBytes[shard].Add(-size)
 		return false, e.refuseDispatch(ev, "bytes", held, dispatchShardBytes)
 	}
 	e.inflight.Add(1)
 	select {
-	case e.pending[shard] <- queuedEvent{ev: ev, bytes: size, shard: shard}:
+	case e.pending[shard] <- queuedEvent{ev: ev, bytes: size, shard: shard, actions: actions}:
 		return true, nil
 	default:
 		e.queuedBytes[shard].Add(-size)
 		e.inflight.Done()
 		return false, e.refuseDispatch(ev, "depth", int64(dispatchShardDepth), dispatchShardDepth)
 	}
+}
+
+// resolveActions captures an alert's actions as configured now, so a rename or
+// removal between commit and delivery cannot turn a committed page into a
+// "action not found" warning nobody counts. Returns nil when there is nothing
+// to capture, which leaves a dispatcher resolving live.
+func resolveActions(cfg *config.Config, names []string) []NamedAction {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]NamedAction, 0, len(names))
+	for _, n := range names {
+		a, ok := cfg.Actions[n]
+		out = append(out, NamedAction{Name: n, Action: a, Found: ok})
+	}
+	return out
 }
 
 // dispatchRefusal is one refused transition, returned rather than logged so
@@ -763,7 +833,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 					// that went quiet while firing would drop that resolve.
 					FiringSources: firingSources(bySource, now, window),
 				}
-				ok, refusal := e.enqueueDispatch(ev)
+				ok, refusal := e.enqueueDispatch(cfg, ev)
 				if ok {
 					toDispatch = append(toDispatch, ev)
 				} else {
@@ -821,7 +891,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 				// exactly the set the quorum decision was made on.
 				FiringSources: firingSources(bySource, now, window),
 			}
-			if ok, refusal := e.enqueueDispatch(ev); ok {
+			if ok, refusal := e.enqueueDispatch(cfg, ev); ok {
 				toDispatch = append(toDispatch, ev)
 			} else {
 				refused = append(refused, refusal)
@@ -932,7 +1002,7 @@ func scrubHealthAddresses(ev Event) Event {
 func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window, freshness time.Duration) (firing, live int) {
 	for src, st := range bySource {
 		if now.Sub(st.lastSeen) > window {
-			if now.Sub(st.lastCycle) > freshness {
+			if now.Sub(st.lastCycle) > alertIdentityRetention() {
 				delete(bySource, src)
 			} else {
 				st.state = StateOK
@@ -974,7 +1044,7 @@ func pruneQuietSources(bySource map[string]*alertState, now time.Time, window, f
 		if now.Sub(st.lastSeen) <= window {
 			continue
 		}
-		if st.state != StateFiring && now.Sub(st.lastCycle) > freshness {
+		if st.state != StateFiring && now.Sub(st.lastCycle) > alertIdentityRetention() {
 			delete(bySource, src)
 		}
 	}
@@ -999,6 +1069,18 @@ func firingSources(bySource map[string]*alertState, now time.Time, window time.D
 	}
 	slices.Sort(out)
 	return out
+}
+
+// alertIdentityRetention is how long a source's replay identity is kept after
+// its last cycle. It is alertFreshness at config.MaxProbeInterval — the widest
+// window any config this binary accepts could adopt — rather than the live
+// one, because the live one is recomputed from a hot-reloadable interval and
+// the deletion rule is only safe while it cannot widen: prune at a 20s
+// interval (5m), SIGHUP to 5m (30m), and a redelivered 8m-old cycle now passes
+// the freshness gate against a recreated entry whose seenCycle is false, which
+// admits it unconditionally and applies one measurement twice.
+func alertIdentityRetention() time.Duration {
+	return alertFreshness(config.MaxProbeInterval)
 }
 
 // alertFreshness is how old a cycle may be, measured on the master's receive

@@ -206,6 +206,10 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 			return scheduler.New(log, registry, fanout, local), nil
 		},
 		ExtraFingerprint: func() string { return healthSet().Fingerprint() },
+		// Destructive, so it waits for a Build that succeeded: a failed one
+		// keeps the previous scheduler probing targets this would have
+		// declared departed.
+		OnRebuilt: func(*config.Config) { evaluator.PruneDeparted() },
 		OnReload: func(c *config.Config) {
 			if err := evaluator.Refresh(); err != nil {
 				log.Error("alert refresh failed, keeping previous conditions", "err", err)

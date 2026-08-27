@@ -848,6 +848,7 @@ func TestRefreshDropsStateForDepartedTargets(t *testing.T) {
 	if err := ev.Refresh(); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
+	ev.PruneDeparted()
 
 	ev.mu.Lock()
 	defer ev.mu.Unlock()
@@ -2563,10 +2564,12 @@ func TestPrunedSourceStillRefusesItsReplayedCycle(t *testing.T) {
 	}
 }
 
-// The retained identity is bounded: past lastCycle+freshness every stamp the
-// entry holds is refused by the freshness gate itself, so keeping it buys
-// nothing and holding it longer is the unbounded per-source memory the prune
-// exists to avoid.
+// The retained identity is bounded: past lastCycle+alertIdentityRetention no
+// interval the config could adopt leaves the freshness gate admitting any
+// stamp the entry holds, so keeping it buys nothing and holding it longer is
+// the unbounded per-source memory the prune exists to avoid. The bound is that
+// widest window rather than the live one, which a SIGHUP can widen after the
+// deletion — see TestIdentityRetentionOutlastsAnyIntervalTheConfigCanAdopt.
 func TestPrunedIdentityIsEventuallyDeleted(t *testing.T) {
 	ev, _, clk := newTestEvaluatorClock(t, config.Alert{
 		Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
@@ -2578,7 +2581,7 @@ func TestPrunedIdentityIsEventuallyDeleted(t *testing.T) {
 	poison.Time = clk.t.Add(config.MaxFutureSkew)
 	ev.OnCycle(ctx, poison)
 
-	clk.advance(config.MaxFutureSkew + alertFreshness(time.Minute) + time.Minute)
+	clk.advance(config.MaxFutureSkew + alertIdentityRetention() + time.Minute)
 	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
 
 	ev.mu.Lock()
@@ -3274,6 +3277,7 @@ func TestHealthTargetWithASlashedSlaveNameSurvivesRefresh(t *testing.T) {
 	if err := ev.Refresh(); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
+	ev.PruneDeparted()
 
 	ev.mu.Lock()
 	defer ev.mu.Unlock()
@@ -3311,8 +3315,11 @@ func TestNonQuorumReapsQuietSourcesButNotFiringOnes(t *testing.T) {
 		t.Fatalf("fixture built %d sources, want 51", before)
 	}
 
-	// Well past alertFreshness for the 1m fixture interval.
-	clk.advance(time.Hour)
+	// Past alertIdentityRetention, which is deliberately wider than the live
+	// freshness window: the live one is recomputed from a hot-reloadable
+	// interval, and deleting an identity is only safe once no interval the
+	// config could adopt would still admit its stamps.
+	clk.advance(alertIdentityRetention() + time.Minute)
 	ev.OnCycle(context.Background(), cycleAt(clk, "live", 0))
 	ev.flush()
 
@@ -3321,7 +3328,7 @@ func TestNonQuorumReapsQuietSourcesButNotFiringOnes(t *testing.T) {
 	bySource := ev.states[key]
 	for i := range 50 {
 		if _, ok := bySource[fmt.Sprintf("ephemeral-%d", i)]; ok {
-			t.Fatalf("quiet source ephemeral-%d survived %v of silence; a non-quorum alert never reaps", i, time.Hour)
+			t.Fatalf("quiet source ephemeral-%d survived %v of silence; a non-quorum alert never reaps", i, alertIdentityRetention())
 		}
 	}
 	if st, ok := bySource["dead-while-firing"]; !ok || st.state != StateFiring {
@@ -3428,6 +3435,7 @@ func TestRefreshDropsAnAlertDetachedFromItsTarget(t *testing.T) {
 	if err := ev.Refresh(); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
+	ev.PruneDeparted()
 
 	ev.mu.Lock()
 	defer ev.mu.Unlock()
@@ -3578,5 +3586,156 @@ func TestExecSplitsOneActionsBudgetRatherThanExceedingIt(t *testing.T) {
 	// Output goes to /dev/null, so Wait has no copy goroutine to join.
 	if cmd.Stdout != nil || cmd.Stderr != nil {
 		t.Fatal("exec wires a pipe for output; CommandContext kills only the direct child, so an orphan holding it blocks Wait past the deadline")
+	}
+}
+
+// A replay identity may only be deleted once no interval the config could
+// adopt would still admit its stamps. alertFreshness is recomputed from a
+// hot-reloadable cfg.Interval, so pruning against the live value let this
+// through: prune at a 20s interval (5m window), SIGHUP to 5m (30m window),
+// and a redelivered 8m-old cycle passes the freshness gate against an entry
+// that was deleted and is recreated with seenCycle false — which admits
+// anything — applying one measurement twice.
+func TestIdentityRetentionOutlastsAnyIntervalTheConfigCanAdopt(t *testing.T) {
+	widest := alertFreshness(config.MaxProbeInterval)
+	if got := alertIdentityRetention(); got < widest {
+		t.Fatalf("identities are kept %v but a config may widen the freshness gate to %v; a replay arriving in between is applied twice",
+			got, widest)
+	}
+	// And it must not be keyed on the live interval, which is the defect.
+	for _, interval := range []time.Duration{time.Second, 20 * time.Second, time.Minute} {
+		if got := alertIdentityRetention(); got < alertFreshness(interval) {
+			t.Fatalf("interval %v derives a %v freshness window, past the %v identities are kept", interval, alertFreshness(interval), got)
+		}
+	}
+}
+
+// Delivery can now lag its commit by minutes — a stalled shard holds up to
+// dispatchShardDepth events, each up to len(Actions) x actionTimeout. Before
+// this, Dispatch resolved each action from the live config at that moment, so
+// an operator renaming or removing one while investigating turned a committed
+// FIRING into an "action not found" warning: change-gated with no renotify,
+// not counted as a refusal, the page simply gone.
+func TestActionsAreResolvedAtCommitNotAtDelivery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	write := func(actionName string) {
+		t.Helper()
+		raw := `{
+			"listen": ":8080", "interval": "1m", "pings": 20,
+			"storage": {"clickhouse": {"addr": "ch:9000"}},
+			"probes": {"icmp": {"type": "icmp", "timeout": "2s"}},
+			"targets": [{"group":"core","targets":[
+				{"name":"gw","host":"1.1.1.1","probe":"icmp","alerts":["page"]}
+			]}],
+			"alerts": {"page": {"condition":"loss_pct > 50","sustained":1,"actions":["` + actionName + `"]}},
+			"actions": {"` + actionName + `": {"type":"log"}}
+		}`
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	write("pager")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+
+	gate := make(chan struct{})
+	var mu sync.Mutex
+	var seen []NamedAction
+	disp := &snapshotDispatcher{gate: gate, mu: &mu, seen: &seen}
+
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, disp)
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	t.Cleanup(ev.Close)
+	clk := pinClock(ev, testBase)
+
+	cy := cycleAt(clk, "tokyo-1", 100)
+	cy.Target.Target.Alerts = []string{"page"}
+	ev.OnCycle(context.Background(), cy)
+
+	// The operator renames the action — and the alert's reference with it, so
+	// the new config validates — while the worker is still parked on the
+	// event committed against the old one.
+	write("pager-v2")
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	close(gate)
+	ev.flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 {
+		t.Fatalf("dispatcher saw %d actions, want 1", len(seen))
+	}
+	if !seen[0].Found {
+		t.Fatal("the action was resolved at delivery, after a rename, so a committed FIRING was dropped as \"action not found\" — change-gated, uncounted, and never retried")
+	}
+	if seen[0].Name != "pager" {
+		t.Fatalf("resolved %q, want the name committed with the transition", seen[0].Name)
+	}
+}
+
+type snapshotDispatcher struct {
+	gate chan struct{}
+	mu   *sync.Mutex
+	seen *[]NamedAction
+}
+
+func (s *snapshotDispatcher) Dispatch(context.Context, Event) {}
+func (s *snapshotDispatcher) DispatchActions(_ context.Context, _ Event, actions []NamedAction) {
+	<-s.gate
+	s.mu.Lock()
+	*s.seen = append(*s.seen, actions...)
+	s.mu.Unlock()
+}
+
+// flush must return after Close, whatever a concurrent producer was doing:
+// an event queued to a worker that has already returned leaves inflight
+// unbalanced forever and its transition committed but undelivered.
+//
+// This guards the invariant, not the fix. Close takes e.mu so the closed flag
+// is ordered against enqueueDispatch, which runs under it — but the window it
+// closes is a genuine race, narrow enough that removing the lock leaves this
+// green. Recorded as unguarded rather than papered over with a test that
+// happens to pass.
+func TestFlushReturnsAfterCloseUnderAConcurrentProducer(t *testing.T) {
+	for range 50 {
+		ev, _, clk := newTestEvaluatorClock(t, config.Alert{
+			Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"log"},
+		})
+		ev.dispatcher = dispatcherFunc(func(context.Context, Event) {})
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := range 20 {
+				clk.advance(time.Second)
+				loss := 0.0
+				if i%2 == 0 {
+					loss = 100
+				}
+				ev.OnCycle(context.Background(), cycleAt(clk, "tokyo-1", loss))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			ev.Close()
+		}()
+		wg.Wait()
+
+		done := make(chan struct{})
+		go func() { ev.flush(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("flush blocked after Close: an event was queued to a worker that had already returned, so inflight can never balance and the transition behind it is committed but undelivered")
+		}
 	}
 }

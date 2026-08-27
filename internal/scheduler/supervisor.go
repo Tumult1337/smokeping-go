@@ -21,6 +21,10 @@ type Supervisor struct {
 	Build    func(cfg *config.Config) (*Scheduler, error)
 	OnReload func(cfg *config.Config)
 
+	// OnRebuilt is forwarded to LifecycleOptions. See the field there: it is
+	// where anything destructive keyed on a departed target belongs.
+	OnRebuilt func(cfg *config.Config)
+
 	// Signals, when non-nil, is used as the store subscription channel so
 	// other producers — notably cluster registry changes — can request a
 	// rebuild through the same coalescing path as a config reload. Must be
@@ -47,6 +51,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		Build:            s.Build,
 		Reloads:          reloads,
 		OnReload:         s.OnReload,
+		OnRebuilt:        s.OnRebuilt,
 		ExtraFingerprint: s.ExtraFingerprint,
 	})
 }

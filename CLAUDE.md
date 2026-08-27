@@ -987,12 +987,15 @@ Key points a reader can't derive from a single file:
   Event for a health target before dispatch, because action templates
   render over the raw `Event` and would otherwise publish the address.
   Exec failures log only the action name and a fixed `execFailureCategory`
-  (timeout / exit code / start failed), matching the webhook and discord
+  (timeout / exit code / output held past exit / start failed), matching
+  the webhook and discord
   `httpFailureCategory` siblings: `a.Command` is env-expanded from the raw
   config bytes and can embed a resolved secret, `exec.Error` quotes
   argv[0], and the command's stdout+stderr is unbounded operator-script
   output. The `exec` action runs `cmd.Run()` with nil `Stdout`/`Stderr`
-  and `cmd.WaitDelay = actionTimeout`: `CombinedOutput` builds a pipe, and
+  and `cmd.WaitDelay = execWaitDelay` (1s, *subtracted* from the
+  action's own deadline rather than added to it — equal values made one
+  action's worst case 2× the ceiling `deliver` budgets per action): `CombinedOutput` builds a pipe, and
   `CommandContext` kills only the direct child, so any orphan holding the
   inherited descriptor — `notify.sh &`, `systemd-run`, a helper daemon —
   kept `Wait` blocked long past the deadline and wedged that shard's
@@ -1066,7 +1069,15 @@ Key points a reader can't derive from a single file:
   counters stay independent. Sources stale beyond the liveness window — `livenessWindow`, which is
   `alertFreshness` = max(3× interval, `config.MaxFutureSkew`) — are
   pruned from the live count so a dead slave can't suppress a real
-  alert. It is the freshness window rather than a bare 3× interval
+  alert. **The cost is a slower page under quorum:** a source is pruned from the
+  `live` denominator only past this window, so a dead slave holds
+  `Threshold(2) == 2` against `firing == 1` for its whole width — measured,
+  a two-source `"majority"` alert at a 20s interval dispatches FIRING after
+  5m of continuous total outage, where the bare 3× interval paged in ~1m.
+  That is the trade, taken deliberately: pruning sooner drops a
+  bursty-but-healthy slave between pushes, which collapses the quorum to
+  whichever source delivers continuously and fires on one. It is the
+  freshness window rather than a bare 3× interval
   because cycles arrive in pushed batches on the slave's own
   `cluster.push_every` cadence, which config does not bound: any cadence
   whose cycles the freshness gate still evaluates must also keep its
@@ -1143,8 +1154,13 @@ Key points a reader can't derive from a single file:
   applied a second time whenever its stamp was still alert-fresh,
   resolving a live alert or refiring a sustained one off replayed data.
   The identity is deleted only once `now − lastCycle` exceeds
-  `alertFreshness`, past which every stamp it holds is refused by the
-  freshness gate upstream and retention buys nothing. A *time-based*
+  `alertIdentityRetention` — `alertFreshness` at `config.MaxProbeInterval`,
+  the widest window **any** config this binary accepts could adopt, not the
+  live one. The live one is recomputed from a hot-reloadable interval, and
+  the deletion rule is sound only while it cannot widen: prune at a 20s
+  interval (5m), SIGHUP to 5m (30m), and a redelivered 8m-old cycle passes
+  the freshness gate against a recreated entry whose `seenCycle` is false,
+  which admits it unconditionally. A *time-based*
   global sweep was tried and reverted: retention is load-bearing,
   because a silent source's `StateFiring` is what dispatches its
   eventual resolve. Two bounded sweeps replace it. `pruneQuietSources` runs
@@ -1155,8 +1171,17 @@ Key points a reader can't derive from a single file:
   exemption: a source in `StateFiring` is never reaped whatever its age,
   because a per-source alert dispatches its resolve from exactly that
   state and a recreated entry starts at `StateOK`, which makes the
-  recovery a non-transition and leaves the page open. `pruneDepartedTargets`
-  sweeps on `Refresh`, dropping a `(target, alert)` **pair** the reloaded
+  recovery a non-transition and leaves the page open. `Evaluator.PruneDeparted`
+  sweeps **after a scheduler rebuild has succeeded**, never from `Refresh`:
+  `RunLifecycle` fires `OnReload` *before* `Build` and keeps the previous
+  scheduler when `Build` fails, so pruning there deleted state for targets
+  the old scheduler was still probing — their next cycle recreated the
+  entry at `StateOK`, so a firing alert's resolve transition never existed
+  and the page stayed open. `config.Validate` does not check `Probe.Type`
+  while `probe.Build` rejects an unknown one, so a typo in the same edit
+  that removes a target reaches exactly that path.
+  `LifecycleOptions.OnRebuilt` is where anything destructive keyed on a
+  departed target belongs. It drops a `(target, alert)` **pair** the reloaded
   config no longer names — keyed on the pair, because an alert that still
   exists for other targets but is detached from this one can produce no
   further cycle for this key either, and `evaluate` only ever iterates the
@@ -1309,6 +1334,12 @@ Key points a reader can't derive from a single file:
   panic takes the process down. `Close` signals the workers and returns
   without waiting — one may be inside a delivery that never answers, which
   is the wait every other goroutine is being spared.
+
+    An alert's actions are captured **at commit time** and handed to the
+  dispatcher through `ActionSnapshotDispatcher`, never re-resolved at
+  delivery: delivery can lag a commit by minutes on a stalled shard, and a
+  SIGHUP renaming an action in that window turned a committed FIRING into
+  an `alert action not found` warning — change-gated, uncounted, gone.
 
   `Event.FiringSources` names the sources firing at dispatch time
   (sorted; stale and unnamed sources excluded) and is populated on both
