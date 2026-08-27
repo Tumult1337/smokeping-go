@@ -689,9 +689,14 @@ func (e *Evaluator) enqueueDispatch(cfg *config.Config, ev Event) (bool, *dispat
 		// and there is nothing left to deliver.
 		return true, nil
 	}
-	size := eventBytes(ev)
 	shard := shardFor(ev.Target.ID(), ev.AlertName)
 	actions := resolveActions(cfg, ev.Alert.Actions)
+	// Both halves of what the queue retains. The action snapshot went
+	// uncharged for one round: config bounds neither the number of actions an
+	// alert names nor the length of any Template, so 20 actions with 4 KiB
+	// templates is ~82 KB retained and counted as zero — past the shard's own
+	// 8 MiB ceiling before a single Cycle byte was charged.
+	size := eventBytes(ev) + actionsBytes(actions)
 	if held := e.queuedBytes[shard].Add(size); held > dispatchShardBytes {
 		e.queuedBytes[shard].Add(-size)
 		return false, e.refuseDispatch(ev, "bytes", held, dispatchShardBytes)
@@ -705,6 +710,18 @@ func (e *Evaluator) enqueueDispatch(cfg *config.Config, ev Event) (bool, *dispat
 		e.inflight.Done()
 		return false, e.refuseDispatch(ev, "depth", int64(dispatchShardDepth), dispatchShardDepth)
 	}
+}
+
+// actionsBytes is what the commit-time action snapshot retains: the slice's
+// backing array plus every string in it. The snapshot also pins the old
+// config's strings alive past a SIGHUP, which the live-resolve path did not.
+func actionsBytes(actions []NamedAction) int64 {
+	n := int64(len(actions)) * int64(unsafe.Sizeof(NamedAction{}))
+	for _, a := range actions {
+		n += int64(len(a.Name) + len(a.Action.Type) + len(a.Action.URL) +
+			len(a.Action.Command) + len(a.Action.Template))
+	}
+	return n
 }
 
 // resolveActions captures an alert's actions as configured now, so a rename or
@@ -760,7 +777,6 @@ func (e *Evaluator) DispatchRefusals() uint64 { return e.dispatchRefusals.Load()
 // evaluator locked forever inside a process that keeps reporting healthy.
 func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration, aheadLimit int) (toDispatch []Event, skipped []time.Duration, refused []*dispatchRefusal) {
 	warmupWindow := stalenessWindow(cfg.Interval)
-	freshness := alertFreshness(cfg.Interval)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, name := range cy.Target.Target.Alerts {
@@ -817,7 +833,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 		}
 
 		if !alertCfg.Quorum.Enabled() {
-			pruneQuietSources(bySource, now, window, freshness)
+			pruneQuietSources(bySource, now, window)
 			if prev != st.state {
 				ev := Event{
 					Time:      cy.Time,
@@ -851,7 +867,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 			continue
 		}
 
-		firing, live := e.tally(bySource, now, window, freshness)
+		firing, live := e.tally(bySource, now, window)
 		next := StateOK
 		if live > 0 && firing >= alertCfg.Quorum.Threshold(live) {
 			next = StateFiring
@@ -993,13 +1009,19 @@ func scrubHealthAddresses(ev Event) Event {
 // deleting the whole entry recreated it with seenCycle false, which admits
 // anything, so the redelivery of a pruned source's cycle was applied a second
 // time and could resolve a live alert or refire a sustained one. The identity
-// is deleted only once no stamp it holds could pass the freshness gate —
-// every stamp is at most lastCycle, so past lastCycle+freshness any replay is
-// refused upstream and the entry buys nothing. Retention is bounded by the
+// is deleted only once no stamp it holds could pass any freshness gate the
+// config could adopt — every stamp is at most lastCycle, so past
+// lastCycle+alertIdentityRetention any replay is refused upstream and the
+// entry buys nothing. Not the live window: a SIGHUP can widen that after the
+// deletion, which is how a redelivery reached a recreated entry. Retention is bounded by the
 // same fact: ingest accepts a stamp at most config.MaxFutureSkew ahead of the
 // receive time, so an entry outlives its last cycle by at most
-// freshness+MaxFutureSkew.
-func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window, freshness time.Duration) (firing, live int) {
+// alertIdentityRetention+MaxFutureSkew — fixed at 3h34m44.9s, not the live
+// freshness window, which sits on the MaxFutureSkew floor at 5m for any
+// interval up to 100s. Deleting on the live value is unsound because a SIGHUP
+// can widen it after the fact; the cost is that a churning source's entry is
+// held roughly 43x longer.
+func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window time.Duration) (firing, live int) {
 	for src, st := range bySource {
 		if now.Sub(st.lastSeen) > window {
 			if now.Sub(st.lastCycle) > alertIdentityRetention() {
@@ -1023,9 +1045,9 @@ func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window
 // the quorum path alone, so a non-quorum alert accumulated an alertState — its
 // up-to-8 KiB ahead slice included — for every source name that ever pushed to
 // it, and firingSources then scanned all of them under e.mu on every
-// transition. The rule is tally's: past lastCycle+freshness every stamp the
-// entry holds is refused by the freshness gate upstream, so the replay
-// identity buys nothing.
+// transition. The rule is tally's: past lastCycle+alertIdentityRetention every
+// stamp the entry holds is refused by the freshness gate upstream whatever
+// interval the config later adopts, so the replay identity buys nothing.
 //
 // A source in StateFiring is exempt whatever its age. Unlike quorum, a
 // per-source alert dispatches its resolve from exactly this state when the
@@ -1033,7 +1055,7 @@ func (e *Evaluator) tally(bySource map[string]*alertState, now time.Time, window
 // makes the recovery a non-transition and the operator's page never closes.
 // The leak that leaves is bounded by sources that died while firing, which is
 // the set an operator is already looking at.
-func pruneQuietSources(bySource map[string]*alertState, now time.Time, window, freshness time.Duration) {
+func pruneQuietSources(bySource map[string]*alertState, now time.Time, window time.Duration) {
 	for src, st := range bySource {
 		// lastSeen first, exactly as tally orders it: lastCycle is the
 		// producer's own stamp, so keying on it alone deleted the state of a

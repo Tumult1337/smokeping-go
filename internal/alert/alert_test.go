@@ -3771,3 +3771,147 @@ func TestFlushReturnsAfterCloseUnderAConcurrentProducer(t *testing.T) {
 		}
 	}
 }
+
+// The identity-deletion rule must survive a SIGHUP that widens the freshness
+// gate. Keyed on the live alertFreshness, the sequence below deletes the
+// identity at a 20s interval (5m window) and then admits an 8m-old redelivery
+// once the interval becomes 5m (30m window) — against an entry recreated with
+// seenCycle false, which admits unconditionally, applying one measurement
+// twice. This drives both alertIdentityRetention() call sites; reverting
+// either to `freshness` reddens it.
+func TestRetentionSurvivesAnIntervalWidenedBySighup(t *testing.T) {
+	// Both reapers, because they are separate call sites on separate paths:
+	// tally runs only under quorum, pruneQuietSources only without it.
+	for _, quorum := range []bool{true, false} {
+		name := "non-quorum"
+		if quorum {
+			name = "quorum"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			write := func(interval string) {
+				t.Helper()
+				q := ""
+				if quorum {
+					q = `,"quorum":"majority"`
+				}
+				raw := `{
+					"listen": ":8080", "interval": "` + interval + `", "pings": 5,
+					"storage": {"clickhouse": {"addr": "ch:9000"}},
+					"probes": {"icmp": {"type": "icmp", "timeout": "2s"}},
+					"targets": [{"group":"core","targets":[
+						{"name":"gw","host":"1.1.1.1","probe":"icmp","alerts":["page"]}
+					]}],
+					"alerts": {"page": {"condition":"loss_pct > 50","sustained":3,"actions":["log"]` + q + `}},
+					"actions": {"log": {"type":"log"}}
+				}`
+				if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+			}
+			write("20s")
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			store := config.NewStore(path, cfg)
+			ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, &recordingDispatcher{})
+			if err != nil {
+				t.Fatalf("NewEvaluator: %v", err)
+			}
+			t.Cleanup(func() { closeOrReportLeak(t, ev) })
+			clk := pinClock(ev, testBase)
+			ctx := context.Background()
+
+			cycle := func(source string, loss float64) scheduler.Cycle {
+				c := cycleAt(clk, source, loss)
+				c.Target.Target.Alerts = []string{"page"}
+				return c
+			}
+
+			bad := cycle("tokyo-1", 100)
+			ev.OnCycle(ctx, bad)
+
+			key := aggKey{target: "core/gw", alert: "page"}
+			st, ok := snapshotSource(ev, key, "tokyo-1")
+			if !ok || st.consecHits != 1 {
+				t.Fatalf("setup: ok=%v consecHits=%d, want 1", ok, st.consecHits)
+			}
+			acceptedAt := st.lastSeen
+
+			// Past the live 5m window, well under alertIdentityRetention.
+			clk.advance(8 * time.Minute)
+			ev.OnCycle(ctx, cycle("master", 0)) // drives the reaper for this key
+
+			// The operator widens the interval; freshness becomes 30m.
+			write("5m")
+			if err := store.Reload(); err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			if err := ev.Refresh(); err != nil {
+				t.Fatalf("refresh: %v", err)
+			}
+
+			// A lost ack redelivers the original cycle. At 8m old the widened
+			// gate admits it, so only the retained identity can refuse it.
+			ev.OnCycle(ctx, bad)
+
+			st, ok = snapshotSource(ev, key, "tokyo-1")
+			if !ok {
+				t.Fatal("tokyo-1's entry is gone; a redelivery now recreates it with seenCycle false, which admits anything")
+			}
+			// lastSeen is the discriminator on both paths: admits() refuses a
+			// replay *before* lastSeen is written, so a retained identity
+			// leaves it at the original acceptance. A deleted-and-recreated
+			// entry stamps it with the redelivery's arrival.
+			if !st.lastSeen.Equal(acceptedAt) {
+				t.Fatalf("lastSeen moved %v to the redelivery — the identity was deleted on the live freshness window, which the SIGHUP then widened past, so one measurement was applied twice",
+					st.lastSeen.Sub(acceptedAt))
+			}
+		})
+	}
+}
+
+// Pinned from above by an independent ceiling, not by the constant's own body:
+// every entry is held this long under source churn, so a larger value is
+// unbounded per-source memory. Sizing a test's clk.advance() from the constant
+// leaves it green for any value at all.
+func TestIdentityRetentionStaysWithinItsMemoryCeiling(t *testing.T) {
+	const ceiling = 4 * time.Hour
+	if got := alertIdentityRetention(); got > ceiling {
+		t.Fatalf("identities are held %v, past the %v an operator's churn budget assumes", got, ceiling)
+	}
+}
+
+// The commit-time action snapshot is retained by the queue, so it has to be
+// charged against the shard's byte ceiling. config bounds neither the number
+// of actions an alert names nor any Template's length, so an uncharged
+// snapshot is unbounded retention counted as zero.
+func TestQueueChargesTheActionSnapshot(t *testing.T) {
+	const templateBytes = 4096
+	cfg := &config.Config{
+		Interval: time.Minute, Pings: 20,
+		Alerts:  map[string]config.Alert{"page": {Condition: "loss_pct > 50", Sustained: 1, Actions: []string{"pager"}}},
+		Actions: map[string]config.Action{"pager": {Type: "log", Template: strings.Repeat("x", templateBytes)}},
+	}
+	store := config.NewStore("", cfg)
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store,
+		dispatcherFunc(func(context.Context, Event) { <-gate }))
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
+	clk := pinClock(ev, testBase)
+
+	cy := cycleAt(clk, "tokyo-1", 100)
+	cy.Target.Target.Alerts = []string{"page"}
+	ev.OnCycle(context.Background(), cy)
+
+	if held := queuedBytesTotal(ev); held < templateBytes {
+		t.Fatalf("queue charged %d bytes for an event retaining a %d-byte action template; the snapshot is unbounded and counted as zero",
+			held, templateBytes)
+	}
+}
