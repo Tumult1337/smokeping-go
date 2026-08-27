@@ -337,8 +337,17 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
                 </span>
                 {PCT_LABELS.map((label, j) => {
                   const col = built.data[base + j] as (number | null)[] | undefined;
-                  const cursorVal = cursorIdx != null && col ? col[cursorIdx] : null;
-                  const v = cursorVal != null ? cursorVal : aggVals[j];
+                  // Keyed on the cursor, not on the value: a fully-lost cycle
+                  // has null columns on purpose, and falling through to the
+                  // window aggregate printed the window's own min/median/max
+                  // beside a badge that says "cycle" — the outage reading as
+                  // ordinary latency.
+                  const v =
+                    cursorIdx != null
+                      ? col
+                        ? col[cursorIdx]
+                        : null
+                      : aggVals[j];
                   const seriesIdx = base + j;
                   const off = hidden.has(seriesIdx);
                   return (

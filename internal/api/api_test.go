@@ -135,10 +135,14 @@ type cacheStatStub storage.CacheStats
 func (c cacheStatStub) Stats() storage.CacheStats { return storage.CacheStats(c) }
 
 func newTestServer(t *testing.T, opts ...testOpt) http.Handler {
+	return newTestServerWithInterval(t, time.Minute, opts...)
+}
+
+func newTestServerWithInterval(t *testing.T, interval time.Duration, opts ...testOpt) http.Handler {
 	t.Helper()
 	cfg := &config.Config{
 		Listen:   ":0",
-		Interval: time.Minute,
+		Interval: interval,
 		Pings:    5,
 		Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
 		Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
@@ -554,12 +558,12 @@ func TestOverviewHappyPathSingleSource(t *testing.T) {
 	one := func(v float64) *float64 { x := v; return &x }
 	r := &stubReader{
 		overview: []storage.OverviewSourceRow{{
-			Group:     "core",
-			Name:      "gw",
-			Source:    "master",
-			LossAvg:   12.4,
-			LossMax:   50.0,
-			RTTMedian: 18.2,
+			Group:   "core",
+			Name:    "gw",
+			Source:  "master",
+			LossAvg: 12.4,
+			LossMax: 50.0,
+			HasRTT:  true, RTTMedian: 18.2,
 			RTTP95:    31.0,
 			RTTMax:    120.0,
 			LastSeen:  now.Add(-5 * time.Second),
@@ -619,26 +623,26 @@ func TestOverviewWorstSourceWins(t *testing.T) {
 	r := &stubReader{
 		overview: []storage.OverviewSourceRow{
 			{
-				Group:     "core",
-				Name:      "gw",
-				Source:    "master",
-				LossAvg:   0.0,
-				LossMax:   0.0,
-				RTTMedian: 8.0,
-				RTTP95:    12.0,
-				RTTMax:    25.0,
-				LastSeen:  now,
+				Group:   "core",
+				Name:    "gw",
+				Source:  "master",
+				LossAvg: 0.0,
+				LossMax: 0.0,
+				HasRTT:  true, RTTMedian: 8.0,
+				RTTP95:   12.0,
+				RTTMax:   25.0,
+				LastSeen: now,
 			},
 			{
-				Group:     "core",
-				Name:      "gw",
-				Source:    "eu-west",
-				LossAvg:   18.0,
-				LossMax:   50.0,
-				RTTMedian: 40.0,
-				RTTP95:    80.0,
-				RTTMax:    200.0,
-				LastSeen:  now,
+				Group:   "core",
+				Name:    "gw",
+				Source:  "eu-west",
+				LossAvg: 18.0,
+				LossMax: 50.0,
+				HasRTT:  true, RTTMedian: 40.0,
+				RTTP95:   80.0,
+				RTTMax:   200.0,
+				LastSeen: now,
 			},
 		},
 	}
@@ -713,12 +717,12 @@ func TestOverviewSilentByStaleness(t *testing.T) {
 	// The handler should still flag it silent.
 	r := &stubReader{
 		overview: []storage.OverviewSourceRow{{
-			Group:     "core",
-			Name:      "gw",
-			Source:    "master",
-			LossAvg:   0.0,
-			RTTMedian: 8.0,
-			LastSeen:  time.Now().Add(-10 * time.Minute),
+			Group:   "core",
+			Name:    "gw",
+			Source:  "master",
+			LossAvg: 0.0,
+			HasRTT:  true, RTTMedian: 8.0,
+			LastSeen: time.Now().Add(-10 * time.Minute),
 		}},
 	}
 	h := twoTargetServer(t, r)
@@ -2188,4 +2192,84 @@ func TestCycleCountersPublishOnlyTheFieldsWeChose(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("storage.CycleCounters is %v, want %v — /hops serves it verbatim to anonymous callers", got, want)
 	}
+}
+
+// The `?step=` override is bounded by what it costs, not by how it compares to
+// the derived tier's width. Comparing widths put a cliff between 30d (720
+// buckets at step=1h) and 31d (744) — both inside the 500-1000 the ladder
+// itself targets — while the real protection is against 365d at step=1h, which
+// is 8760. The ceiling also rises with the ladder: past ~1000d the coarsest
+// tier already exceeds it, so a flat bound would refuse `?step=1d` on a window
+// about to be served at exactly that step.
+func TestStepOverrideIsBoundedByCostNotByTierWidth(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/api/v1/targets/core/gw/cycles?from=-30d&step=1h", http.StatusOK},
+		{"/api/v1/targets/core/gw/cycles?from=-31d&step=1h", http.StatusOK},
+		{"/api/v1/targets/core/gw/cycles?from=-41d&step=1h", http.StatusOK},
+		{"/api/v1/targets/core/gw/cycles?from=-180d&step=1h", http.StatusBadRequest},
+		{"/api/v1/targets/core/gw/cycles?from=-365d&step=1h", http.StatusBadRequest},
+		{"/api/v1/targets/core/gw/cycles?from=-3000d&step=1d", http.StatusOK},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			code, body := do(t, newTestServer(t, withReader(&stubReader{})), http.MethodGet, tc.path)
+			if code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", code, tc.want, body)
+			}
+		})
+	}
+}
+
+// /status trims per source, which bounds no total: the window is
+// statusRecentCycles cycles *per source* and a target's distinct origins are
+// bounded only by the registry's 512, so one anonymous GET could buffer and
+// marshal 25,600 points. And the derived window is not monotonically small —
+// config admits an interval up to config.MaxProbeInterval, where
+// statusRecentCycles x interval is ~59.7h, wider than the fixed 24h it
+// replaced.
+func TestStatusBoundsItsResponseAndItsWindow(t *testing.T) {
+	t.Run("response", func(t *testing.T) {
+		base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+		r := &stubReader{}
+		for s := range statusMaxSources * 4 {
+			for i := range statusRecentCycles + 5 {
+				r.cycles = append(r.cycles, storage.CyclePoint{
+					Time:   base.Add(time.Duration(i) * time.Minute),
+					Source: fmt.Sprintf("edge-%03d", s),
+				})
+			}
+		}
+		_, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, "/api/v1/targets/core/gw/status")
+		var got struct {
+			Recent []storage.CyclePoint `json:"recent"`
+		}
+		if err := json.Unmarshal([]byte(body), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		sources := map[string]int{}
+		for _, p := range got.Recent {
+			sources[p.Source]++
+		}
+		if len(sources) > statusMaxSources {
+			t.Fatalf("served %d sources, past the %d ceiling — one anonymous GET marshals the product of that and the per-source trim", len(sources), statusMaxSources)
+		}
+		for src, n := range sources {
+			if n != statusRecentCycles {
+				t.Fatalf("source %s served %d cycles, want a complete %d — sources are dropped whole, not shortened", src, n, statusRecentCycles)
+			}
+		}
+	})
+
+	t.Run("window", func(t *testing.T) {
+		r := &stubReader{}
+		h := newTestServerWithInterval(t, config.MaxProbeInterval, withReader(r))
+		if code, body := do(t, h, http.MethodGet, "/api/v1/targets/core/gw/status"); code != http.StatusOK {
+			t.Fatalf("status = %d (body %s)", code, body)
+		}
+		if got := r.lastTo.Sub(r.lastFrom); got > statusWindowCap {
+			t.Fatalf("scan window = %s at the widest configurable interval, past the %s ceiling the fixed window carried", got, statusWindowCap)
+		}
+	})
 }

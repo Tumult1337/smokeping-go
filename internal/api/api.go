@@ -1,14 +1,17 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -190,7 +193,7 @@ func Serve(ctx context.Context, log *slog.Logger, addr string, handler http.Hand
 		// before ClickHouse can finish, surfaces as 502 to the UI, and
 		// prevents CachingReader from ever warming the entry.
 		ReadTimeout:  60 * time.Second,
-		WriteTimeout: 120 * time.Second,
+		WriteTimeout: ServerWriteTimeout,
 		IdleTimeout:  120 * time.Second,
 	}
 	errCh := make(chan error, 1)
@@ -782,6 +785,20 @@ func redactAllHopAddresses(hops []storage.HopPoint) []storage.HopPoint {
 // kept and each result held a 256-entry cycle-cache slot.
 const statusRecentCycles = 50
 
+// statusWindowCap bounds the scan whatever the configured interval, restoring
+// the ceiling the fixed 24h window carried.
+const statusWindowCap = 24 * time.Hour
+
+// statusMaxSources bounds the response, which trimming per source does not:
+// the window is statusRecentCycles cycles *per source*, and a target's distinct
+// origins are bounded only by the registry's 512, so 25,600 points could be
+// buffered and marshalled for one anonymous GET. Thirty-two is more origins
+// than any real target is probed by, and the 1,600-point product is the same
+// order as the 500-1000 the cycle ladder targets for a chart. Past it the
+// least recently active sources are dropped whole rather than every source
+// being shortened, so what is served stays a complete series.
+const statusMaxSources = 32
+
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	ref, ok := s.resolveTarget(w, r)
 	if !ok {
@@ -792,13 +809,19 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	to := time.Now()
-	from := to.Add(-time.Duration(statusRecentCycles) * s.store.Current().Interval)
+	// Capped, because the derived window is not monotonically small:
+	// config.Validate admits an interval up to config.MaxProbeInterval, where
+	// statusRecentCycles x interval is ~59.7h — wider than the fixed 24h this
+	// replaced, on an endpoint whose query carries no LIMIT and takes no
+	// from/to override.
+	from := to.Add(-min(time.Duration(statusRecentCycles)*s.store.Current().Interval, statusWindowCap))
 	points, err := s.reader.QueryCycles(r.Context(), ref, from, to, storage.QueryFilter{Source: r.URL.Query().Get("source")})
 	if err != nil {
 		s.writeQueryErr(w, "query status", err)
 		return
 	}
 	points = trimPerSource(points, statusRecentCycles)
+	points = keepRecentSources(points, statusMaxSources)
 	// Echoed for the reason /cycles echoes its window: the scan is bounded at
 	// statusRecentCycles intervals, so a target silent longer than that comes
 	// back empty — which is the honest answer, but without the window a caller
@@ -842,6 +865,45 @@ func trimPerSource(points []storage.CyclePoint, n int) []storage.CyclePoint {
 	}
 	return out
 }
+
+// keepRecentSources drops whole sources past n, keeping those whose newest
+// point is newest. Dropping whole sources rather than shortening every one
+// keeps each series that is served complete, which is what a status strip
+// reads.
+func keepRecentSources(points []storage.CyclePoint, n int) []storage.CyclePoint {
+	newest := make(map[string]time.Time, 8)
+	for _, p := range points {
+		if p.Time.After(newest[p.Source]) {
+			newest[p.Source] = p.Time
+		}
+	}
+	if len(newest) <= n {
+		return points
+	}
+	sources := slices.SortedFunc(maps.Keys(newest), func(a, b string) int {
+		if c := newest[b].Compare(newest[a]); c != 0 {
+			return c
+		}
+		return cmp.Compare(a, b)
+	})
+	keep := make(map[string]struct{}, n)
+	for _, src := range sources[:n] {
+		keep[src] = struct{}{}
+	}
+	out := make([]storage.CyclePoint, 0, len(points))
+	for _, p := range points {
+		if _, ok := keep[p.Source]; ok {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ServerWriteTimeout is how long a response may take before the connection is
+// closed. Exported because master's ingest budget is derived from it: past it
+// nobody is waiting for the result, so work continuing beyond is work no
+// caller can observe.
+const ServerWriteTimeout = 120 * time.Second
 
 func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if s.uiFS == nil {
@@ -990,15 +1052,39 @@ func parseRelativeDuration(s string) (time.Duration, error) {
 // (?step=1h at 365d is 24x the ladder). Each bound is the ladder's own tier
 // rather than a second copy of its threshold, so widening a tier widens the
 // override with it.
+// maxOverrideBuckets is the row count a `?step=` override may reach, and it is
+// the ladder's own upper target. Comparing the override against the derived
+// *tier* instead refused by width rather than by cost, which put the boundary
+// between 30d (720 buckets at step=1h, served) and 31d (744, refused) — both
+// comfortably inside the band the ladder itself aims for.
+const maxOverrideBuckets = 1000
+
+// withinOverrideBuckets allows an override that costs no more than either the
+// ladder's target or the ladder's own choice for this window. The second term
+// is load-bearing: the coarsest tier is 1d, so past ~1000d the derived step
+// already exceeds maxOverrideBuckets, and a flat bound would refuse `?step=1d`
+// on a window it is about to serve at exactly that step anyway.
+func withinOverrideBuckets(step time.Duration, from, to time.Time) bool {
+	span := to.Sub(from)
+	if span <= 0 {
+		return true
+	}
+	ceiling := int64(maxOverrideBuckets)
+	if derived := storage.PickCycleStep(span); derived > 0 {
+		ceiling = max(ceiling, int64(span/derived))
+	}
+	return int64(span/step) <= ceiling
+}
+
 func pickStep(override string, from, to time.Time) (step time.Duration, ok bool) {
 	derived := storage.PickCycleStep(to.Sub(from))
 	switch override {
 	case "raw":
 		return 0, derived == 0
 	case "1h":
-		return time.Hour, derived <= time.Hour
+		return time.Hour, withinOverrideBuckets(time.Hour, from, to)
 	case "1d":
-		return 24 * time.Hour, derived <= 24*time.Hour
+		return 24 * time.Hour, withinOverrideBuckets(24*time.Hour, from, to)
 	}
 	return derived, true
 }

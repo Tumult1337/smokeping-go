@@ -144,9 +144,16 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 		collapsed := collapseSources(matches)
 		dto.LossAvg = &collapsed.LossAvg
 		dto.LossMax = &collapsed.LossMax
-		dto.RTTMedian = &collapsed.RTTMedian
-		dto.RTTP95 = &collapsed.RTTP95
-		dto.RTTMax = &collapsed.RTTMax
+		// Left nil when the selected source measured no latency at all: with
+		// every bucket fully lost the three aggregates are 0, not absent, and
+		// publishing that made a target at 100% loss render as the fleet's
+		// fastest — which collapseSources selects deliberately, because it
+		// takes the worst-loss row.
+		if collapsed.HasRTT {
+			dto.RTTMedian = &collapsed.RTTMedian
+			dto.RTTP95 = &collapsed.RTTP95
+			dto.RTTMax = &collapsed.RTTMax
+		}
 		dto.WorstSource = collapsed.WorstSource
 		ls := collapsed.LastSeen
 		dto.LastSeen = &ls
@@ -200,11 +207,14 @@ func probeType(cfg *config.Config, key string) string {
 // renders. Kept separate from overviewRowDTO so the collapse logic can be
 // tested without going through JSON.
 type collapsedRow struct {
-	LossAvg     float64
-	LossMax     float64
-	RTTMedian   float64
-	RTTP95      float64
-	RTTMax      float64
+	LossAvg   float64
+	LossMax   float64
+	RTTMedian float64
+	RTTP95    float64
+	RTTMax    float64
+	// HasRTT is the selected source's own flag: with every bucket fully lost
+	// the three aggregates read 0, which is a latency nobody measured.
+	HasRTT      bool
 	WorstSource string
 	LastSeen    time.Time
 	Sparkline   []*float64
@@ -235,6 +245,7 @@ func collapseSources(rows []storage.OverviewSourceRow) collapsedRow {
 		LossMax:     worst.LossMax,
 		RTTMedian:   worst.RTTMedian,
 		RTTP95:      worst.RTTP95,
+		HasRTT:      worst.HasRTT,
 		WorstSource: worst.Source,
 		LastSeen:    worst.LastSeen,
 	}

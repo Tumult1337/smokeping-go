@@ -293,6 +293,11 @@ type OverviewSourceRow struct {
 	RTTMedian float64
 	RTTP95    float64
 	RTTMax    float64
+	// HasRTT is false when every bucket in the window was fully lost. The
+	// three fields above are then 0 rather than absent — quantilesExactWeighted
+	// with all-zero weights returns 0, and max() over all-zero buckets is 0 —
+	// which renders as the fleet's fastest target instead of its worst.
+	HasRTT    bool
 	LastSeen  time.Time
 	Sparkline []*float64
 }

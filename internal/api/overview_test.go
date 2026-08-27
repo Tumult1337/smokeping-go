@@ -41,7 +41,7 @@ func overviewTestServer(t *testing.T) http.Handler {
 	mk := func(name, source string, loss float64) storage.OverviewSourceRow {
 		return storage.OverviewSourceRow{
 			Group: "core", Name: name, Source: source,
-			LossAvg: loss, LossMax: loss, RTTMedian: 10, RTTP95: 20, RTTMax: 30,
+			LossAvg: loss, LossMax: loss, HasRTT: true, RTTMedian: 10, RTTP95: 20, RTTMax: 30,
 			LastSeen: now,
 		}
 	}
@@ -262,5 +262,59 @@ func TestOverviewHealthTargetsHonourSourceFilter(t *testing.T) {
 	}
 	if _, ok := ids[slavehealth.Group+"/berlin"]; ok {
 		t.Errorf("berlin's view includes its own health target, which it never probes: %v", ids)
+	}
+}
+
+// quantilesExactWeighted with all-zero weights returns 0 and max() over
+// all-zero buckets is 0, so a target at 100% loss that is still reporting
+// yields rtt_median = rtt_p95 = rtt_max = 0. Publishing those as real numbers
+// made it render as the fleet's fastest target — and collapseSources picks the
+// worst-loss row deliberately, so the fully-lost source is exactly the one
+// whose fabricated 0.0 ms is shown.
+func TestOverviewOmitsLatencyForAFullyLostTarget(t *testing.T) {
+	now := time.Now()
+	r := &stubReader{overview: []storage.OverviewSourceRow{{
+		Group: "core", Name: "gw", Source: "edge-1",
+		LossAvg: 100, LossMax: 100,
+		RTTMedian: 0, RTTP95: 0, RTTMax: 0, HasRTT: false,
+		LastSeen: now,
+	}}}
+	code, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, "/api/v1/overview")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", code, body)
+	}
+	var got struct {
+		Rows []struct {
+			Name      string   `json:"id"`
+			RTTMedian *float64 `json:"rtt_median"`
+			RTTP95    *float64 `json:"rtt_p95"`
+			RTTMax    *float64 `json:"rtt_max"`
+			Silent    bool     `json:"silent"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, body)
+	}
+	var row *struct {
+		Name      string   `json:"id"`
+		RTTMedian *float64 `json:"rtt_median"`
+		RTTP95    *float64 `json:"rtt_p95"`
+		RTTMax    *float64 `json:"rtt_max"`
+		Silent    bool     `json:"silent"`
+	}
+	for i := range got.Rows {
+		if got.Rows[i].Name == "core/gw" {
+			row = &got.Rows[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("no row for core/gw in %s", body)
+	}
+	if row.Silent {
+		t.Fatal("a target still reporting cycles must not read as silent")
+	}
+	if row.RTTMedian != nil || row.RTTP95 != nil || row.RTTMax != nil {
+		t.Fatalf("a fully-lost target published median=%v p95=%v max=%v; zero is a latency nobody measured, and it sorts as the fleet's fastest",
+			row.RTTMedian, row.RTTP95, row.RTTMax)
 	}
 }

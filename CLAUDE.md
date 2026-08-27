@@ -147,14 +147,26 @@ Key points a reader can't derive from a single file:
   and `/hops/timeline` 7d (plus one probe origin per request — see the
   hop row caps below), and every `?step=` override on `/cycles` bounded by the ladder's own
   tier for the window — `raw` by `storage.PickCycleStep(span) == 0`,
-  `1h`/`1d` by `derived <= override` — rather than second copies of the
-  thresholds, so widening a tier widens the override with it, and an
-  override finer than the tier is a 400 rather than served. `/status`
-  scans only `api.statusRecentCycles` (50) × the live interval instead of
-  an unbucketed 24h — 50 intervals is 50 cycles *per source*, so the trim
+  `1h`/`1d` by `withinOverrideBuckets`, which admits any override
+  producing no more than `max(maxOverrideBuckets, the ladder's own bucket
+  count)` rows. Comparing widths against the derived tier instead refused
+  by shape rather than by cost, putting a cliff between 30d (720 buckets
+  at `step=1h`, served) and 31d (744, refused) — both inside the 500–1000
+  the ladder itself targets. The second term is load-bearing: the coarsest
+  tier is 1d, so past ~1000d the derived step already exceeds
+  `maxOverrideBuckets`, and a flat bound would refuse `?step=1d` on a
+  window about to be served at exactly that step. `/status`
+  scans `api.statusRecentCycles` (50) × the live interval, capped at
+  `statusWindowCap` (24h) — the derived window is not monotonically small,
+  and at `config.MaxProbeInterval` it reaches ~59.7h, wider than the fixed
+  24h it replaced. 50 intervals is 50 cycles *per source*, so the trim
   is per source too (`trimPerSource`); across sources it described a
   different quantity from the window and showed 8 cycles each on a
-  6-source install. It echoes `from`/`to` for the reason `/cycles` does:
+  6-source install. Per-source trimming bounds no total, so
+  `statusMaxSources` (32) caps the response as well — a target's distinct
+  origins are bounded only by the registry's 512. Past it the least
+  recently active sources are dropped **whole**, so every series served is
+  complete. It echoes `from`/`to` for the reason `/cycles` does:
   a target silent longer than the window comes back empty, which is the
   honest answer but is otherwise indistinguishable from a target that
   never existed.

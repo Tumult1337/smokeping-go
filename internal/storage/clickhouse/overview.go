@@ -52,6 +52,12 @@ SELECT
   quantilesExactWeighted(0.5)(b_median, b_recv_total)[1]     AS rtt_median,
   quantilesExactWeighted(0.95)(b_p95,    b_recv_total)[1]    AS rtt_p95,
   max(b_max)                                                 AS rtt_max,
+  -- The same guard the sparkline arrays get, for the scalars: with every
+  -- bucket fully lost, quantilesExactWeighted returns 0 and max(b_max) is 0,
+  -- and the handler took the address of all three unconditionally — so a
+  -- fully-lost target reported 0.0 ms and sorted as the fastest in the
+  -- fleet, which collapseSources then selects deliberately as the worst row.
+  sum(b_recv_total) > 0                                      AS has_rtt,
   max(b_last_seen)                                           AS last_seen,
   -- Two parallel arrays so the handler can assemble a fixed-length sparkline
   -- without losing "this slot had no data" — Array(Nullable(Float64)) round-
@@ -105,6 +111,7 @@ GROUP BY target_group, target_id, source`, inClause)
 			&row.Group, &row.Name, &row.Source,
 			&row.LossAvg, &row.LossMax,
 			&row.RTTMedian, &row.RTTP95, &row.RTTMax,
+			&row.HasRTT,
 			&row.LastSeen,
 			&sparkIx, &sparkVl,
 		); err != nil {

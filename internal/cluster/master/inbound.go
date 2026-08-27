@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tumult/gosmokeping/internal/api"
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -21,11 +22,9 @@ import (
 // work nobody is waiting for.
 const (
 	sinkCycleBudget = 30 * time.Second
-	// Kept equal to api's server WriteTimeout by hand: neither package can
-	// import the other, and the value is a bound on this handler rather than a
-	// protocol constant worth moving into cluster. If that timeout changes,
-	// change this with it.
-	sinkBatchBudget = 120 * time.Second
+	// Taken from api rather than copied: past the write timeout the connection
+	// is closed and the slave requeues, so the two must move together.
+	sinkBatchBudget = api.ServerWriteTimeout
 )
 
 func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, int) {
@@ -52,11 +51,10 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 	}
 
 	// One budget for the whole batch, with each cycle bounded inside it. Per
-	// cycle alone bounded nothing in aggregate: MaxCyclesPerBatch × the per-
-	// cycle budget is ~8.5 hours of handler, and the write timeout that would
-	// close the connection does not stop the goroutine, so PushSink.Requeue
-	// resends and each retry starts another one. sinkBatchBudget is that
-	// write timeout, because past it nobody is waiting for the result.
+	// cycle alone bounded nothing in aggregate: MaxCyclesPerBatch × the
+	// per-cycle budget is ~8.5 hours of handler, and the write timeout that
+	// would close the connection does not stop the goroutine, so
+	// PushSink.Requeue resends and each retry starts another one.
 	batchCtx, cancelBatch := context.WithTimeout(context.Background(), sinkBatchBudget)
 	defer cancelBatch()
 
