@@ -586,6 +586,11 @@ func resetTraceErrThrottle() {
 }
 
 func TestICMPProbeWarnsOnTransientTraceError(t *testing.T) {
+	// The helper, not `res == nil`: a socket that cannot be opened is now a
+	// measurement never taken, so Probe returns a non-nil zero Result there and
+	// the old inference stopped skipping — this test then ran its trace
+	// assertions on a host that never reached the trace.
+	requireICMPSocket(t)
 	resetTraceErrThrottle()
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -602,7 +607,7 @@ func TestICMPProbeWarnsOnTransientTraceError(t *testing.T) {
 
 	res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1)
 	if res == nil {
-		t.Skipf("ICMP echo unavailable here (no unprivileged ping / CAP_NET_RAW): %v", err)
+		t.Fatalf("Probe returned no result: %v", err)
 	}
 	if !strings.Contains(buf.String(), "icmp trace error") {
 		t.Fatalf("transient trace error did not reach Warn:\n%s", buf.String())
