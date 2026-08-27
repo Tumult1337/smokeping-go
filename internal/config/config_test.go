@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/netip"
@@ -797,5 +798,60 @@ func TestValidateBoundsTheHeaderBearingClusterFields(t *testing.T) {
 				t.Fatalf("unexpected: %v", err)
 			}
 		})
+	}
+}
+
+// Validate must apply the master's whole admission rule, not a subset. Since
+// a marked 400 became fatal to the slave process, a name the master refuses is
+// a name systemd restarts forever — on a config this package accepted.
+// "master" is the natural copy-paste from a master config, whose cluster.source
+// defaults to exactly that.
+func TestValidateRefusesEveryNameTheMasterWould(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ok   bool
+	}{
+		{"tokyo-1", true},
+		{strings.Repeat("n", MaxSlaveNameLen), true},
+		{strings.Repeat("n", MaxSlaveNameLen+1), false},
+		{"master", false},
+		{"fra\t1", false},
+		{"fra\x7f1", false},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.name), func(t *testing.T) {
+			if got := ValidSlaveName(tc.name); got != tc.ok {
+				t.Fatalf("ValidSlaveName = %v, want %v", got, tc.ok)
+			}
+			cfg := &Config{Cluster: &Cluster{
+				MasterURL: "https://master.example", Token: "tok", Name: tc.name,
+			}}
+			err := cfg.ValidateMinimal()
+			if tc.ok && err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatal("validated a name the master refuses; the slave exits non-zero on that refusal and systemd restarts it forever")
+			}
+		})
+	}
+}
+
+// The registry inverts slave_addrs to decide which peer may hold an address.
+// Two names on one address made that choice depend on Go's map iteration
+// order — a different health mesh, and a different scheduler fingerprint, per
+// signal. ParseReachableAddr unmaps, so the duplicate can be invisible.
+func TestParsedSlaveAddrsRefusesADuplicatePin(t *testing.T) {
+	for _, pins := range []map[string]string{
+		{"tokyo-1": "10.0.0.5", "tokyo-1a": "10.0.0.5"},
+		{"a": "10.0.0.5", "b": "::ffff:10.0.0.5"},
+	} {
+		c := &Cluster{SlaveAddrs: pins}
+		if _, err := c.ParsedSlaveAddrs(); err == nil {
+			t.Fatalf("%v accepted: the registry's inversion is then non-deterministic and peer selection flips per signal", pins)
+		}
+	}
+	c := &Cluster{SlaveAddrs: map[string]string{"a": "10.0.0.5", "b": "10.0.0.6"}}
+	if _, err := c.ParsedSlaveAddrs(); err != nil {
+		t.Fatalf("distinct pins must load: %v", err)
 	}
 }

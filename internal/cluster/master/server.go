@@ -106,20 +106,9 @@ const maxSlaveNameLen = config.MaxSlaveNameLen
 // stamping source="master" would collide with and corrupt the master's own
 // data and alert series. Control characters are rejected so the label stays
 // clean in ClickHouse and the alert exec environment.
-func validSlaveName(name string) bool {
-	if name == "" || len(name) > maxSlaveNameLen {
-		return false
-	}
-	if name == "master" {
-		return false
-	}
-	for _, c := range name {
-		if c < 0x20 || c == 0x7f {
-			return false
-		}
-	}
-	return true
-}
+// validSlaveName is config.ValidSlaveName; the rule lives there so
+// Config.Validate can refuse a name this would, rather than a subset of it.
+func validSlaveName(name string) bool { return config.ValidSlaveName(name) }
 
 // refusePermanently answers 400 and marks it as the master's own verdict, so
 // a slave can tell it from the same status arriving out of an intermediary.

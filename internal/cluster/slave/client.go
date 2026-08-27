@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/tumult/gosmokeping/internal/cluster"
 )
@@ -44,9 +43,11 @@ var ErrNotModified = errors.New("cluster: 304 not modified")
 // /register cadence re-establishes us.
 var ErrNotFound = errors.New("cluster: 404 not found")
 
-// ErrRejected signals a 4xx the master will answer identically however often
-// the batch is resent — a batch outside the ingest bounds, or one whose oldest
-// cycle aged past config.MaxCycleAge during an outage. Push callers drop it:
+// ErrRejected signals a 4xx that resending will not change: every client error
+// except 401, 403, 404 and the retryable set. It is NOT proof the master issued
+// the verdict — any intermediary can produce one — which is why only
+// ErrMasterRefused, keyed on the master's own header, is fatal to the process.
+// Push callers drop the batch on either:
 // requeueing head-of-line blocks the ring, so every later flush re-sends the
 // same doomed batch while drop-oldest discards the live cycles behind it.
 var ErrRejected = errors.New("cluster: batch permanently rejected")
@@ -112,7 +113,7 @@ func NewClient(masterURL, token, name, version, advertise string) *Client {
 		name:      name,
 		version:   version,
 		advertise: advertise,
-		http:      &http.Client{Timeout: 15 * time.Second},
+		http:      &http.Client{Timeout: cluster.PushTimeout},
 	}
 }
 

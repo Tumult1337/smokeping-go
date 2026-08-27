@@ -33,6 +33,12 @@ const HeaderRefusal = "X-Cluster-Refusal"
 // RefusalPermanent is HeaderRefusal's only value.
 const RefusalPermanent = "permanent"
 
+// PushTimeout is how long a slave waits on any master request before giving up
+// and requeueing. It bounds the master's ingest work too: past it nobody is
+// reading the response, so a handler still running is an orphan holding a
+// whole batch. Lives here because both peers derive from it.
+const PushTimeout = 15 * time.Second
+
 // RegisterReq is posted by a slave on boot and repeated as a heartbeat. The
 // master records the last-seen time and the reported version so the UI can
 // surface slaves that have gone silent.

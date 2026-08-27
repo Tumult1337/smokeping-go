@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -359,9 +360,16 @@ func (r *Registry) Peers() []slavehealth.Peer {
 	defer r.mu.RUnlock()
 	out := make([]slavehealth.Peer, 0, len(r.slaves))
 	pins := r.currentPins()
+	// config.ParsedSlaveAddrs refuses duplicate values, so this inversion is
+	// injective for any config that loaded. Built over sorted names anyway:
+	// a stale pinsFn or a future caller that skips validation would otherwise
+	// make peer selection depend on map iteration order, which is the one
+	// thing this function's own doc comment says the sort exists to prevent.
 	pinnedTo := make(map[netip.Addr]string, len(pins))
-	for name, addr := range pins {
-		pinnedTo[addr] = name
+	for _, name := range slices.Sorted(maps.Keys(pins)) {
+		if _, taken := pinnedTo[pins[name]]; !taken {
+			pinnedTo[pins[name]] = name
+		}
 	}
 	for _, info := range r.slaves {
 		if !info.Advertise.IsValid() {

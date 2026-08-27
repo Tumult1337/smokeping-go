@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -477,8 +479,8 @@ func validateClusterHeaders(c *Cluster) error {
 	if c == nil {
 		return nil
 	}
-	if len(c.Name) > MaxSlaveNameLen {
-		return fmt.Errorf("cluster.name is %d bytes, past the %d the master accepts", len(c.Name), MaxSlaveNameLen)
+	if c.Name != "" && !ValidSlaveName(c.Name) {
+		return fmt.Errorf("cluster.name %q is one the master refuses: must be ≤%d bytes, not \"master\", and free of control characters", c.Name, MaxSlaveNameLen)
 	}
 	if len(c.Advertise) > MaxSlaveFieldLen {
 		return fmt.Errorf("cluster.advertise is %d bytes, past the %d the master accepts", len(c.Advertise), MaxSlaveFieldLen)
@@ -494,6 +496,28 @@ const (
 	MaxSlaveNameLen  = 128
 	MaxSlaveFieldLen = 256
 )
+
+// ValidSlaveName is the master's own admission rule for a cluster name, kept
+// here so Validate applies exactly it rather than a subset. Mirroring only the
+// length left `cluster.name: "master"` — the natural copy-paste from a master
+// config, whose cluster.source defaults to that — and a name carrying a stray
+// control character from a templated value validating locally and then being
+// refused at every /register and /config, which since that refusal became
+// fatal is a crash loop under systemd on a config this package accepted.
+func ValidSlaveName(name string) bool {
+	if name == "" || len(name) > MaxSlaveNameLen {
+		return false
+	}
+	if name == "master" {
+		return false
+	}
+	for _, c := range name {
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 // ICMP schedule policy. These live here rather than in probe because a
 // schedule the icmp probe cannot serve must never be stored or served:
@@ -894,11 +918,24 @@ func (c *Cluster) ParsedSlaveAddrs() (map[string]netip.Addr, error) {
 		return nil, nil
 	}
 	out := make(map[string]netip.Addr, len(c.SlaveAddrs))
-	for name, raw := range c.SlaveAddrs {
-		addr, err := ParseReachableAddr(raw)
+	// Sorted, so a duplicate value is reported against the same pair on every
+	// load rather than against whichever name map iteration reached first.
+	names := slices.Sorted(maps.Keys(c.SlaveAddrs))
+	owner := make(map[netip.Addr]string, len(names))
+	for _, name := range names {
+		addr, err := ParseReachableAddr(c.SlaveAddrs[name])
 		if err != nil {
 			return nil, fmt.Errorf("cluster.slave_addrs[%q]: %w", name, err)
 		}
+		// Values must be unique: the registry inverts this map to decide which
+		// peer may hold an address, and two names on one address made that
+		// choice depend on Go's map iteration order — a different health mesh,
+		// and a different scheduler fingerprint, per signal. ParseReachableAddr
+		// unmaps, so 10.0.0.5 and ::ffff:10.0.0.5 collide here too.
+		if first, dup := owner[addr]; dup {
+			return nil, fmt.Errorf("cluster.slave_addrs: %q and %q both pin %s; one address can name only one slave", first, name, addr)
+		}
+		owner[addr] = name
 		out[name] = addr
 	}
 	return out, nil

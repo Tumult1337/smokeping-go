@@ -321,7 +321,20 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 		return nil
 	}
 	if errors.Is(err, ErrRejected) {
-		r.log.Error("master permanently rejected the batch, dropping it", "count", len(batch), "err", err)
+		// The message distinguishes the two, because the remedies differ and
+		// the drop is identical: a marked refusal is the master's own verdict
+		// on these bytes, while an unmarked 4xx can equally be a proxy — an
+		// nginx large_client_header_buffers or client_max_body_size below what
+		// this push needs — and pointing the operator at the ingest bounds
+		// then sends them to the wrong component. Dropping either way is the
+		// deliberate tradeoff: requeueing head-of-line blocks the ring and
+		// drop-oldest eats the live cycles behind it.
+		if errors.Is(err, ErrMasterRefused) {
+			r.log.Error("master permanently rejected the batch, dropping it", "count", len(batch), "err", err)
+		} else {
+			r.log.Error("batch refused with an unmarked 4xx, dropping it; if the master's own limits look fine, check any proxy in front of it",
+				"count", len(batch), "err", err)
+		}
 		return nil
 	}
 	if errors.Is(err, ErrUnregistered) {

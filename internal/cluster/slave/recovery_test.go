@@ -1,6 +1,7 @@
 package slave
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -216,6 +217,58 @@ func TestOnlyTheMastersOwnMarkedRefusalIsFatal(t *testing.T) {
 			if got := errors.Is(err, ErrMasterRefused); got != tc.fatal {
 				t.Fatalf("%d marked=%v: fatal=%v, want %v — only the master's own verdict may exit the process",
 					tc.code, tc.marked, got, tc.fatal)
+			}
+		})
+	}
+}
+
+// The batch is dropped either way — requeueing head-of-line blocks the ring
+// and drop-oldest eats the live cycles behind it — but the message must not
+// assert a verdict the master never gave. An unmarked 4xx is equally an nginx
+// large_client_header_buffers or client_max_body_size below what this push
+// needs, and naming the master sends the operator to the wrong component.
+func TestUnmarkedRefusalDoesNotBlameTheMaster(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		marked  bool
+		wantHas string
+		wantNot string
+	}{
+		{"master's own verdict", true, "master permanently rejected", "proxy"},
+		{"unmarked, could be a proxy", false, "proxy", "master permanently rejected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.marked {
+					w.Header().Set(cluster.HeaderRefusal, cluster.RefusalPermanent)
+				}
+				http.Error(w, "nope", http.StatusBadRequest)
+			}))
+			t.Cleanup(srv.Close)
+
+			var buf bytes.Buffer
+			r := NewRunner(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})),
+				&config.Config{Cluster: &config.Cluster{
+					MasterURL: srv.URL, Token: "tok", Name: "tokyo-1", PullEvery: "0",
+				}}, "v9")
+
+			ctx := context.Background()
+			r.sink.OnCycle(ctx, scheduler.Cycle{
+				Time:   time.Now(),
+				Target: config.TargetRef{Group: "g", Target: config.Target{Name: "t", Probe: "icmp"}},
+				Sent:   5,
+			})
+			_ = r.flushOnce(ctx)
+
+			log := buf.String()
+			if !strings.Contains(log, tc.wantHas) {
+				t.Fatalf("log %q does not contain %q", log, tc.wantHas)
+			}
+			if strings.Contains(log, tc.wantNot) {
+				t.Fatalf("log %q contains %q — it names a component that may not be at fault", log, tc.wantNot)
+			}
+			if got := r.sink.Len(); got != 0 {
+				t.Fatalf("buffered = %d, want the batch dropped either way", got)
 			}
 		})
 	}

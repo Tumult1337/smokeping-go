@@ -3,9 +3,7 @@ package master
 import (
 	"context"
 	"net/http"
-	"time"
 
-	"github.com/tumult/gosmokeping/internal/api"
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -21,11 +19,27 @@ import (
 // connection is closed and the slave requeues, so work continuing beyond it is
 // work nobody is waiting for.
 const (
-	sinkCycleBudget = 30 * time.Second
-	// Taken from api rather than copied: past the write timeout the connection
-	// is closed and the slave requeues, so the two must move together.
-	sinkBatchBudget = api.ServerWriteTimeout
+	// sinkBatchBudget is the slave's own client timeout, not api's write
+	// timeout: the slave abandons the request and requeues at
+	// cluster.PushTimeout, so a handler still running past it is an orphan
+	// holding a whole batch nobody will read the answer to. Deriving it from
+	// the API's 120s write timeout was a false premise — it let an API-side
+	// knob silently multiply ingest orphan concurrency.
+	sinkBatchBudget = cluster.PushTimeout
+	// sinkCycleBudget bounds one cycle's trip through the fanout, and is a
+	// fraction of the batch's rather than an independent number: taken larger
+	// than the batch budget it is silently inert, since the per-cycle context
+	// is derived from the batch's and inherits the earlier deadline. A third
+	// means at least three stalled deliveries before one batch's window is
+	// gone — no value bounds one cycle *and* leaves room for
+	// MaxCyclesPerBatch of them, which is why the batch budget exists.
+	sinkCycleBudget = sinkBatchBudget / 3
 )
+
+// Inert if it ever reaches the batch budget: context.WithTimeout on a parent
+// with an earlier deadline keeps the parent's, so every cycle would silently
+// share one deadline and the starvation guard would be decoration.
+const _ uint = uint(int64(sinkBatchBudget) - int64(sinkCycleBudget) - 1)
 
 func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, int) {
 	cfg := s.store.Current()
