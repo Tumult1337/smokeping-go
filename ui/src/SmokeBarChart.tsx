@@ -119,8 +119,8 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
   useEffect(() => {
     soloSourceRef.current = soloSource;
     // -1 means the solo source is gone from the rebuilt set — the reset effect
-    // above has not committed yet. Treat it as no solo, or the draw hook keeps
-    // laneCount at 1 and skips every stack, blanking the plot.
+    // above has not committed yet. Treat it as no solo, or the draw hook skips
+    // every stack and blanks the plot.
     const soloIdx = soloSource != null ? built.sources.indexOf(soloSource) : -1;
     soloIdxRef.current = soloIdx >= 0 ? soloIdx : null;
     const raw = soloSource != null
@@ -201,11 +201,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
             ctx.beginPath();
             ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
             ctx.clip();
-            const laneCount = soloIdx != null ? 1 : stacks.length;
-            let lane = 0;
             for (let si = 0; si < stacks.length; si++) {
               if (soloIdx != null && si !== soloIdx) continue;
-              drawStack(u, ctx, stacks[si], hiddenRef.current, lane++, laneCount);
+              drawStack(u, ctx, stacks[si], hiddenRef.current);
             }
             ctx.restore();
           },
@@ -739,8 +737,6 @@ function drawStack(
   ctx: CanvasRenderingContext2D,
   stack: SourceStack,
   hidden: Set<string>,
-  laneIndex: number,
-  laneCount: number,
 ) {
   const { ts, bands: bandsArr, medians, losses } = stack;
   const n = ts.length;
@@ -774,20 +770,13 @@ function drawStack(
     }
     const slotX = Math.floor(leftEdge);
     const slotW = Math.max(1, Math.ceil(rightEdge) - slotX);
-    // Sources share exact bucket-start timestamps, so each lane gets a
-    // partition of the slot rather than a full-slot bar overpainting its
-    // predecessors. The partition never leaves the slot: flooring a shared
-    // lane width to a 1px minimum put lane n at slotX + n even when the slot
-    // itself was narrower, drawing bars whole buckets right of the timestamp
-    // they describe. Below 1px per lane no visible partition exists, so every
-    // lane overlaps the full slot instead and the translucent fills blend.
-    const laneW = slotW / laneCount;
-    let x = slotX;
-    let w = slotW;
-    if (laneW >= 1) {
-      x = slotX + Math.round(laneIndex * laneW);
-      w = slotX + Math.round((laneIndex + 1) * laneW) - x;
-    }
+    // Every source draws the full slot and the translucent fills blend.
+    // Partitioning the slot per source made each bar 1/N wide, which at six
+    // sources is a stripe with five-sixths of a gap beside it — the band reads
+    // as missing data at every bucketed tier. Colour and the solo click
+    // separate sources instead.
+    const x = slotX;
+    const w = slotW;
 
     bandsArr[i].forEach((band) => {
       const pair = band.pair;
