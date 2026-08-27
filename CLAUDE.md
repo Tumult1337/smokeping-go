@@ -525,7 +525,14 @@ Key points a reader can't derive from a single file:
   included, and its next push 403s), and an over-length version still lets
   the advertise beside it re-resolve — treating their union as one
   condition froze that slave's mesh address against every later
-  `cluster.advertise` edit and every pin added to evict a squatter. A name
+  `cluster.advertise` edit and every pin added to evict a squatter. An
+  over-length *advertise* **fails closed** like every sibling rejection —
+  no health entry, not the last good address, which the mesh would
+  otherwise keep probing and calling healthy for the master's life. The
+  once-per-slave warning is deduped on its own `WarnedLongField` and not
+  on `AdvertiseLogState`: `resolveAdvertise` still runs when only the
+  version is long and overwrites that slot, so the dedup never matched
+  and one misconfigured slave logged on every authenticated request. A name
   the registry has never seen is still refused outright: the entry is what
   makes a name a legal ingest label.
   This is a cardinality and data-integrity bound, **not** authentication:
@@ -548,8 +555,18 @@ Key points a reader can't derive from a single file:
   retryable set, and any intermediary can produce one — a
   `client_max_body_size`, a header-buffer limit or a routing change
   answering 413/431/405 would crash-loop the whole fleet under systemd,
-  the failure `client.go` already records for 403. Only 400, the status
-  the master's own handlers emit, is fatal; registration is otherwise
+  the failure `client.go` already records for 403. It is keyed on
+  `cluster.HeaderRefusal`, which the master sets on every permanent
+  refusal its own handlers issue, **never on a status code**: nginx maps
+  its internal 494 and 497 to a plain 400 and HAProxy and Envoy answer
+  400 for a malformed request line, so keying on 400 reproduced the
+  crash loop through the exact status those proxies rewrite to. A master
+  predating the header is never fatal, which is the safe direction —
+  the slave retries with backoff instead of exiting. `config.Validate`
+  bounds `cluster.name` and `cluster.advertise` at the same limits the
+  master enforces (`config.MaxSlaveNameLen`, `config.MaxSlaveFieldLen`,
+  which master's own constants are defined from), because a field the
+  master refuses is now a field the slave exits on; registration is otherwise
   attempted only at boot, so under `cluster.pull_every` `"0"` — where no
   `/config` heartbeat exists either — that path is the only thing that
   recovers a slave after a master restart, and
@@ -947,7 +964,11 @@ Key points a reader can't derive from a single file:
   over `store.Current()` (`Registry.SetPinsFn`), re-checked both at
   `Touch` time and in `Peers()`, so a SIGHUP-edited pin drops a
   mismatched peer on the next scheduler signal without waiting for that
-  slave's next heartbeat. A pin also **beats an unpinned claim**: adding
+  slave's next heartbeat. `Peers()` applies **both halves** of the rule —
+  a peer whose own pin excludes its address, and a peer holding an address
+  the pins assign to a different name. The second is what the Touch-side
+  steal cannot cover: it fires when the rightful owner heartbeats, and
+  that owner being down is the usual reason the operator is editing pins. A pin also **beats an unpinned claim**: adding
   one is the documented remedy for a squatter, so `Touch` releases an
   address whose current owner is unpinned when the heartbeating slave is
   pinned to it. Releasing only from an owner whose *own* pin excluded the

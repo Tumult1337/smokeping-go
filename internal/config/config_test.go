@@ -762,3 +762,40 @@ func TestValidateBoundsBatchKnobs(t *testing.T) {
 		})
 	}
 }
+
+// cluster.name and cluster.advertise travel as headers on every request the
+// slave makes, and the master refuses either past its own limit. Since that
+// refusal became fatal the slave exits non-zero on it, so systemd restarts a
+// config this package accepted, forever. Every config Validate accepts must be
+// one the process can run on.
+func TestValidateBoundsTheHeaderBearingClusterFields(t *testing.T) {
+	base := func() *Cluster {
+		return &Cluster{
+			MasterURL: "https://master.example", Token: "tok", Name: "tokyo-1",
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Cluster)
+		wantErr bool
+	}{
+		{"ordinary", func(*Cluster) {}, false},
+		{"name at the limit", func(c *Cluster) { c.Name = strings.Repeat("n", MaxSlaveNameLen) }, false},
+		{"name past the limit", func(c *Cluster) { c.Name = strings.Repeat("n", MaxSlaveNameLen+1) }, true},
+		{"advertise at the limit", func(c *Cluster) { c.Advertise = strings.Repeat("a", MaxSlaveFieldLen) }, false},
+		{"advertise past the limit", func(c *Cluster) { c.Advertise = strings.Repeat("a", MaxSlaveFieldLen+1) }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := base()
+			tc.mutate(cl)
+			cfg := &Config{Cluster: cl}
+			err := cfg.ValidateMinimal()
+			if tc.wantErr && err == nil {
+				t.Fatal("validated a field the master refuses; the slave exits non-zero on that refusal and systemd restarts it forever")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected: %v", err)
+			}
+		})
+	}
+}

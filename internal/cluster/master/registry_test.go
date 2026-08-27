@@ -527,8 +527,12 @@ func TestOversizedHeaderDoesNotAgeOutALiveSlave(t *testing.T) {
 	if !after.After(before) {
 		t.Fatal("LastSeen did not advance for a slave that is registered and pushing — Sweep will drop it and its dedup window with it")
 	}
-	if got := r.snapshotAdvertise(t, "tokyo-1"); got.String() != "10.0.0.2" {
-		t.Fatalf("advertise = %s, want the last good value — the oversized bytes must not be retained", got)
+	// Fail closed, like every sibling rejection in resolveAdvertise: no health
+	// entry rather than the last good address. Retaining it left the mesh
+	// probing a stale address and calling that peer healthy for the master's
+	// whole life, immune to the operator fixing cluster.advertise.
+	if got := r.snapshotAdvertise(t, "tokyo-1"); got.IsValid() {
+		t.Fatalf("advertise = %s after an unusable one arrived; every other rejection drops the address, and keeping it means the mesh probes somewhere the operator can no longer change", got)
 	}
 }
 
@@ -588,4 +592,52 @@ func (r *Registry) snapshotVersion(t *testing.T, name string) string {
 		t.Fatalf("no registry entry for %s", name)
 	}
 	return info.Version
+}
+
+// A pin must take effect on the next scheduler signal, which is the whole
+// reason Peers() re-reads them rather than trusting Touch. Checking only the
+// name-to-address half left an unpinned squatter holding an address a new pin
+// assigns to someone else: the Touch-side steal fires when the rightful owner
+// heartbeats, and the usual reason an operator is editing pins is that the
+// rightful owner is down and cannot.
+func TestPeersDropsASquatterOnAnAddressPinnedToSomeoneElse(t *testing.T) {
+	addr := netip.MustParseAddr("10.0.0.5")
+	pins := map[string]netip.Addr{}
+	r := NewRegistry(slog.New(slog.DiscardHandler))
+	r.SetPinsFn(func() map[string]netip.Addr { return pins })
+
+	if err := r.Touch("alpha", "v1", "10.0.0.9:1", addr.String()); err != nil {
+		t.Fatalf("touch alpha: %v", err)
+	}
+	if got := peerNames(r.Peers()); len(got) != 1 || got[0] != "alpha" {
+		t.Fatalf("setup: peers = %v, want alpha holding the address", got)
+	}
+
+	// beta is down — it never heartbeats, which is why the pin exists.
+	pins["beta"] = addr
+
+	if got := peerNames(r.Peers()); len(got) != 0 {
+		t.Fatalf("peers = %v, want none: the address is pinned to beta, so alpha may not be probed at it — and beta being down is exactly when Touch cannot fix this", got)
+	}
+}
+
+// AdvertiseLogState is written by resolveAdvertise on every outcome, so a
+// dedup key stored there is overwritten whenever the advertise is fine and
+// only the version is too long. Touch fires on every /register, /config and
+// /cycles request, so one misconfigured slave logged forever — the flood the
+// field exists to prevent.
+func TestAnOversizedVersionWarnsOnceNotOnEveryRequest(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewRegistry(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	long := strings.Repeat("x", maxSlaveFieldLen+1)
+
+	if err := r.Touch("tokyo-1", "v1", "10.0.0.2:1", "10.0.0.2"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	for range 5 {
+		_ = r.Touch("tokyo-1", long, "10.0.0.2:1", "10.0.0.2")
+	}
+	if got := strings.Count(buf.String(), "slave header field past its limit"); got != 1 {
+		t.Fatalf("%d warnings for one misconfigured slave, want 1 — Touch runs on every authenticated request, so this floods the log an operator is reading during an incident", got)
+	}
 }

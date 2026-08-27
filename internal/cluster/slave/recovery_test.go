@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/cluster/master"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
@@ -177,24 +178,30 @@ func TestPermanentlyRejectedReRegisterExitsRatherThanLooping(t *testing.T) {
 
 // ErrRejected is every 4xx bar 401/403/404 and the retryable set, and any
 // intermediary on the path can produce one — a client_max_body_size, a
-// header-buffer limit or a routing change answering 413/431/405. Making the
-// whole class fatal crash-looped the fleet under systemd on a proxy
-// misconfiguration, which is the failure client.go already records for 403.
-// Only 400, the status the master's own handlers emit for a permanent
-// refusal, is fatal.
-func TestOnlyTheMastersOwnRefusalIsFatal(t *testing.T) {
+// header-buffer limit or a routing change answering 413/431/405, and nginx
+// maps its internal 494 and 497 to a plain 400. Making the whole class fatal
+// crash-looped the fleet on a proxy misconfiguration, which is the failure
+// client.go already records for 403 — and keying on 400 alone reproduced it,
+// because that is exactly the status those proxies rewrite to. Only a refusal
+// carrying the master's own marker is fatal.
+func TestOnlyTheMastersOwnMarkedRefusalIsFatal(t *testing.T) {
 	for _, tc := range []struct {
-		code  int
-		fatal bool
+		name   string
+		code   int
+		marked bool
+		fatal  bool
 	}{
-		{http.StatusBadRequest, true},
-		{http.StatusMethodNotAllowed, false},
-		{http.StatusRequestEntityTooLarge, false},
-		{http.StatusRequestHeaderFieldsTooLarge, false},
-		{http.StatusUnavailableForLegalReasons, false},
+		{"master refuses the request", http.StatusBadRequest, true, true},
+		{"proxy rewrites 494 to 400", http.StatusBadRequest, false, false},
+		{"proxy method not allowed", http.StatusMethodNotAllowed, false, false},
+		{"proxy body too large", http.StatusRequestEntityTooLarge, false, false},
+		{"proxy headers too large", http.StatusRequestHeaderFieldsTooLarge, false, false},
 	} {
-		t.Run(http.StatusText(tc.code), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.marked {
+					w.Header().Set(cluster.HeaderRefusal, cluster.RefusalPermanent)
+				}
 				http.Error(w, "nope", tc.code)
 			}))
 			t.Cleanup(srv.Close)
@@ -207,8 +214,8 @@ func TestOnlyTheMastersOwnRefusalIsFatal(t *testing.T) {
 				t.Fatalf("%d: %v, want ErrRejected", tc.code, err)
 			}
 			if got := errors.Is(err, ErrMasterRefused); got != tc.fatal {
-				t.Fatalf("%d: fatal=%v, want %v — a status only an intermediary emits must not exit the process",
-					tc.code, got, tc.fatal)
+				t.Fatalf("%d marked=%v: fatal=%v, want %v — only the master's own verdict may exit the process",
+					tc.code, tc.marked, got, tc.fatal)
 			}
 		})
 	}

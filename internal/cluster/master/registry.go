@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
@@ -28,6 +29,12 @@ type SlaveInfo struct {
 	// race, or failed its pin. Never serialised to JSON: the registry snapshot
 	// feeds debug and UI paths, and the address must not reach either.
 	Advertise netip.Addr `json:"-"`
+
+	// WarnedLongField dedups the over-length header warning. It cannot share
+	// AdvertiseLogState: resolveAdvertise still runs when only the version is
+	// too long and overwrites that slot with its own outcome, so the dedup
+	// never matched and one misconfigured slave logged on every request.
+	WarnedLongField bool `json:"-"`
 
 	// AdvertiseLogState dedups resolveAdvertise's log lines (outcome kind +
 	// raw claimed value): Touch fires on every authenticated request, so a
@@ -125,7 +132,7 @@ const maxRegisteredSlaves = 512
 // maxSlaveFieldLen bounds the header strings the registry retains per entry;
 // the longest legal advertise is a 45-byte IPv6 text form and a version is a
 // release tag, so 256 is ~5x either.
-const maxSlaveFieldLen = 256
+const maxSlaveFieldLen = config.MaxSlaveFieldLen
 
 // The two refusals stay distinct errors because they need distinct remedies:
 // errRegistryFull is capacity (503, retryable once Sweep frees a name),
@@ -185,7 +192,13 @@ func (r *Registry) Touch(name, version, addr, advertise string) error {
 	}
 
 	prev := info.Advertise
-	next := prev
+	// Fail closed, like every other rejection in resolveAdvertise: an
+	// over-length advertise yields no health entry rather than retaining the
+	// last good one. Keeping prev meant an operator who fixed cluster.advertise
+	// on that node kept a mesh probing the old address and reporting a healthy
+	// peer there for the master's whole life, and LastSeen still advanced so
+	// Sweep never reclaimed it.
+	next := netip.Addr{}
 	if !longAdvertise {
 		next = r.resolveAdvertise(info, advertise, addr)
 	}
@@ -206,10 +219,8 @@ func (r *Registry) Touch(name, version, addr, advertise string) error {
 	}
 	changed := next != prev
 	onChange := r.onChange
-	warnLong := (longVersion || longAdvertise) && info.AdvertiseLogState != advLogLong
-	if longAdvertise {
-		info.AdvertiseLogState = advLogLong
-	}
+	warnLong := (longVersion || longAdvertise) && !info.WarnedLongField
+	info.WarnedLongField = longVersion || longAdvertise
 	r.mu.Unlock()
 
 	if changed && onChange != nil {
@@ -247,7 +258,6 @@ const (
 	advLogDup     = "dup"     // address already claimed by another slave
 	advLogInfo    = "info"    // accepted, but differs from observed source (NAT or proxy)
 	advLogOK      = "ok"      // accepted, matches observed source (or unparseable)
-	advLogLong    = "long"    // advertise past maxSlaveFieldLen
 )
 
 // resolveAdvertise validates a claimed address against the live pin list and
@@ -349,14 +359,25 @@ func (r *Registry) Peers() []slavehealth.Peer {
 	defer r.mu.RUnlock()
 	out := make([]slavehealth.Peer, 0, len(r.slaves))
 	pins := r.currentPins()
+	pinnedTo := make(map[netip.Addr]string, len(pins))
+	for name, addr := range pins {
+		pinnedTo[addr] = name
+	}
 	for _, info := range r.slaves {
 		if !info.Advertise.IsValid() {
 			continue
 		}
-		// Re-check the live pins here, not only at Touch time: a pin added by
-		// SIGHUP must drop a mismatched peer on the next scheduler signal, not
-		// once that slave happens to heartbeat again.
+		// Both halves of the pin rule, re-checked here and not only at Touch
+		// time: a pin added by SIGHUP must take effect on the next scheduler
+		// signal, not once some slave happens to heartbeat again. Name-to-
+		// address alone was not enough — an unpinned squatter holding an
+		// address a new pin assigns to someone else passed, and the Touch-side
+		// steal only fires when the rightful owner heartbeats, which is
+		// exactly what it cannot do when it is the node that is down.
 		if pin, pinned := pins[info.Name]; pinned && pin != info.Advertise {
+			continue
+		}
+		if owner, assigned := pinnedTo[info.Advertise]; assigned && owner != info.Name {
 			continue
 		}
 		out = append(out, slavehealth.Peer{Name: info.Name, Addr: info.Advertise})

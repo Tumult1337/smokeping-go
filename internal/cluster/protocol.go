@@ -20,6 +20,19 @@ import (
 // for the next /register.
 const HeaderAdvertise = "X-Slave-Advertise"
 
+// HeaderRefusal marks a 4xx the master's own handlers produced for a request
+// whose bytes can never succeed. A status code cannot carry that: nginx maps
+// its internal 494 (header buffer exceeded) and 497 to a plain 400, and
+// HAProxy and Envoy answer 400 for a malformed request line — and the slave
+// sends X-Slave-Name/Version/Advertise on every request, so a proxy header
+// limit below maxSlaveFieldLen would 400 the whole fleet into a crash loop.
+// A master that predates this header is simply never fatal, which is the safe
+// direction: the slave retries with backoff instead of exiting.
+const HeaderRefusal = "X-Cluster-Refusal"
+
+// RefusalPermanent is HeaderRefusal's only value.
+const RefusalPermanent = "permanent"
+
 // RegisterReq is posted by a slave on boot and repeated as a heartbeat. The
 // master records the last-seen time and the reported version so the UI can
 // surface slaves that have gone silent.

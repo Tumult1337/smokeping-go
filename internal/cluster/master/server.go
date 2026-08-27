@@ -96,7 +96,7 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
-const maxSlaveNameLen = 128
+const maxSlaveNameLen = config.MaxSlaveNameLen
 
 // validSlaveName gates the identity a slave can claim. A valid bearer token
 // authenticates the request but does not bind it to a name, so the name is
@@ -121,15 +121,22 @@ func validSlaveName(name string) bool {
 	return true
 }
 
+// refusePermanently answers 400 and marks it as the master's own verdict, so
+// a slave can tell it from the same status arriving out of an intermediary.
+func refusePermanently(w http.ResponseWriter, msg string) {
+	w.Header().Set(cluster.HeaderRefusal, cluster.RefusalPermanent)
+	http.Error(w, msg, http.StatusBadRequest)
+}
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRegisterBody)
 	var req cluster.RegisterReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		refusePermanently(w, "invalid json")
 		return
 	}
 	if !validSlaveName(req.Name) {
-		http.Error(w, `name required: ≤128 bytes, not "master", no control chars`, http.StatusBadRequest)
+		refusePermanently(w, `name required: ≤128 bytes, not "master", no control chars`)
 		return
 	}
 	if err := s.registry.Touch(req.Name, req.Version, r.RemoteAddr, req.Advertise); err != nil {
@@ -139,7 +146,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		refusePermanently(w, err.Error())
 		return
 	}
 	s.log.Info("slave registered", "name", req.Name, "version", req.Version, "addr", r.RemoteAddr)
@@ -155,7 +162,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	slaveName := r.Header.Get("X-Slave-Name")
 	if slaveName != "" {
 		if !validSlaveName(slaveName) {
-			http.Error(w, "invalid slave name", http.StatusBadRequest)
+			refusePermanently(w, "invalid slave name")
 			return
 		}
 		_ = s.registry.Touch(slaveName, r.Header.Get("X-Slave-Version"), r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
@@ -178,7 +185,7 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxCyclesBody)
 	var batch cluster.CycleBatch
 	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		refusePermanently(w, "invalid json")
 		return
 	}
 	// The claimed identity comes from X-Slave-Name, falling back to
@@ -190,7 +197,7 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 		name, version = batch.Source, ""
 	}
 	if !validSlaveName(name) {
-		http.Error(w, `name required: ≤128 bytes, not "master", no control chars`, http.StatusBadRequest)
+		refusePermanently(w, `name required: ≤128 bytes, not "master", no control chars`)
 		return
 	}
 	// Checked before Touch, which would otherwise create the very entry it is
@@ -204,7 +211,7 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := batch.Validate(time.Now()); err != nil {
 		s.log.Warn("rejecting cluster batch outside ingest bounds", "slave", name, "err", err)
-		http.Error(w, "batch outside ingest bounds", http.StatusBadRequest)
+		refusePermanently(w, "batch outside ingest bounds")
 		return
 	}
 	_ = s.registry.Touch(name, version, r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))

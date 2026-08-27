@@ -218,10 +218,10 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 		err := fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(buf)))
 		if resp.StatusCode < 500 && !retryable4xx(resp.StatusCode) {
 			err = fmt.Errorf("%w: %w", ErrRejected, err)
-			// 400 is the only status the master's own handlers emit for a
-			// permanent refusal; every other 4xx here reached us from
-			// somewhere else and must stay retryable at the process level.
-			if resp.StatusCode == http.StatusBadRequest {
+			// The header, never the status: a status code cannot distinguish
+			// the master's own verdict from an intermediary answering the same
+			// number, and only the master's is worth exiting the process for.
+			if resp.Header.Get(cluster.HeaderRefusal) == cluster.RefusalPermanent {
 				err = fmt.Errorf("%w: %w", ErrMasterRefused, err)
 			}
 		}

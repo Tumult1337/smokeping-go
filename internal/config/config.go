@@ -465,8 +465,35 @@ func (c *Config) ValidateMinimal() error {
 	if c.Cluster.Name == "" {
 		return fmt.Errorf("cluster.name is required for slave mode")
 	}
+	return validateClusterHeaders(c.Cluster)
+}
+
+// validateClusterHeaders bounds the two cluster fields that travel as request
+// headers. The master refuses either past its own limit, and since that
+// refusal became fatal the slave exits non-zero on it — so a config this
+// package accepts would have systemd restarting it forever. The bound lives
+// here as well as at the master for the reason ICMPPingBudget does.
+func validateClusterHeaders(c *Cluster) error {
+	if c == nil {
+		return nil
+	}
+	if len(c.Name) > MaxSlaveNameLen {
+		return fmt.Errorf("cluster.name is %d bytes, past the %d the master accepts", len(c.Name), MaxSlaveNameLen)
+	}
+	if len(c.Advertise) > MaxSlaveFieldLen {
+		return fmt.Errorf("cluster.advertise is %d bytes, past the %d the master accepts", len(c.Advertise), MaxSlaveFieldLen)
+	}
 	return nil
 }
+
+// MaxSlaveNameLen and MaxSlaveFieldLen bound the two cluster fields that
+// travel as request headers. The master enforces the same limits; they live
+// here so a config it would refuse is never stored, and master's own constants
+// are defined from these so the two cannot drift.
+const (
+	MaxSlaveNameLen  = 128
+	MaxSlaveFieldLen = 256
+)
 
 // ICMP schedule policy. These live here rather than in probe because a
 // schedule the icmp probe cannot serve must never be stored or served:
@@ -662,6 +689,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("interval %s exceeds %s, past which a measured rtt is no longer storable", c.Interval, MaxProbeInterval)
 	}
 	if err := ValidatePingCount(c.Pings); err != nil {
+		return err
+	}
+	if err := validateClusterHeaders(c.Cluster); err != nil {
 		return err
 	}
 	// A cluster master's probe map gains slavehealth's icmp probe at
