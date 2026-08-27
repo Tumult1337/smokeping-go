@@ -150,17 +150,27 @@ func (st *alertState) admits(t, now time.Time) bool {
 	return t.After(st.pastCycle) && !slices.Contains(st.ahead, t.UnixNano())
 }
 
-// accept records a timestamp as applied. Eviction past limit drops the oldest,
-// which fails open to the pre-guard double-apply rather than to silence.
-func (st *alertState) accept(t, now time.Time, limit int) {
+// accept records a timestamp as applied. Eviction past aheadCeiling drops the
+// oldest, which fails open to the pre-guard double-apply rather than to
+// silence.
+func (st *alertState) accept(t, now time.Time) {
 	st.seenCycle = true
 	if t.After(st.lastCycle) {
 		st.lastCycle = t
 	}
 	if t.After(now) {
 		st.ahead = append(st.ahead, t.UnixNano())
-		if len(st.ahead) > limit {
-			st.ahead = append(st.ahead[:0], st.ahead[len(st.ahead)-limit:]...)
+		// aheadCeiling, never a cap derived from the live interval. That
+		// derivation SHRINKS as the interval widens — a SIGHUP from 20s to 5m
+		// took it from 31 to 5 — and truncating re-admits every evicted stamp,
+		// because pastCycle is still zero for a source that has only ever run
+		// ahead of the clock. Same class as the identity-deletion rule below,
+		// which moved off the live window for the same reason. The cap was
+		// only ever a memory bound: correctness comes from the pastCycle sweep
+		// in the branch below, which drops each stamp as the clock passes it,
+		// so the ceiling alone is both sufficient and monotone.
+		if len(st.ahead) > int(aheadCeiling) {
+			st.ahead = append(st.ahead[:0], st.ahead[len(st.ahead)-int(aheadCeiling):]...)
 		}
 		return
 	}
@@ -622,7 +632,6 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	// on — never cy.Time, which the pushing slave chose.
 	now := e.nowFn()
 	liveness := livenessWindow(cfg.Interval)
-	aheadLimit := aheadCap(cfg.Interval)
 	// Skipped whole like a cycle that sent nothing, so the source ages out
 	// rather than voting on data it replayed out of its own history.
 	if age := now.Sub(cy.Time); age > alertFreshness(cfg.Interval) {
@@ -630,7 +639,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 		return
 	}
 
-	toDispatch, skipped, refused := e.evaluate(cfg, cy, now, liveness, aheadLimit)
+	toDispatch, skipped, refused := e.evaluate(cfg, cy, now, liveness)
 
 	// Logged after evaluate released e.mu: slog writes synchronously, so a line
 	// emitted under the evaluator's only lock stalls OnCycle for every other
@@ -775,7 +784,7 @@ func (e *Evaluator) DispatchRefusals() uint64 { return e.dispatchRefusals.Load()
 // evaluate runs the per-alert state machine under e.mu, held via defer because
 // scheduler.Fanout recovers sink panics — a panic here must not leave the
 // evaluator locked forever inside a process that keeps reporting healthy.
-func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration, aheadLimit int) (toDispatch []Event, skipped []time.Duration, refused []*dispatchRefusal) {
+func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Time, window time.Duration) (toDispatch []Event, skipped []time.Duration, refused []*dispatchRefusal) {
 	warmupWindow := stalenessWindow(cfg.Interval)
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -806,7 +815,7 @@ func (e *Evaluator) evaluate(cfg *config.Config, cy scheduler.Cycle, now time.Ti
 			skipped = append(skipped, st.lastCycle.Sub(cy.Time))
 			continue
 		}
-		st.accept(cy.Time, now, aheadLimit)
+		st.accept(cy.Time, now)
 		st.lastSeen = now
 
 		triggered := cond.Eval(cy)
@@ -1141,21 +1150,6 @@ func livenessWindow(interval time.Duration) time.Duration {
 // first. 1024 int64 is 8 KiB per (target, source), reached only by a source
 // whose clock runs ahead.
 const aheadCeiling = int64(cluster.MaxCyclesPerBatch)
-
-// aheadCap bounds how many timestamps one source's state remembers as having
-// arrived ahead of the master's clock. An entry is consulted only while a
-// cycle carrying it could still be evaluated at all, so it lives for the skew
-// ingest accepts plus one freshness window, over which an honest producer
-// emits one cycle per interval per target — capped at aheadCeiling, which is
-// what keeps the derivation from turning an interval nothing bounds into an
-// allocation nothing bounds.
-func aheadCap(interval time.Duration) int {
-	if interval <= 0 {
-		interval = time.Minute
-	}
-	derived := int64((config.MaxFutureSkew+alertFreshness(interval))/interval) + 1
-	return int(min(derived, aheadCeiling))
-}
 
 // stalenessWindow is the quorum warm-up horizon: three intervals tolerates
 // one missed cycle plus scheduling jitter. Liveness pruning uses

@@ -971,10 +971,13 @@ func newTestEvaluatorClock(t *testing.T, a config.Alert) (*Evaluator, *recording
 }
 
 // closeOrReportLeak shuts the evaluator down and turns one specific test bug
-// into a message instead of a hang: t.Fatal calls runtime.Goexit, so an
-// assertion made while holding ev.mu never releases it, and Close takes that
-// same mutex. Without this a guard that fires reports as a package-wide "test
-// timed out" ten minutes later with no assertion text, reading as flake.
+// into a message instead of a hang. runtime.Goexit — which t.Fatal calls — DOES
+// run deferred calls, so `defer ev.mu.Unlock()` is safe; the shape this catches
+// is a *non-deferred* Unlock placed below an assertion, which is what this
+// package briefly had. Close takes the same mutex, so the leak surfaced as a
+// package-wide "test timed out" ten minutes later with no assertion text,
+// reading as flake. Cheap enough to keep now the instance is gone: the shape
+// returns whenever someone writes Lock/assert/Unlock without a defer.
 func closeOrReportLeak(t *testing.T, ev *Evaluator) {
 	t.Helper()
 	done := make(chan struct{})
@@ -2320,7 +2323,7 @@ func TestFutureCycleTrackingIsBounded(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	for i := range 20 * aheadCap(time.Minute) {
+	for i := range 2 * int(aheadCeiling) {
 		bad := lossyCycle("tokyo-1", 100)
 		bad.Time = clk.t.Add(config.MaxFutureSkew + time.Duration(i)*time.Nanosecond)
 		ev.OnCycle(ctx, bad)
@@ -2334,8 +2337,8 @@ func TestFutureCycleTrackingIsBounded(t *testing.T) {
 			if got == 0 {
 				t.Errorf("%s tracks no timestamp at all; the bound below is vacuous", source)
 			}
-			if got > aheadCap(time.Minute) {
-				t.Errorf("%s tracks %d timestamps ahead of the clock, cap is %d", source, got, aheadCap(time.Minute))
+			if int64(got) > aheadCeiling {
+				t.Errorf("%s tracks %d timestamps ahead of the clock, ceiling is %d", source, got, aheadCeiling)
 			}
 		}
 	}
@@ -2387,7 +2390,7 @@ func TestAcceptedFutureStampsAreDroppedOnceTheMarkPassesThem(t *testing.T) {
 }
 
 // newTestEvaluatorInterval is newTestEvaluatorClock with the probe interval
-// under test, which is what both aheadCap and the staleness window derive from.
+// under test, which is what the staleness window derives from.
 func newTestEvaluatorInterval(t *testing.T, interval time.Duration, a config.Alert) (*Evaluator, *recordingDispatcher, *fakeClock) {
 	t.Helper()
 	cfg := &config.Config{
@@ -2407,41 +2410,28 @@ func newTestEvaluatorInterval(t *testing.T, interval time.Duration, a config.Ale
 	return ev, disp, pinClock(ev, testBase)
 }
 
-// The cap derives from the interval and config bounds no interval from below,
-// so the derivation alone has no ceiling: a 1ns schedule asks for ~6e11 int64,
-// which slices.Contains and slices.DeleteFunc then walk on every cycle. A
-// bound with no upper limit is not a resource bound.
-func TestAheadCapHasAPracticalCeiling(t *testing.T) {
+// The ahead set is bounded by aheadCeiling alone, whatever the interval. An
+// interval-derived cap was tried and removed: it SHRINKS as the interval
+// widens, so a SIGHUP truncated the slice and re-admitted every evicted stamp
+// — pastCycle is still zero for a source that has only ever run ahead of the
+// clock, so nothing else refuses the replay. The cap was only ever a memory
+// bound; correctness comes from the pastCycle sweep, which drops each stamp as
+// the clock passes it.
+func TestAheadSetIsBoundedByTheCeilingAtEveryInterval(t *testing.T) {
 	for _, interval := range []time.Duration{
-		time.Nanosecond, time.Microsecond, time.Millisecond, 100 * time.Millisecond,
-		time.Second, 20 * time.Second, time.Minute, config.MaxProbeInterval,
+		time.Nanosecond, time.Millisecond, time.Second,
+		20 * time.Second, time.Minute, config.MaxProbeInterval,
 	} {
-		got := aheadCap(interval)
-		if got < 1 {
-			t.Errorf("aheadCap(%s) = %d, which remembers nothing", interval, got)
+		st := &alertState{}
+		now := testBase
+		for i := range int(aheadCeiling) + 64 {
+			st.accept(now.Add(time.Hour+time.Duration(i)*time.Nanosecond), now)
 		}
-		if int64(got) > int64(cluster.MaxCyclesPerBatch) {
-			t.Errorf("aheadCap(%s) = %d, past the %d identities one redelivery can carry",
-				interval, got, cluster.MaxCyclesPerBatch)
+		if got := int64(len(st.ahead)); got > aheadCeiling {
+			t.Errorf("interval %s: %d stamps held, past the %d ceiling", interval, got, aheadCeiling)
 		}
-	}
-}
-
-// The ceiling must not become a bound below the producer: every interval whose
-// honest emission fits under it keeps the derived depth.
-func TestAheadCapKeepsTheDerivationBelowTheCeiling(t *testing.T) {
-	cases := []struct {
-		interval time.Duration
-		want     int
-	}{
-		{time.Minute, 11},
-		{20 * time.Second, 31},
-		{time.Second, 601},
-		{config.MaxProbeInterval, 4},
-	}
-	for _, c := range cases {
-		if got := aheadCap(c.interval); got != c.want {
-			t.Errorf("aheadCap(%s) = %d, want %d", c.interval, got, c.want)
+		if len(st.ahead) == 0 {
+			t.Errorf("interval %s: the set remembers nothing", interval)
 		}
 	}
 }
@@ -3927,5 +3917,94 @@ func TestNewDispatcherWiresTheProductionBudgets(t *testing.T) {
 	}
 	if wait != execWaitDelay {
 		t.Fatalf("waitDelay = %s, want execWaitDelay (%s)", wait, execWaitDelay)
+	}
+}
+
+// An interval-derived ahead cap SHRANK as the interval widened,
+// so a SIGHUP took the cap from 31 to 5 and truncated st.ahead — re-admitting
+// every evicted stamp, because pastCycle is still zero for a source that has
+// only ever run ahead of the master's clock. consecHits is what sustained:N
+// counts, so a redelivery then contributes to a page. Same class as the
+// identity-deletion rule, which moved off the live window for this reason.
+func TestAheadCapDoesNotShrinkUnderAWideningSighup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	write := func(interval string) {
+		t.Helper()
+		raw := `{
+			"listen": ":8080", "interval": "` + interval + `", "pings": 5,
+			"storage": {"clickhouse": {"addr": "ch:9000"}},
+			"probes": {"icmp": {"type": "icmp", "timeout": "2s"}},
+			"targets": [{"group":"core","targets":[
+				{"name":"gw","host":"1.1.1.1","probe":"icmp","alerts":["page"]}
+			]}],
+			"alerts": {"page": {"condition":"loss_pct > 50","sustained":3,"actions":["log"]}},
+			"actions": {"log": {"type":"log"}}
+		}`
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	write("20s")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	store := config.NewStore(path, cfg)
+	ev, err := NewEvaluator(slog.New(slog.DiscardHandler), store, &recordingDispatcher{})
+	if err != nil {
+		t.Fatalf("NewEvaluator: %v", err)
+	}
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
+	clk := pinClock(ev, testBase)
+	ctx := context.Background()
+
+	// Every cycle stamped ahead of the master's clock, which is what fills
+	// st.ahead: a slave whose clock leads by more than its push latency.
+	ahead := func(i int) scheduler.Cycle {
+		c := cycleAt(clk, "tokyo-1", 100)
+		c.Target.Target.Alerts = []string{"page"}
+		c.Time = clk.t.Add(time.Duration(i+1) * time.Second)
+		return c
+	}
+	first := ahead(0)
+	ev.OnCycle(ctx, first)
+	for i := 1; i < 10; i++ {
+		ev.OnCycle(ctx, ahead(i))
+	}
+
+	key := aggKey{target: "core/gw", alert: "page"}
+	st, ok := snapshotSource(ev, key, "tokyo-1")
+	if !ok || len(st.ahead) != 10 {
+		t.Fatalf("setup: ok=%v len(ahead)=%d, want 10 ahead-dated stamps", ok, len(st.ahead))
+	}
+	before := st.consecHits
+
+	// The operator widens the interval, which used to drop the cap 31 -> 5.
+	write("5m")
+	if err := store.Reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if err := ev.Refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	ev.OnCycle(ctx, ahead(10))
+
+	// The clock has to pass the stamps before the ahead SET is what refuses a
+	// replay: while they are still ahead, the lastCycle high-water mark
+	// refuses anything older and the eviction is unobservable. This is the
+	// window the set exists for — once the clock passes a stamp, no ordering
+	// mark separates its redelivery from a genuine cycle of the same age.
+	clk.advance(time.Minute)
+
+	// A lost ack redelivers the very first cycle, long since evicted if the
+	// cap shrank. Nothing else can refuse it: pastCycle is still zero, because
+	// this source has never sent a cycle that was not ahead of the clock.
+	ev.OnCycle(ctx, first)
+
+	st, _ = snapshotSource(ev, key, "tokyo-1")
+	if got := st.consecHits; got != before+1 {
+		t.Fatalf("consecHits = %d after one genuine cycle and one redelivery, want %d — the widening SIGHUP truncated st.ahead and the replay was applied, so sustained:N counts a measurement twice",
+			got, before+1)
 	}
 }
