@@ -787,8 +787,9 @@ Key points a reader can't derive from a single file:
   serving stale on one turned the refusal into a 200 that never ended
   (`isRefusal`, the one place a new semantic sentinel is declared).
   `maxCycleCounterKeys` (2 × `maxHopSources`) bounds the same read's
-  counters lookup, and is the one bound here that **trims rather than
-  reports**: it governs that query alone, a missing counter already
+  counters lookup. It is derived from the registry, which the paragraph
+  above rejects for `maxHopRows` — sound only because it **trims rather
+  than reports**: it governs that query alone, a missing counter already
   renders as unknown loss by contract, and letting it refuse failed a
   whole path view whose hop rows were present and correct.
 

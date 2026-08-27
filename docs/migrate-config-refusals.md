@@ -63,9 +63,10 @@ derived budget clears 50ms. The error names the derived figure.
 ## Not a refusal, but a behaviour change: `?step=`
 
 `?step=raw|1h|1d` on `/api/v1/targets/{group}/{name}/cycles` is now bounded by
-the ladder's own tier for the requested window. An override *finer* than the
-tier — `raw` past 2h, `1h` past the 1h tier (30d) — answers **400** instead of
-running a scan the ladder exists to prevent. `1d` is unaffected.
+what the override costs: it is refused with **400** when it would produce more
+buckets than both ~1000 and whatever the ladder would itself return for that
+window. In practice `raw` is served inside the ladder's raw tier (2h) and `1h`
+up to roughly 41d; `1d` is unaffected at any width.
 
 The parameter is back-compat surface from the InfluxDB era; a dashboard pinning
 `step=1h` over a 90d window is the case that breaks. Drop the parameter and let

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -501,9 +502,13 @@ WITH pinned AS (
 
 // maxCycleCounterKeys bounds the (source, cycle) pairs one hop read asks
 // probe_cycle about, each costing two bound arguments in the IN set. It is
-// twice the live names the registry admits, and it trims rather than refuses:
-// it bounds the counters query alone, so it must not decide whether the hop
-// rows beside it are served.
+// twice the live names the registry admits — a bound the pinned reads
+// themselves do not have, which is why maxHopRows stopped being derived that
+// way — and it is sound here only because it **trims rather than refuses**: it
+// governs this query alone, a missing counter already renders as unknown loss
+// by contract, and letting it fail a path view whose hop rows are present and
+// correct is the worse answer. Extreme source churn therefore costs target
+// loss on the oldest cycles, never the read.
 const maxCycleCounterKeys = 2 * maxHopSources
 
 // withCycleCounters pairs a pinned hop read with the round counters of the
@@ -535,6 +540,13 @@ func (r *Reader) queryCycleCounters(ctx context.Context, ref config.TargetRef, h
 	// contract, so degrading the answer beats failing a path view whose rows
 	// are all present and correct.
 	if len(keys) > maxCycleCounterKeys {
+		// Newest first before trimming: cycleKeys preserves the hop query's
+		// ORDER BY source, so taking a prefix kept whichever sources sort
+		// first alphabetically rather than whichever cycles an operator is
+		// looking at.
+		slices.SortStableFunc(keys, func(a, b storage.CycleCounters) int {
+			return b.Time.Compare(a.Time)
+		})
 		r.log().Warn("hop read exceeded its cycle-counter budget, target loss omitted for the excess",
 			"target", ref.Target.Name, "group", ref.Group,
 			"sources", len(keys), "budget", maxCycleCounterKeys)
