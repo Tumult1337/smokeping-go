@@ -58,14 +58,34 @@ func TestFingerprintEscapesSeparatorsInNames(t *testing.T) {
 		t.Fatal("a name carrying a raw field separator forged another config's fingerprint")
 	}
 
+	// Spelling every separator the encoding uses, in the order a two-group
+	// block emits them: the earlier fixtures here differed by a literal ("icmp"
+	// against "b") as well as by the escaping, so they stayed green with
+	// EscapeSeparators reduced to the identity function and guarded nothing.
 	twoGroups := []config.Group{
 		{Group: "x", Targets: []config.Target{{Name: "t", Probe: "icmp"}}},
-		{Group: "y", Targets: []config.Target{{Name: "t", Probe: "icmp"}}},
+		{Group: "y", Targets: []config.Target{{Name: "u", Probe: "icmp"}}},
 	}
 	forged := []config.Group{
-		{Group: "x\x1dy", Targets: []config.Target{{Name: "t", Probe: "icmp"}}},
+		{Group: "x\x1ft\x1ficmp\x1f\x1f\x1f\x1f\x1c\x1e\x1dy", Targets: []config.Target{{Name: "u", Probe: "icmp"}}},
 	}
 	if Fingerprint(fpConfig(nil, twoGroups)) == Fingerprint(fpConfig(nil, forged)) {
-		t.Fatal("a group name carrying a raw block separator forged a two-group fingerprint")
+		t.Fatal("a group name spelling a whole group block forged a two-group fingerprint")
+	}
+}
+
+// The master stamps every locally probed cycle with cfg.Cluster.Source, bound
+// once in scheduler.New. Omitted from the fingerprint, a SIGHUP editing it
+// alone kept the old stamp while the ingest collision guard and /sources read
+// the new value: the guard then refuses the name nothing writes and admits the
+// name everything writes.
+func TestFingerprintSeesClusterSource(t *testing.T) {
+	with := func(source string) *config.Config {
+		cfg := fpConfig(nil, nil)
+		cfg.Cluster = &config.Cluster{Source: source}
+		return cfg
+	}
+	if Fingerprint(with("master-a")) == Fingerprint(with("fra1")) {
+		t.Fatal("a cluster.source edit produced an identical fingerprint, so the scheduler keeps stamping the old label")
 	}
 }

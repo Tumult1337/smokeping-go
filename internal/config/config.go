@@ -83,13 +83,14 @@ type Probe struct {
 	Timeout time.Duration `json:"timeout"`
 	// Insecure skips TLS verification for HTTP probes. Use for targets with
 	// self-signed or expired certs where reachability matters more than cert
-	// validity. Ignored by non-HTTP probe types.
+	// validity. Refused on any other probe type, which never reads it.
 	Insecure bool `json:"insecure,omitempty"`
 	// NoTrace disables the opportunistic TTL walk the icmp probe runs after
 	// its echo batch. Set for slave-health probes when cluster.health_hops is
 	// false: on a wide mesh the N^2 hop streams dominate storage, and
-	// intermediate hops disclose a slave's transit provider. Ignored by
-	// probe types that never trace.
+	// intermediate hops disclose a slave's transit provider. Refused on any
+	// other probe type — mtr's walk is its whole measurement, so there is
+	// nothing there for the flag to disable.
 	NoTrace bool `json:"no_trace,omitempty"`
 }
 
@@ -850,6 +851,20 @@ func (c *Config) Validate() error {
 	seenTargets := make(map[string]string)
 	if _, taken := c.Probes[ReservedProbe]; taken {
 		return fmt.Errorf("probe %q is reserved for cluster slave health", ReservedProbe)
+	}
+
+	// A knob declared on a probe type that never reads it is worse than a
+	// missing one: probe.build passes NoTrace only to NewICMP and Insecure only
+	// to NewHTTP, while both are hashed into scheduler.Fingerprint and shipped
+	// to every slave — so `no_trace` on an mtr probe rebuilds the scheduler,
+	// looks applied, and leaves the walk filling probe_hop exactly as before.
+	for name, p := range c.Probes {
+		if p.NoTrace && p.Type != "icmp" {
+			return fmt.Errorf("probe %q: no_trace is read only by the icmp probe; on %q it is silently ignored — remove it", name, p.Type)
+		}
+		if p.Insecure && p.Type != "http" {
+			return fmt.Errorf("probe %q: insecure is read only by the http probe; on %q it is silently ignored — remove it", name, p.Type)
+		}
 	}
 
 	for _, g := range c.Targets {

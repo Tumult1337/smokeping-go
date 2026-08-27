@@ -1,6 +1,6 @@
 # Migration: configs that used to load and now do not
 
-This release adds five load-time refusals. Each closes a case where the
+This release adds six load-time refusals. Each closes a case where the
 process accepted a config and then failed — at boot, at the next restart, or
 silently at runtime. Check yours against the list **before** rolling the
 binary out, because a refused config exits non-zero rather than degrading.
@@ -94,6 +94,24 @@ config, which is what makes the wider gate the correct one.
 schedule (for example `interval: 4s, pings: 20`, a 10ms budget) is refused even
 though it defines no icmp probe. Raise `interval` or lower `pings` until the
 derived budget clears 50ms. The error names the derived figure.
+
+## 6. `no_trace` and `insecure` are refused on probe types that ignore them
+
+`no_trace` is now accepted only on an `icmp` probe and `insecure` only on an
+`http` probe. Every other type is refused by name.
+
+`probe.build` passes `NoTrace` only to `NewICMP` and `Insecure` only to
+`NewHTTP`, but both are hashed into the scheduler fingerprint and shipped to
+every slave — so `no_trace: true` on an `mtr` probe validated, changed the
+fingerprint, genuinely restarted the scheduler, and left the walk filling
+`probe_hop` exactly as before. A visible rebuild confirmed an edit that had no
+read site.
+
+**If you hit this:** delete the key. There is no equivalent for `mtr` — its
+TTL walk *is* the measurement, so there is nothing for the flag to disable; if
+the goal was to bound `probe_hop` growth, use an `icmp` probe (which traces
+opportunistically and honours `no_trace`) or shorten
+`storage.clickhouse.retention.hop_days`.
 
 ## Not a refusal, but a behaviour change: `?step=`
 

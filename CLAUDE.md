@@ -417,8 +417,12 @@ Key points a reader can't derive from a single file:
 
   **A cycle that sent nothing is not a healthy cycle.** A probe that returns
   no result at all is stamped `Sent = cfg.Pings` — a target that did not
-  answer — **unless the cycle's own context ended first**, which is a
-  measurement never taken rather than a failed one. `probe.resolveIPAddr`
+  answer — **unless the cycle's own context ended first, or no packet could
+  leave the host**, which is a measurement never taken rather than a failed
+  one. The second covers `listenFn` failing in `ICMP.Probe` and
+  `errRawUnavailable` from `MTR`'s walk: both are faults on our side, so both
+  return `&Result{}` and log once at Error, while `resolveIPAddr` failing stays
+  full loss because a blackholed host *is* a fact about the target. `probe.resolveIPAddr`
   honors that context, so every SIGHUP and every debounced registry change
   cancels the in-flight resolves; without the distinction a config reload
   wrote a fleet-wide outage into `probe_cycle` and fired `sustained: 1`
@@ -1115,9 +1119,14 @@ Key points a reader can't derive from a single file:
   clear on a disclosure path is nothing and the cost of a later select
   adding it back is the leak.
 
-  `scheduler.Fingerprint` includes `Probe.NoTrace` — it is baked into the icmp
-  prober at `Build` time, so without it `cluster.health_hops` and every probe's
-  `no_trace` edit was restart-only — delimits `Slaves` from `Alerts` with
+  `scheduler.Fingerprint` includes `Probe.NoTrace` and `Cluster.Source` — both
+  are baked in at `Build` time, so without the first `cluster.health_hops` and
+  every probe's `no_trace` edit was restart-only, and without the second a
+  SIGHUP editing `cluster.source` alone left every locally probed cycle stamped
+  with the old label while `nameCollidesWithMaster`, `/api/v1/sources` and
+  `knownSource` read the new one: the ingest guard then refused the name
+  nothing writes and admitted the name everything writes. `Fingerprint`
+  delimits `Slaves` from `Alerts` with
   `config.SepList`, since running them together on one field separator made
   moving a name between the lists a no-op edit, and routes every
   operator-supplied name through `config.EscapeSeparators`, the same helper

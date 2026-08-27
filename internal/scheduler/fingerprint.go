@@ -45,6 +45,16 @@ func Fingerprint(cfg *config.Config) string {
 	out = append(out, strconv.Itoa(cfg.Pings)...)
 	out = append(out, config.SepBlock)
 
+	// scheduler.New binds cfg.Cluster.Source once, so only a rebuild changes the
+	// label every locally probed cycle is stamped with. Omitted, a SIGHUP editing
+	// it alone left the stamp on the old value while the ingest collision guard
+	// and /api/v1/sources read the new one — refusing the name nothing writes and
+	// admitting the name everything writes.
+	if cfg.Cluster != nil {
+		field(cfg.Cluster.Source)
+	}
+	out = append(out, config.SepBlock)
+
 	names := make([]string, 0, len(cfg.Probes))
 	for name := range cfg.Probes {
 		names = append(names, name)

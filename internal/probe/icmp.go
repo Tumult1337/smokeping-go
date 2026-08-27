@@ -184,9 +184,15 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 	}
 
 	isV6 := ip.IP.To4() == nil
-	conn, err := listen(isV6)
+	conn, err := listenFn(isV6)
 	if err != nil {
-		return nil, fmt.Errorf("listen icmp: %w", err)
+		// No packet left the host, so this is a measurement never taken, not a
+		// target that did not answer: nil here makes the scheduler stamp
+		// Sent = cfg.Pings and page every icmp target — including every
+		// _cluster health target, since icmp is what _slave_health probes with
+		// — off one local socket fault.
+		logListenFailedOnce(err)
+		return &Result{}, fmt.Errorf("listen icmp: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -296,6 +302,7 @@ func traceErrLogAllowed(sinceStart time.Duration) (bool, uint64) {
 var (
 	rawUnavailableOnce    sync.Once
 	rawUnavailableMTROnce sync.Once
+	listenFailedOnce      sync.Once
 )
 
 func logRawUnavailableOnce(err error) {
@@ -317,6 +324,24 @@ func logRawUnavailableMTROnce(err error) {
 			"err", err)
 	})
 }
+
+// logListenFailedOnce covers both arms of listen failing — no CAP_NET_RAW with
+// unprivileged ping sockets disabled, or a transient EMFILE/ENOBUFS. Every icmp
+// target records a gap until it clears and no alert condition fires on one, so
+// this is the only signal; it is not folded into the trace's line above because
+// that one degrades to losing an opportunistic extra while this loses the
+// measurement.
+func logListenFailedOnce(err error) {
+	listenFailedOnce.Do(func() {
+		slog.Error("icmp probe cannot open a socket — every icmp target will record no measurement until this clears; if unprivileged ping sockets are disabled, re-run `make setcap`",
+			"err", err)
+	})
+}
+
+// listenFn is the injectable seam over listen, mirroring listenRawFn, so the
+// no-socket-means-a-gap branch can be driven without denying the test process
+// every ICMP socket on the host.
+var listenFn = listen
 
 func listen(isV6 bool) (*icmp.PacketConn, error) {
 	// Prefer unprivileged ping sockets; fall back to raw.
