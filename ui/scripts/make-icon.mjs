@@ -16,9 +16,9 @@ import { fileURLToPath } from 'node:url';
 
 // Three entries of ui/src/palette.ts, which is gated for colourblind separation
 // against the dark surface. Read as a latency ramp: quiet, warm, bad.
-const LOW = '#3987e5';
-const MID = '#c98500';
-const HIGH = '#e66767';
+const LOW = '#256fb8';
+const MID = '#918c1c';
+const HIGH = '#d7727c';
 const PLATE = '#0f1115'; // --bg
 const HUB = '#1b1f27';
 const CORE = '#e8ebf2';

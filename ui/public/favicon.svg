@@ -1,22 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
 	<rect width="48" height="48" rx="9.12" fill="#0f1115" />
 	<g fill="none" stroke-linecap="round" stroke-width="2.6">
-		<path d="M 26.09 12.69 L 27.02 7.60" stroke="#a68538" />
-		<path d="M 30.25 14.35 L 34.20 8.26" stroke="#d47a26" />
-		<path d="M 33.47 17.48 L 36.28 15.54" stroke="#5b87ae" />
-		<path d="M 35.25 21.60 L 38.09 20.99" stroke="#4687d0" />
-		<path d="M 35.31 26.09 L 38.81 26.73" stroke="#6286a4" />
-		<path d="M 33.65 30.25 L 38.20 33.20" stroke="#b08527" />
-		<path d="M 30.52 33.47 L 32.07 35.72" stroke="#3e87dc" />
-		<path d="M 26.40 35.25 L 27.22 39.08" stroke="#71868c" />
-		<path d="M 21.91 35.31 L 20.83 41.20" stroke="#c88501" />
-		<path d="M 17.75 33.65 L 13.85 39.65" stroke="#d37b23" />
-		<path d="M 14.53 30.52 L 11.83 32.38" stroke="#5687b7" />
-		<path d="M 12.75 26.40 L 7.97 27.42" stroke="#9a864b" />
-		<path d="M 12.69 21.91 L 6.71 20.81" stroke="#ca8402" />
-		<path d="M 14.35 17.75 L 11.39 15.83" stroke="#6086a6" />
-		<path d="M 17.48 14.53 L 15.94 12.30" stroke="#3e87de" />
-		<path d="M 21.60 12.75 L 20.85 9.25" stroke="#6386a3" />
+		<path d="M 26.09 12.69 L 27.02 7.60" stroke="#778542" />
+		<path d="M 30.25 14.35 L 34.20 8.26" stroke="#ab823f" />
+		<path d="M 33.47 17.48 L 36.28 15.54" stroke="#3f7693" />
+		<path d="M 35.25 21.60 L 38.09 20.99" stroke="#2f72aa" />
+		<path d="M 35.31 26.09 L 38.81 26.73" stroke="#43778c" />
+		<path d="M 33.65 30.25 L 38.20 33.20" stroke="#7e8737" />
+		<path d="M 30.52 33.47 L 32.07 35.72" stroke="#2970b2" />
+		<path d="M 26.40 35.25 L 27.22 39.08" stroke="#4f7a7c" />
+		<path d="M 21.91 35.31 L 20.83 41.20" stroke="#918c1d" />
+		<path d="M 17.75 33.65 L 13.85 39.65" stroke="#a9833d" />
+		<path d="M 14.53 30.52 L 11.83 32.38" stroke="#3b7599" />
+		<path d="M 12.75 26.40 L 7.97 27.42" stroke="#6e834f" />
+		<path d="M 12.69 21.91 L 6.71 20.81" stroke="#938b1e" />
+		<path d="M 14.35 17.75 L 11.39 15.83" stroke="#43778d" />
+		<path d="M 17.48 14.53 L 15.94 12.30" stroke="#2870b3" />
+		<path d="M 21.60 12.75 L 20.85 9.25" stroke="#44778b" />
 	</g>
 	<circle cx="24" cy="24" r="4.4" fill="#1b1f27" />
 	<circle cx="24" cy="24" r="1.50" fill="#e8ebf2" />

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
-import { PALETTE, lossColor } from "./palette";
+import { paletteForSorted, lossColor, type PaletteEntry } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
 import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss, decadeSplits, LOG_Y_FLOOR } from "./chartUtils";
 
@@ -429,7 +429,7 @@ function BarChartLegend({
   return (
     <div className="smoke-legend">
       {built.sources.map((src, srcIdx) => {
-        const palette = PALETTE[srcIdx % PALETTE.length];
+        const palette = built.palette.get(src)!;
         const multi = built.sources.length > 1;
         const dimmed = soloSource != null && src !== soloSource;
         const agg = built.aggregates[srcIdx];
@@ -520,6 +520,7 @@ type SourceAgg = {
 
 type Built = {
   sources: string[];
+  palette: Map<string, PaletteEntry>;
   data: AlignedData;
   stacks: SourceStack[];
   yRange: [number, number];
@@ -533,6 +534,7 @@ function buildSources(points: CyclePoint[]): Built {
   if (points.length === 0) {
     return {
       sources: [],
+      palette: new Map(),
       data: [[]],
       stacks: [],
       yRange: [0, 1],
@@ -552,6 +554,7 @@ function buildSources(points: CyclePoint[]): Built {
     g.secs.push(unixSec(p.Time));
   }
   const sources = [...bySource.keys()].sort();
+  const paletteBySource = paletteForSorted(sources);
 
   // Union x-axis so the cursor can pick any source's sample. Each source's
   // values stay on its own index domain inside the stack; uPlot only uses
@@ -573,8 +576,8 @@ function buildSources(points: CyclePoint[]): Built {
   let yHi = -Infinity;
   const sourceYRanges = new Map<string, [number, number]>();
 
-  sources.forEach((name, srcIdx) => {
-    const palette = PALETTE[srcIdx % PALETTE.length];
+  sources.forEach((name) => {
+    const palette = paletteBySource.get(name)!;
     // Server order is the time order: every cycles query is ORDER BY
     // timestamp (raw) or bucket_ts, source (bucketed).
     const { pts, secs: ts } = bySource.get(name)!;
@@ -693,6 +696,7 @@ function buildSources(points: CyclePoint[]): Built {
 
   return {
     sources,
+    palette: paletteBySource,
     data: data as AlignedData,
     stacks,
     yRange: [Math.max(0, yLo - yPad), yHi + yPad],

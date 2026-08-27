@@ -1,43 +1,125 @@
-// Palette rotated per source so multi-source "all" view stays readable.
-// Fixed order, 8 slots, chosen (not generated) so every adjacent pair clears
-// the colorblind-safety gate: worst adjacent CVD ΔE 8.4 (protan/deutan,
-// OKLab ×100, floor 6.0), worst adjacent normal-vision ΔE 19.3 (floor 15),
-// all 8 inside the dark-theme OKLCH lightness band, all >=3:1 against
-// --bg (#0f1115). Verified with dataviz's validate_palette.js — re-run it
-// against any edit here:
-//   node validate_palette.js "<8 hex>" --mode dark --surface "#0f1115"
-// The previous 5-entry palette silently repeated past 5 sources (2 gosmokeping
-// slaves ended up sharing a color) and had already failed this same check
-// (sky/fuchsia were ΔE 0.3 under deutan — indistinguishable). This set fixes
-// both: no repeat through 8 concurrent sources.
-// SIMPLIFIED: caps at 8 distinct hues — that's close to the practical ceiling
-// for hue-only categorical identity at a fixed lightness/chroma band (the
-// dataviz skill's own reference tops out here too). A 9th+ source still wraps
-// via `i % PALETTE.length` and repeats a hue. If gosmokeping regularly runs
-// >8 slaves against one target, the upgrade path is a secondary channel (e.g.
-// a dashed stroke on the repeated half) rather than adding more hues — more
-// hues at this point stop being reliably distinguishable, colorblind or not.
+// Source identity = one of PALETTE's 9 hues × one of DASHES' 3 stroke patterns.
+// The hues are searched, not hand-picked, and clear the colorblind-safety gate on
+// ALL pairs rather than adjacent ones: sources are assigned by name, so any two
+// can share a chart and adjacency describes nothing. Worst all-pairs CVD ΔE 8.7
+// (deutan, OKLab ×100, floor 6.0, target 8.0), worst all-pairs normal-vision ΔE
+// 16.1 (floor 15), minimum OKLCH hue gap 28°, all 9 inside the dark-theme
+// lightness band, all >=3:1 against --bg (#0f1115). `npm run check-palette`
+// re-runs those gates and the build runs it — edit the strokes and it reddens.
+//
+// 9 is the ceiling, measured: an annealing search over OKLCH within the dark band
+// clears the gates at 9 and fails from 10 up (10 lands at ΔE 8.1/15.0), because
+// deuteranopia collapses the hue circle onto roughly one axis. Past 9 concurrent
+// sources the dash channel carries identity instead of a 10th hue — it survives
+// CVD entirely, where another hue would not.
+//
 // `text` is the same hue lightened where the stroke misses the 4.5:1 small-text
 // gate; strokes are graphics (3:1) and stay exactly as validated above.
-export const PALETTE: { stroke: string; text: string; fill: (a: number) => string }[] = [
-  { stroke: "#3987e5", text: "#4b91e8", fill: (a) => `rgba(57,135,229,${a})` },
-  { stroke: "#d95926", text: "#e06a3c", fill: (a) => `rgba(217,89,38,${a})` },
-  { stroke: "#199e70", text: "#199e70", fill: (a) => `rgba(25,158,112,${a})` },
-  { stroke: "#c98500", text: "#c98500", fill: (a) => `rgba(201,133,0,${a})` },
-  { stroke: "#d55181", text: "#dc6693", fill: (a) => `rgba(213,81,129,${a})` },
-  { stroke: "#008300", text: "#3aa23a", fill: (a) => `rgba(0,131,0,${a})` },
-  { stroke: "#9085e9", text: "#9085e9", fill: (a) => `rgba(144,133,233,${a})` },
-  { stroke: "#e66767", text: "#e66767", fill: (a) => `rgba(230,103,103,${a})` },
+export type PaletteEntry = {
+  stroke: string;
+  text: string;
+  fill: (a: number) => string;
+  dash?: number[];
+};
+
+const PALETTE: { stroke: string; text: string; fill: (a: number) => string }[] = [
+  { stroke: "#0c6f4d", text: "#348b67", fill: (a) => `rgba(12,111,77,${a})` },
+  { stroke: "#c50991", text: "#dc30a5", fill: (a) => `rgba(197,9,145,${a})` },
+  { stroke: "#d7727c", text: "#d7727c", fill: (a) => `rgba(215,114,124,${a})` },
+  { stroke: "#15a9b0", text: "#15a9b0", fill: (a) => `rgba(21,169,176,${a})` },
+  { stroke: "#5c39fc", text: "#6f67fd", fill: (a) => `rgba(92,57,252,${a})` },
+  { stroke: "#a64006", text: "#c65d2e", fill: (a) => `rgba(166,64,6,${a})` },
+  { stroke: "#918c1c", text: "#918c1c", fill: (a) => `rgba(145,140,28,${a})` },
+  { stroke: "#256fb8", text: "#377fc9", fill: (a) => `rgba(37,111,184,${a})` },
+  { stroke: "#b571e6", text: "#b571e6", fill: (a) => `rgba(181,113,230,${a})` },
 ];
 
-// paletteForSorted maps sorted source names → palette entries the way both
-// chart components do, so callers can render UI affordances in the same colour
-// the line on the chart uses.
-export function paletteForSorted(sortedSources: string[]): Map<string, { stroke: string; text: string; fill: (a: number) => string }> {
-  const out = new Map<string, { stroke: string; text: string; fill: (a: number) => string }>();
-  sortedSources.forEach((name, i) => {
-    out.set(name, PALETTE[i % PALETTE.length]);
-  });
+// Solid first so an ordinary install never draws a dashed line; the other two are
+// separated in both dash and gap so they stay distinct at one-pixel stroke width.
+const DASHES: (number[] | undefined)[] = [undefined, [7, 4], [2, 3]];
+
+const HUES = PALETTE.length;
+const IDENTITIES = HUES * DASHES.length;
+
+// FNV-1a over UTF-16 code units. Not a security primitive — it only has to be
+// stable across reloads and spread short slave names across the slot space.
+function hashName(name: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < name.length; i++) {
+    h ^= name.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function entryAt(identity: number): PaletteEntry {
+  // DASHES[0] is undefined, so identities below HUES are exactly the solid ones.
+  return { ...PALETTE[identity % HUES], dash: DASHES[Math.floor(identity / HUES)] };
+}
+
+// Every solid hue ranks above every dashed slot, so the first HUES sources are
+// always solid and distinct without the assignment needing to know how many
+// sources there are. Deciding that from the count instead made crossing HUES a
+// regime change that reshuffled all nine incumbents at once.
+function preferences(name: string): number[] {
+  const h = hashName(name);
+  const dashed = IDENTITIES - HUES;
+  const out: number[] = [];
+  for (let i = 0; i < HUES; i++) out.push((h + i) % HUES);
+  for (let i = 0; i < dashed; i++) out.push(HUES + ((h + i) % dashed));
+  return out;
+}
+
+// paletteForSorted maps source names → palette entries, derived from the name
+// rather than from its position, so a slave keeps its colour when another one is
+// added or removed. Position-derived assignment reshuffled every source on any
+// membership change; this moves at most one incumbent, and only the one whose
+// slot the newcomer takes.
+//
+// Stability is therefore "unless another source wants the same slot", not
+// absolute — the alternative, honouring the hash unconditionally, collides at
+// 98% for 7 sources over 9 slots and is the defect this replaces. Past
+// IDENTITIES sources the slots are all spent and entries repeat.
+export function paletteForSorted(sortedSources: string[]): Map<string, PaletteEntry> {
+  // Uncontested names claim their first choice before anyone probes, so adding a
+  // source cannot cascade past the one incumbent it displaces.
+  const byTop = new Map<number, string[]>();
+  for (const name of sortedSources) {
+    const top = preferences(name)[0];
+    const at = byTop.get(top);
+    if (at) at.push(name);
+    else byTop.set(top, [name]);
+  }
+
+  const claimed = new Map<string, number>();
+  const taken = new Set<number>();
+  const contested: string[] = [];
+  for (const [top, names] of byTop) {
+    // Sorted input makes the winner deterministic without a tiebreak of its own.
+    claimed.set(names[0], top);
+    taken.add(top);
+    contested.push(...names.slice(1));
+  }
+
+  for (const name of contested) {
+    const prefs = preferences(name);
+    // Past IDENTITIES sources every slot is spoken for; keep the top choice and
+    // repeat rather than looping forever looking for a free one.
+    let identity = prefs[0];
+    for (let i = 1; i < prefs.length; i++) {
+      if (!taken.has(prefs[i])) {
+        identity = prefs[i];
+        break;
+      }
+    }
+    taken.add(identity);
+    claimed.set(name, identity);
+  }
+
+  // Built in the caller's order; charts index this map while walking their own
+  // sorted source list, and claim order is otherwise arbitrary.
+  const out = new Map<string, PaletteEntry>();
+  for (const name of sortedSources) out.set(name, entryAt(claimed.get(name)!));
   return out;
 }
 

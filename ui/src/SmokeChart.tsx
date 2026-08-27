@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData, type Series, type Band } from "uplot";
 import type { CyclePoint } from "./api";
-import { PALETTE } from "./palette";
+import { paletteForSorted, type PaletteEntry } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
 import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, decadeSplits, LOG_Y_FLOOR } from "./chartUtils";
 
@@ -303,7 +303,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
       {points.length > 0 && (
         <div className="smoke-legend">
           {built.sources.map((src, srcIdx) => {
-            const palette = PALETTE[srcIdx % PALETTE.length];
+            const palette = built.palette.get(src)!;
             const base = 1 + srcIdx * PCT_LABELS.length;
             const multi = built.sources.length > 1;
             const dimmed = soloSource != null && src !== soloSource;
@@ -401,6 +401,7 @@ type SourceAgg = {
 
 type Built = {
   sources: string[];
+  palette: Map<string, PaletteEntry>;
   data: AlignedData;
   series: Series[];
   bands: Band[];
@@ -420,12 +421,14 @@ function buildAligned(points: CyclePoint[]): Built {
   if (points.length === 0) {
     // Keep a single-band topology so the legend doesn't flicker between
     // zero-source and one-source states while loading.
-    const palette = PALETTE[0];
+    const palette = paletteForSorted([""]);
+    const only = palette.get("")!;
     return {
       sources: [""],
+      palette,
       data: [[], [], [], [], [], [], [], []],
-      series: [xSeries, ...seriesFor("", palette)],
-      bands: bandsFor(1),
+      series: [xSeries, ...seriesFor("", only)],
+      bands: bandsFor([only]),
       lossSeries: [],
       anyLoss: false,
       aggregates: [{ min: null, p5: null, p25: null, median: null, p75: null, p95: null, max: null }],
@@ -443,6 +446,7 @@ function buildAligned(points: CyclePoint[]): Built {
     g.secs.push(unixSec(p.Time));
   }
   const sources = [...bySource.keys()].sort();
+  const paletteBySource = paletteForSorted(sources);
   // Only prefix legend labels when there's something to disambiguate — a plain
   // single-source chart should read "min / p5 / median / …" like it always has.
   const prefixed = sources.length > 1;
@@ -465,8 +469,8 @@ function buildAligned(points: CyclePoint[]): Built {
   const aggregates: SourceAgg[] = [];
   let anyLoss = false;
 
-  sources.forEach((name, srcIdx) => {
-    const palette = PALETTE[srcIdx % PALETTE.length];
+  sources.forEach((name) => {
+    const palette = paletteBySource.get(name)!;
     const cols: (number | null)[][] = PCT_KEYS.map(() => xs.map(() => null));
     // Server order is the time order: every cycles query is ORDER BY
     // timestamp (raw) or bucket_ts, source (bucketed).
@@ -529,10 +533,11 @@ function buildAligned(points: CyclePoint[]): Built {
     }
   });
 
-  bands.push(...bandsFor(sources.length));
+  bands.push(...bandsFor(sources.map((name) => paletteBySource.get(name)!)));
 
   return {
     sources,
+    palette: paletteBySource,
     data: data as AlignedData,
     series,
     bands,
@@ -546,10 +551,7 @@ function buildAligned(points: CyclePoint[]): Built {
 
 // seriesFor returns the 7 series that back one source's smoke stack. Order
 // must stay in sync with PCT_KEYS / bandsFor so band indices line up.
-function seriesFor(
-  name: string,
-  palette: { stroke: string; fill: (a: number) => string },
-): Series[] {
+function seriesFor(name: string, palette: PaletteEntry): Series[] {
   const prefix = name ? `${name}/` : "";
   const mk = (label: string, opts: Partial<Series>): Series => ({
     label: `${prefix}${label}`,
@@ -561,17 +563,17 @@ function seriesFor(
     mk(PCT_LABELS[0], { stroke: "transparent", fill: palette.fill(0.08) }),
     mk(PCT_LABELS[1], { stroke: "transparent", fill: palette.fill(0.18) }),
     mk(PCT_LABELS[2], { stroke: "transparent", fill: palette.fill(0.28) }),
-    mk(name || PCT_LABELS[3], { stroke: palette.stroke, width: 2 }),
+    mk(name || PCT_LABELS[3], { stroke: palette.stroke, width: 2, dash: palette.dash }),
     mk(PCT_LABELS[4], { stroke: "transparent", fill: palette.fill(0.28) }),
     mk(PCT_LABELS[5], { stroke: "transparent", fill: palette.fill(0.18) }),
     mk(PCT_LABELS[6], { stroke: "transparent", fill: palette.fill(0.08) }),
   ];
 }
 
-function bandsFor(sourceCount: number): Band[] {
+function bandsFor(entries: PaletteEntry[]): Band[] {
   const out: Band[] = [];
-  for (let i = 0; i < sourceCount; i++) {
-    const palette = PALETTE[i % PALETTE.length];
+  for (let i = 0; i < entries.length; i++) {
+    const palette = entries[i];
     const base = 1 + i * 7; // first series col after x
     // min↔max (outer), p5↔p95, p25↔p75 (darkest).
     out.push({ series: [base + 0, base + 6], fill: palette.fill(0.10) });

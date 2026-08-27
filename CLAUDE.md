@@ -257,6 +257,50 @@ Key points a reader can't derive from a single file:
   list. Colours are three entries of `ui/src/palette.ts` read as a latency
   ramp, keeping the icon inside the same CVD-gated set as the charts.
 
+- **Source colours:** a source's identity is one of `ui/src/palette.ts`'s 9
+  hues × one of 3 dash patterns, 27 in all, assigned from the **name** rather
+  than from its position in the sorted list. Position-derived assignment
+  reshuffled every source on any membership change; keying on the name moves at
+  most the one incumbent whose slot the newcomer takes — measured churn when a
+  source is added is 1 at <=8 sources, 4 at <=20, and 10 at 27 as the slots run
+  out. Honouring the hash unconditionally instead collides at 98% for 7 sources
+  over 9 slots, so contention is resolved by walking a per-name preference list
+  in which **every solid hue ranks above every dashed slot**: the first 9
+  sources are then always solid and distinct without the assignment knowing how
+  many there are. Deciding that from the count instead made crossing 9 a regime
+  change that moved all nine incumbents at once.
+
+  The hues clear the colourblind gates on **all** pairs, not adjacent ones —
+  sources are assigned by name, so any two can share a chart and adjacency
+  describes nothing about what a reader sees. The set shipped before this one
+  was validated adjacent-only and measures ΔE 1.6 (deutan) / 7.1 (normal)
+  across all pairs, so at 7 sources two were already indistinguishable. Current
+  worst all-pairs: CVD ΔE 8.7, normal-vision 16.1, minimum OKLCH hue gap 28°.
+  **9 is the measured ceiling**, not a round number: an annealing search over
+  OKLCH inside the dark lightness band clears the gates at 9 and fails from 10
+  (8.1 / 15.0), because deuteranopia collapses the hue circle onto roughly one
+  axis. Past 9 the dash channel carries identity instead of a 10th hue, since
+  dash survives CVD entirely where another hue would not.
+
+  Dash reaches only `SmokeChart`'s line series. `SmokeBarChart`, `LossStrip`,
+  `StatusStrip` and `HttpChart` draw filled marks with no stroke to dash, so
+  they stay hue-only and repeat past 9 sources; the legend and solo-on-click are
+  what disambiguate there. Past 27 sources entries repeat rather than the probe
+  looping.
+
+  `npm run check-palette` gates both halves and `build` depends on it, because
+  nothing else catches a stroke edited without re-validating.
+  `ui/scripts/check-palette.mjs` re-runs the all-pairs ΔE, lightness-band,
+  chroma, contrast and hue-gap thresholds; `check-palette-assignment.mjs`
+  imports the real `paletteForSorted` — node strips the types — and pins
+  distinctness, saturation, determinism, caller order and those churn bounds
+  rather than restating its arithmetic. Both carry a **known-bad fixture**, the
+  previous palette, because the thresholds alone say nothing about the
+  measuring: neuter `dE` or `contrast` and every gate passes silently. The icon
+  ramp is checked against the table for the same reason — `make-icon.mjs`
+  copies three strokes and says so in a comment, which is a claim nothing else
+  would catch going false.
+
 - **A config the evaluator cannot apply never becomes current.** Alert
   conditions are parsed in `internal/alert`, which imports `config`, so
   `Config.Validate` cannot reach them — `config.Store.SetValidator` is the seam,
