@@ -9,9 +9,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
 	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
@@ -347,13 +349,23 @@ func shardFor(target, alert string) int {
 // slices behind it, which are the only fields a single cycle can make large.
 func eventBytes(ev Event) int64 {
 	const durSize = int64(8)
+	// The backing arrays, not only what the elements point at: a hop row is
+	// ~88 bytes of struct before its RTTs, so charging the contents alone put
+	// the real ceiling at roughly 118 MB against a declared 64 MB.
+	hopSize := int64(unsafe.Sizeof(probe.Hop{}))
+	sampleSize := int64(unsafe.Sizeof(probe.HTTPSample{}))
+	strSize := int64(unsafe.Sizeof(""))
+
 	n := int64(len(ev.Cycle.RTTs)) * durSize
+	n += int64(len(ev.Cycle.Hops)) * hopSize
 	for _, h := range ev.Cycle.Hops {
 		n += int64(len(h.RTTs))*durSize + int64(len(h.IP)) + int64(len(h.Unreach))
 	}
+	n += int64(len(ev.Cycle.HTTPSamples)) * sampleSize
 	for _, s := range ev.Cycle.HTTPSamples {
 		n += int64(len(s.Err))
 	}
+	n += int64(len(ev.FiringSources)) * strSize
 	for _, src := range ev.FiringSources {
 		n += int64(len(src))
 	}

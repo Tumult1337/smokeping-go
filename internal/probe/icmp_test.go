@@ -637,3 +637,30 @@ func TestEchoDestinationCarriesTheTargetsZone(t *testing.T) {
 		t.Fatalf("raw destination = %v, want the *net.IPAddr unchanged", got)
 	}
 }
+
+// A probe entered on a dead context measured nothing, and the distinction
+// costs a page: scheduler.runCycle stamps Sent=cfg.Pings on a nil result, so
+// returning nil here writes a fabricated 100%-loss cycle for every hostname
+// target at once. The guard sits before the resolve, which is where it earns
+// its keep — resolveIPAddr honours the context and fails, and only the literal
+// branch would have produced a non-nil result on its own. A fixture using a
+// literal host cannot tell the two apart, which is how this went untested.
+func TestHostnameProbeOnADeadContextReturnsAGapNotNil(t *testing.T) {
+	orig := lookupIPFn
+	lookupIPFn = func(ctx context.Context, _, _ string) ([]net.IP, error) { return nil, ctx.Err() }
+	t.Cleanup(func() { lookupIPFn = orig })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res, err := (&ICMP{name: "icmp", timeout: time.Second, noTrace: true}).Probe(ctx, Target{Host: "gw.example.net"}, 5)
+	if err == nil {
+		t.Fatal("a dead context must still surface its error")
+	}
+	if res == nil {
+		t.Fatal("nil result on a dead context: scheduler.runCycle turns that into a fabricated 100%-loss cycle across every hostname target")
+	}
+	if res.Sent != 0 {
+		t.Fatalf("Sent = %d on a context dead before the first probe, want 0", res.Sent)
+	}
+}

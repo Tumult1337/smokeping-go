@@ -27,6 +27,13 @@ type ActionDispatcher struct {
 	log    *slog.Logger
 	store  *config.Store
 	client *http.Client
+	// actionBudget and waitDelay are the two halves of one action's ceiling,
+	// injectable only so a test can drive a real orphaned child without
+	// waiting actionTimeout for it. Their sum is what Evaluator.deliver
+	// budgets per action, which is why WaitDelay is subtracted from the
+	// context rather than added to it.
+	actionBudget time.Duration
+	waitDelay    time.Duration
 }
 
 func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
@@ -34,6 +41,9 @@ func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
 		log:    log,
 		store:  store,
 		client: &http.Client{Timeout: actionTimeout},
+
+		actionBudget: actionTimeout,
+		waitDelay:    execWaitDelay,
 	}
 }
 
@@ -50,6 +60,20 @@ const actionTimeout = 10 * time.Second
 // budgets an event at actionTimeout per action, so the next action in the same
 // alert got an already-dead context and its page was dropped in silence.
 const execWaitDelay = time.Second
+
+// budgets returns the action ceiling and the wait delay, defaulting for a
+// zero-valued ActionDispatcher — several tests build one directly. The two
+// must sum to no more than the ceiling Evaluator.deliver budgets per action.
+func (d *ActionDispatcher) budgets() (budget, wait time.Duration) {
+	budget, wait = d.actionBudget, d.waitDelay
+	if budget <= 0 {
+		budget = actionTimeout
+	}
+	if wait <= 0 {
+		wait = execWaitDelay
+	}
+	return budget, wait
+}
 
 // Wants implements DispatchFilter. Only a transition into or out of firing
 // notifies anyone — pending transitions are too noisy for operators and the
@@ -136,35 +160,11 @@ func (d *ActionDispatcher) webhook(ctx context.Context, a config.Action, body st
 }
 
 func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Action, body string, e Event) {
-	if a.Command == "" {
+	cmd, execCtx, cancel := d.buildExec(ctx, a, body, e)
+	if cmd == nil {
 		return
 	}
-	execCtx, cancel := context.WithTimeout(ctx, actionTimeout-execWaitDelay)
 	defer cancel()
-	// Split the command on whitespace. For complex pipelines operators should
-	// wrap them in a shell script and reference that.
-	parts := strings.Fields(a.Command)
-	if len(parts) == 0 {
-		return
-	}
-	cmd := exec.CommandContext(execCtx, parts[0], parts[1:]...)
-	cmd.Stdin = strings.NewReader(body)
-	// Nil Stdout/Stderr wires the child straight to /dev/null: no pipe, so no
-	// copy goroutine for Wait to block on. CommandContext kills only the
-	// direct child, and with a pipe an orphan holding the inherited descriptor
-	// — `notify.sh &`, systemd-run, any helper daemon — kept CombinedOutput
-	// blocked long past the deadline, wedging this shard's delivery worker for
-	// as long as the orphan lived. WaitDelay bounds the stdin copier the same
-	// way. The output was discarded regardless: it is unbounded operator-script
-	// text and execFailureCategory reports the exit code alone.
-	cmd.WaitDelay = execWaitDelay
-	cmd.Env = append(cmd.Environ(),
-		fmt.Sprintf("ALERT_TARGET=%s", e.Target.ID()),
-		fmt.Sprintf("ALERT_NAME=%s", e.AlertName),
-		fmt.Sprintf("ALERT_STATE=%s", e.Next),
-		fmt.Sprintf("ALERT_SOURCE=%s", e.Cycle.Source),
-		fmt.Sprintf("ALERT_SOURCES=%s", strings.Join(e.FiringSources, ",")),
-	)
 	// a.Command was env-expanded from the raw config bytes and can embed
 	// credentials, exec.Error quotes argv[0], and the command's own output is
 	// unbounded free text — so the log carries the action name and a fixed
@@ -172,6 +172,46 @@ func (d *ActionDispatcher) exec(ctx context.Context, name string, a config.Actio
 	if err := cmd.Run(); err != nil {
 		d.log.Warn("exec failed", "action", name, "err", execFailureCategory(execCtx, err))
 	}
+}
+
+// buildExec assembles the command one exec action runs, returning it with the
+// context bounding it. Split out so a test can read back both halves of the
+// ceiling: the context timeout and cmd.WaitDelay must *sum* to the action
+// budget, because WaitDelay starts counting after the context is done rather
+// than capping it — and Evaluator.deliver budgets one actionTimeout per
+// action, so a pair that exceeds it hands the next action a dead context.
+// Returns a nil cmd when there is nothing to run.
+func (d *ActionDispatcher) buildExec(ctx context.Context, a config.Action, body string, e Event) (*exec.Cmd, context.Context, context.CancelFunc) {
+	if a.Command == "" {
+		return nil, nil, func() {}
+	}
+	// Split the command on whitespace. For complex pipelines operators should
+	// wrap them in a shell script and reference that.
+	parts := strings.Fields(a.Command)
+	if len(parts) == 0 {
+		return nil, nil, func() {}
+	}
+	budget, wait := d.budgets()
+	execCtx, cancel := context.WithTimeout(ctx, budget-wait)
+	cmd := exec.CommandContext(execCtx, parts[0], parts[1:]...)
+	cmd.Stdin = strings.NewReader(body)
+	// Nil Stdout/Stderr wires the child straight to /dev/null: no pipe, so no
+	// copy goroutine for Wait to block on. CommandContext kills only the
+	// direct child, and with a pipe an orphan holding the inherited descriptor
+	// kept CombinedOutput blocked long past the deadline, wedging this shard's
+	// delivery worker for as long as the orphan lived. WaitDelay bounds the
+	// stdin copier the same way. The output was discarded regardless: it is
+	// unbounded operator-script text and execFailureCategory reports the exit
+	// code alone.
+	cmd.WaitDelay = wait
+	cmd.Env = append(cmd.Environ(),
+		fmt.Sprintf("ALERT_TARGET=%s", e.Target.ID()),
+		fmt.Sprintf("ALERT_NAME=%s", e.AlertName),
+		fmt.Sprintf("ALERT_STATE=%s", e.Next),
+		fmt.Sprintf("ALERT_SOURCE=%s", e.Cycle.Source),
+		fmt.Sprintf("ALERT_SOURCES=%s", strings.Join(e.FiringSources, ",")),
+	)
+	return cmd, execCtx, cancel
 }
 
 // execFailureCategory names why an exec action failed using only fixed text

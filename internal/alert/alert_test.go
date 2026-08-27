@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
@@ -2606,21 +2607,36 @@ func TestPruneResetsEvaluationStateButKeepsIdentity(t *testing.T) {
 	clk.advance(livenessWindow(time.Minute) + 30*time.Second)
 	ev.OnCycle(ctx, cycleAt(clk, "master", 0))
 
+	// The replay goes first, while the revive has not yet moved any ordering
+	// mark past it. Asserting seenCycle after a revive proves nothing: accept()
+	// sets it, so a recreated entry looks identical to a retained one. Only a
+	// redelivery arriving before the revive can tell them apart, and it is the
+	// case the retention exists for — PushSink.Requeue resends on a lost ack.
+	ev.OnCycle(ctx, bad)
+
+	key := aggKey{target: "core/gw", alert: "quorum-test"}
+	ev.mu.Lock()
+	st, ok := ev.states[key]["tokyo-1"]
+	if !ok {
+		t.Fatal("tokyo-1's state missing entirely")
+	}
+	if st.consecHits != 0 {
+		t.Fatalf("consecHits = %d after replaying a cycle the prune should still recognise, want 0 — the prune dropped the replay identity, so a lost-ack redelivery is applied twice", st.consecHits)
+	}
+	if !st.seenCycle {
+		t.Fatal("replay identity did not survive the prune")
+	}
+	ev.mu.Unlock()
+
 	// tokyo-1 revives with a genuine cycle: a fresh streak, not a resumed one.
 	clk.advance(30 * time.Second)
 	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
 
 	ev.mu.Lock()
 	defer ev.mu.Unlock()
-	st, ok := ev.states[aggKey{target: "core/gw", alert: "quorum-test"}]["tokyo-1"]
-	if !ok {
-		t.Fatal("tokyo-1's state missing entirely")
-	}
+	st = ev.states[key]["tokyo-1"]
 	if st.consecHits != 1 {
 		t.Fatalf("consecHits = %d after a prune and one bad cycle, want 1", st.consecHits)
-	}
-	if !st.seenCycle {
-		t.Fatal("replay identity did not survive the prune")
 	}
 }
 
@@ -2836,7 +2852,12 @@ func TestQueuedDispatchKeepsABudget(t *testing.T) {
 	if !d.hadOne {
 		t.Fatal("detached dispatch context carries no deadline — outbound work is unbounded")
 	}
-	// Two actions in sequence, each bounded by actionTimeout.
+	// Two actions in sequence, each bounded by actionTimeout — bounded below
+	// as well as above, or halving the budget passes.
+	if got := d.deadline.Sub(before); got < 2*actionTimeout-time.Second {
+		t.Fatalf("dispatch budget = %s, want ~%s: an event must get one actionTimeout per action, or a later action inherits a dead context",
+			got, 2*actionTimeout)
+	}
 	if want := 2 * actionTimeout; d.deadline.Sub(before) > want+time.Second {
 		t.Fatalf("dispatch budget %s, want about %s for 2 actions", d.deadline.Sub(before), want)
 	}
@@ -3084,6 +3105,9 @@ func TestQueueRefusesOnBytesBeforeDepthAndReleasesThem(t *testing.T) {
 
 	queued := 0
 	for i := 0; ev.DispatchRefusals() == 0 && i < dispatchShardDepth+8; i++ {
+		// Every iteration that is accepted occupies a slot, whatever its
+		// transition — counting only the firing half made the depth
+		// comparison below unreachable by construction.
 		clk.advance(time.Second)
 		loss := 0.0
 		if i%2 == 0 {
@@ -3097,9 +3121,14 @@ func TestQueueRefusesOnBytesBeforeDepthAndReleasesThem(t *testing.T) {
 		}
 		before := ev.DispatchRefusals()
 		ev.OnCycle(context.Background(), cy)
-		if ev.DispatchRefusals() == before && i%2 == 0 {
+		if ev.DispatchRefusals() == before {
 			queued++
 		}
+	}
+	// The charge itself, not just the ceiling: a size of zero leaves every
+	// assertion below satisfiable while the queue retains unbounded bytes.
+	if held := queuedBytesTotal(ev); held <= 0 {
+		t.Fatal("the queue holds worst-case cycles but charged 0 bytes for them; the ceiling below is measuring nothing")
 	}
 	if ev.DispatchRefusals() == 0 {
 		t.Fatal("worst-case cycles never exhausted the queue at all")
@@ -3109,6 +3138,12 @@ func TestQueueRefusesOnBytesBeforeDepthAndReleasesThem(t *testing.T) {
 	}
 	if queued >= dispatchShardDepth {
 		t.Fatalf("%d worst-case events queued before the first refusal — the depth bound was reached first, so bytes are unbounded", queued)
+	}
+	// The refusal must be the byte one. Depth would also refuse eventually,
+	// and a test that cannot tell them apart passes with the charge removed.
+	if want := int64(dispatchShardBytes) - eventBytes(worstCaseEvent()); queuedBytesTotal(ev) < want {
+		t.Fatalf("queue holds %d bytes, under the %d that proves the ceiling and not the depth ended the loop",
+			queuedBytesTotal(ev), want)
 	}
 
 	close(gate)
@@ -3184,6 +3219,9 @@ func TestByteCeilingIsPerShardNotFleetWide(t *testing.T) {
 	}
 	if ev.DispatchRefusals() == 0 {
 		t.Fatal("the stuck shard never reached a ceiling at all")
+	}
+	if held := ev.queuedBytes[stuckShard].Load(); held <= 0 {
+		t.Fatal("the stuck shard charged 0 bytes, so what follows proves nothing about a per-shard ceiling")
 	}
 
 	// A target on another shard must still be able to page — carrying the same
@@ -3420,15 +3458,8 @@ func TestQuietPruneKeepsASourceThatIsStillDelivering(t *testing.T) {
 	ev.OnCycle(context.Background(), lagging)
 
 	ev.mu.Lock()
-	if bySource := ev.states[key]; bySource != nil {
-		if st, ok := bySource["lagging"]; ok {
-			// The freshness gate refuses the cycle outright, so drive the
-			// state directly: what is under test is the prune, not the gate.
-			st.lastSeen = clk.now()
-			st.lastCycle = clk.t.Add(-alertFreshness(time.Minute) - time.Second)
-			st.consecHits = 2
-		}
-	}
+	// The freshness gate refuses the lagging cycle outright, so the state is
+	// driven directly: what is under test is the prune, not the gate.
 	if ev.states[key] == nil {
 		ev.states[key] = map[string]*alertState{}
 	}
@@ -3480,5 +3511,72 @@ func TestEnqueueAfterCloseIsRefusedNotCommitted(t *testing.T) {
 	defer ev.mu.Unlock()
 	if got := ev.states[key]["tokyo-1"].state; got != StateOK {
 		t.Fatalf("state = %s, want ok — a refused transition must be reverted, shutdown or not", got)
+	}
+}
+
+// worstCaseEvent is the largest Event cluster ingest accepts, which is what
+// dispatchQueueBytes is derived from.
+func worstCaseEvent() Event {
+	cy := testCycle("tokyo-1", 100)
+	cy.RTTs = make([]time.Duration, config.MaxPingsPerCycle)
+	cy.Hops = make([]probe.Hop, config.MaxHopRowsPerCycle)
+	for h := range cy.Hops {
+		cy.Hops[h].RTTs = make([]time.Duration, cluster.MaxRTTsPerHop)
+	}
+	return Event{Cycle: cy}
+}
+
+// eventBytes must charge for the slice headers, not only what they point at:
+// a probe.Hop is ~88 bytes before its RTTs, so a 600-row cycle costs ~53 KB
+// that went uncounted and put the real queue ceiling near 118 MB against a
+// declared 64 MB.
+func TestEventBytesChargesTheBackingArrays(t *testing.T) {
+	var ev Event
+	ev.Cycle.Hops = make([]probe.Hop, cluster.MaxHopsPerCycle)
+	got := eventBytes(ev)
+	if want := int64(cluster.MaxHopsPerCycle) * int64(unsafe.Sizeof(probe.Hop{})); got < want {
+		t.Fatalf("%d empty hop rows charged %d bytes, want at least %d — the rows themselves are free under this accounting",
+			cluster.MaxHopsPerCycle, got, want)
+	}
+}
+
+// WaitDelay starts counting after the child exits or the context is done, so
+// it adds to an action's worst case rather than capping it. Setting it equal
+// to the action timeout made one exec action take 2x the ceiling
+// Evaluator.deliver budgets per action, and the next action in the same alert
+// inherited a dead context — its page dropped in silence. The two halves are
+// read back off the built command rather than timed, because the blocking
+// case needs an orphan holding an inherited descriptor and a fixture for that
+// is exactly what a vacuous timing test hides.
+func TestExecSplitsOneActionsBudgetRatherThanExceedingIt(t *testing.T) {
+	const budget, wait = 600 * time.Millisecond, 100 * time.Millisecond
+	d := &ActionDispatcher{
+		log:          slog.New(slog.DiscardHandler),
+		store:        config.NewStore("", &config.Config{}),
+		actionBudget: budget,
+		waitDelay:    wait,
+	}
+
+	before := time.Now()
+	cmd, execCtx, cancel := d.buildExec(context.Background(), config.Action{Type: "exec", Command: "/bin/true"}, "body", Event{})
+	t.Cleanup(cancel)
+	if cmd == nil {
+		t.Fatal("buildExec returned no command")
+	}
+	deadline, ok := execCtx.Deadline()
+	if !ok {
+		t.Fatal("exec context carries no deadline — the child is unbounded")
+	}
+	ctxBudget := deadline.Sub(before)
+	if got := ctxBudget + cmd.WaitDelay; got > budget+50*time.Millisecond {
+		t.Fatalf("context %s + WaitDelay %s = %s, past the %s one action is budgeted: WaitDelay adds to the deadline rather than capping it, so the next action in the same alert gets a dead context and its page is dropped silently",
+			ctxBudget, cmd.WaitDelay, got, budget)
+	}
+	if cmd.WaitDelay <= 0 {
+		t.Fatal("WaitDelay is unset: an orphan holding the inherited stdin pipe blocks Wait forever, wedging this shard's delivery worker")
+	}
+	// Output goes to /dev/null, so Wait has no copy goroutine to join.
+	if cmd.Stdout != nil || cmd.Stderr != nil {
+		t.Fatal("exec wires a pipe for output; CommandContext kills only the direct child, so an orphan holding it blocks Wait past the deadline")
 	}
 }
