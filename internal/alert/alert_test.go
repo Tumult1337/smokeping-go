@@ -746,7 +746,7 @@ func TestRefreshDropsAggOnQuorumToggle(t *testing.T) {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
 	disp.ev = ev
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 	clk := pinClock(ev, testBase)
 
 	ctx := context.Background()
@@ -825,12 +825,12 @@ func TestRefreshDropsStateForDepartedTargets(t *testing.T) {
 
 	gw := aggKey{target: "core/gw", alert: "quorum-test"}
 	health := aggKey{target: slavehealth.Group + "/tokyo-1", alert: "quorum-test"}
-	ev.mu.Lock()
-	if _, ok := ev.states[gw]; !ok {
+	if !hasState(ev, gw) {
 		t.Fatal("no state recorded for the configured target")
 	}
 	// Health targets never appear in the stored config, so the sweep must not
 	// read their absence as a departure.
+	ev.mu.Lock()
 	ev.states[health] = map[string]*alertState{"master": {state: StateFiring}}
 	ev.mu.Unlock()
 
@@ -966,8 +966,44 @@ func newTestEvaluatorClock(t *testing.T, a config.Alert) (*Evaluator, *recording
 		t.Fatalf("NewEvaluator: %v", err)
 	}
 	disp.ev = ev
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 	return ev, disp, pinClock(ev, testBase)
+}
+
+// closeOrReportLeak shuts the evaluator down and turns one specific test bug
+// into a message instead of a hang: t.Fatal calls runtime.Goexit, so an
+// assertion made while holding ev.mu never releases it, and Close takes that
+// same mutex. Without this a guard that fires reports as a package-wide "test
+// timed out" ten minutes later with no assertion text, reading as flake.
+func closeOrReportLeak(t *testing.T, ev *Evaluator) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { ev.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("Evaluator.Close blocked: this test returned still holding ev.mu — assert outside the critical section, because t.Fatal calls runtime.Goexit and never runs the unlock")
+	}
+}
+
+// snapshotSource copies one source's state under ev.mu so assertions run
+// outside the critical section. See closeOrReportLeak for why that matters.
+func snapshotSource(ev *Evaluator, key aggKey, source string) (alertState, bool) {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	st, ok := ev.states[key][source]
+	if !ok {
+		return alertState{}, false
+	}
+	return *st, true
+}
+
+// hasState reports whether any per-source state exists for the key.
+func hasState(ev *Evaluator, key aggKey) bool {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	_, ok := ev.states[key]
+	return ok
 }
 
 // testCycle populates LossCount/Sent, the fields fieldGetter("loss_pct")
@@ -2367,7 +2403,7 @@ func newTestEvaluatorInterval(t *testing.T, interval time.Duration, a config.Ale
 		t.Fatalf("NewEvaluator: %v", err)
 	}
 	disp.ev = ev
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 	return ev, disp, pinClock(ev, testBase)
 }
 
@@ -2618,8 +2654,7 @@ func TestPruneResetsEvaluationStateButKeepsIdentity(t *testing.T) {
 	ev.OnCycle(ctx, bad)
 
 	key := aggKey{target: "core/gw", alert: "quorum-test"}
-	ev.mu.Lock()
-	st, ok := ev.states[key]["tokyo-1"]
+	st, ok := snapshotSource(ev, key, "tokyo-1")
 	if !ok {
 		t.Fatal("tokyo-1's state missing entirely")
 	}
@@ -2629,15 +2664,12 @@ func TestPruneResetsEvaluationStateButKeepsIdentity(t *testing.T) {
 	if !st.seenCycle {
 		t.Fatal("replay identity did not survive the prune")
 	}
-	ev.mu.Unlock()
 
 	// tokyo-1 revives with a genuine cycle: a fresh streak, not a resumed one.
 	clk.advance(30 * time.Second)
 	ev.OnCycle(ctx, cycleAt(clk, "tokyo-1", 100))
 
-	ev.mu.Lock()
-	defer ev.mu.Unlock()
-	st = ev.states[key]["tokyo-1"]
+	st, _ = snapshotSource(ev, key, "tokyo-1")
 	if st.consecHits != 1 {
 		t.Fatalf("consecHits = %d after a prune and one bad cycle, want 1", st.consecHits)
 	}
@@ -2688,7 +2720,7 @@ func TestBatchOfTransitionsDoesNotBlockOnDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 	clk := pinClock(ev, testBase)
 
 	// Alternating loss drives one transition per cycle at sustained: 1.
@@ -2838,7 +2870,7 @@ func TestQueuedDispatchKeepsABudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 	clk := pinClock(ev, testBase)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2888,7 +2920,7 @@ func TestTransitionStillNotifiesWhenTheIngestContextHasExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 	clk := pinClock(ev, testBase)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2976,7 +3008,7 @@ func TestQuorumToggleResetsWarmup(t *testing.T) {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
 	disp.ev = ev
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 	clk := pinClock(ev, testBase)
 	ctx := context.Background()
 
@@ -3418,7 +3450,7 @@ func TestRefreshDropsAnAlertDetachedFromItsTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 
 	detached := aggKey{target: "core/gw", alert: "latency"}
 	kept := aggKey{target: "core/gw", alert: "loss"}
@@ -3651,7 +3683,7 @@ func TestActionsAreResolvedAtCommitNotAtDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvaluator: %v", err)
 	}
-	t.Cleanup(ev.Close)
+	t.Cleanup(func() { closeOrReportLeak(t, ev) })
 	clk := pinClock(ev, testBase)
 
 	cy := cycleAt(clk, "tokyo-1", 100)

@@ -152,6 +152,8 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 		if collapsed.HasRTT {
 			dto.RTTMedian = &collapsed.RTTMedian
 			dto.RTTP95 = &collapsed.RTTP95
+		}
+		if collapsed.HasRTTMax {
 			dto.RTTMax = &collapsed.RTTMax
 		}
 		dto.WorstSource = collapsed.WorstSource
@@ -212,9 +214,14 @@ type collapsedRow struct {
 	RTTMedian float64
 	RTTP95    float64
 	RTTMax    float64
-	// HasRTT is the selected source's own flag: with every bucket fully lost
-	// the three aggregates read 0, which is a latency nobody measured.
+	// HasRTT is the *worst* source's own flag and gates RTTMedian/RTTP95,
+	// which come from that row alone. HasRTTMax is separate because RTTMax is
+	// the max across every source: gating it on the worst row's flag let one
+	// fully-lost source null a healthy source's real measured latency — the
+	// single-PoP-outage shape this view exists for, and a contradiction of
+	// collapseSources' own doc comment.
 	HasRTT      bool
+	HasRTTMax   bool
 	WorstSource string
 	LastSeen    time.Time
 	Sparkline   []*float64
@@ -249,12 +256,15 @@ func collapseSources(rows []storage.OverviewSourceRow) collapsedRow {
 		WorstSource: worst.Source,
 		LastSeen:    worst.LastSeen,
 	}
-	// RTTMax = max across all sources.
-	out.RTTMax = worst.RTTMax
-	for _, r := range rows[1:] {
-		if r.RTTMax > out.RTTMax {
-			out.RTTMax = r.RTTMax
+	// RTTMax = max across every source that measured one. A source at total
+	// loss reports 0, which is not a measurement in either direction.
+	out.RTTMax = 0
+	for _, r := range rows {
+		if r.HasRTT && (!out.HasRTTMax || r.RTTMax > out.RTTMax) {
+			out.RTTMax, out.HasRTTMax = r.RTTMax, true
 		}
+	}
+	for _, r := range rows[1:] {
 		if r.LastSeen.After(out.LastSeen) {
 			out.LastSeen = r.LastSeen
 		}

@@ -318,3 +318,48 @@ func TestOverviewOmitsLatencyForAFullyLostTarget(t *testing.T) {
 			row.RTTMedian, row.RTTP95, row.RTTMax)
 	}
 }
+
+// RTTMax is the max across ALL sources, by collapseSources' own contract — a
+// spike on a less-lossy source still matters. Gating it on the worst-loss
+// row's HasRTT let one dead PoP null a live PoP's real measured latency, which
+// is the single-PoP-outage shape this view exists for.
+func TestOverviewKeepsALiveSourcesMaxWhenAnotherIsFullyLost(t *testing.T) {
+	now := time.Now()
+	r := &stubReader{overview: []storage.OverviewSourceRow{
+		{Group: "core", Name: "gw", Source: "edge-dead", LossAvg: 100, LossMax: 100, HasRTT: false, LastSeen: now},
+		{Group: "core", Name: "gw", Source: "master", LossAvg: 0, LossMax: 0, HasRTT: true,
+			RTTMedian: 20, RTTP95: 30, RTTMax: 42, LastSeen: now},
+	}}
+	code, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, "/api/v1/overview")
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", code, body)
+	}
+	var got struct {
+		Rows []struct {
+			ID          string   `json:"id"`
+			RTTMedian   *float64 `json:"rtt_median"`
+			RTTMax      *float64 `json:"rtt_max"`
+			WorstSource string   `json:"worst_source"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, row := range got.Rows {
+		if row.ID != "core/gw" {
+			continue
+		}
+		if row.WorstSource != "edge-dead" {
+			t.Fatalf("worst_source = %q, want the fully-lost one", row.WorstSource)
+		}
+		// Median/p95 come from the worst row alone, which measured nothing.
+		if row.RTTMedian != nil {
+			t.Fatalf("rtt_median = %v from a source at total loss", *row.RTTMedian)
+		}
+		if row.RTTMax == nil || *row.RTTMax != 42 {
+			t.Fatalf("rtt_max = %v, want 42 measured by the live source — one dead PoP must not null a healthy one's latency", row.RTTMax)
+		}
+		return
+	}
+	t.Fatalf("no row for core/gw in %s", body)
+}

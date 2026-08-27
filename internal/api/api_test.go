@@ -2273,3 +2273,41 @@ func TestStatusBoundsItsResponseAndItsWindow(t *testing.T) {
 		}
 	})
 }
+
+// A cap that trims in silence is the defect the hop caps exist not to have:
+// a caller cannot tell a dropped origin from one that never probed the target.
+func TestStatusReportsTheSourcesItOmitted(t *testing.T) {
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	r := &stubReader{}
+	const extra = 5
+	for s := range statusMaxSources + extra {
+		// Distinct newest timestamps, so the selection is by recency and not
+		// by the alphabetical tiebreak.
+		r.cycles = append(r.cycles, storage.CyclePoint{
+			Time:   base.Add(time.Duration(s) * time.Minute),
+			Source: fmt.Sprintf("edge-%03d", s),
+		})
+	}
+	_, body := do(t, newTestServer(t, withReader(r)), http.MethodGet, "/api/v1/targets/core/gw/status")
+	var got struct {
+		Recent  []storage.CyclePoint `json:"recent"`
+		Omitted int                  `json:"sources_omitted"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Omitted != extra {
+		t.Fatalf("sources_omitted = %d, want %d — a silently dropped origin is indistinguishable from one that never reported", got.Omitted, extra)
+	}
+	// The freshest must survive, not the alphabetically first.
+	kept := map[string]bool{}
+	for _, p := range got.Recent {
+		kept[p.Source] = true
+	}
+	if !kept[fmt.Sprintf("edge-%03d", statusMaxSources+extra-1)] {
+		t.Fatal("the most recently active source was dropped — the selection is not by recency")
+	}
+	if kept["edge-000"] {
+		t.Fatal("the least recently active source survived — selection fell back to alphabetical order")
+	}
+}

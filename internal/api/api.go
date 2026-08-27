@@ -821,14 +821,18 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	points = trimPerSource(points, statusRecentCycles)
-	points = keepRecentSources(points, statusMaxSources)
+	points, omitted := keepRecentSources(points, statusMaxSources)
 	// Echoed for the reason /cycles echoes its window: the scan is bounded at
 	// statusRecentCycles intervals, so a target silent longer than that comes
 	// back empty — which is the honest answer, but without the window a caller
 	// cannot tell it apart from a target that never existed.
+	// sources_omitted, because a cap that trims in silence is the defect the
+	// hop caps exist not to have: a caller cannot otherwise tell a dropped
+	// origin from one that never probed this target.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"target": ref.ID(), "recent": points,
 		"from": from, "to": to,
+		"sources_omitted": omitted,
 	})
 }
 
@@ -870,7 +874,7 @@ func trimPerSource(points []storage.CyclePoint, n int) []storage.CyclePoint {
 // point is newest. Dropping whole sources rather than shortening every one
 // keeps each series that is served complete, which is what a status strip
 // reads.
-func keepRecentSources(points []storage.CyclePoint, n int) []storage.CyclePoint {
+func keepRecentSources(points []storage.CyclePoint, n int) ([]storage.CyclePoint, int) {
 	newest := make(map[string]time.Time, 8)
 	for _, p := range points {
 		if p.Time.After(newest[p.Source]) {
@@ -878,7 +882,7 @@ func keepRecentSources(points []storage.CyclePoint, n int) []storage.CyclePoint 
 		}
 	}
 	if len(newest) <= n {
-		return points
+		return points, 0
 	}
 	sources := slices.SortedFunc(maps.Keys(newest), func(a, b string) int {
 		if c := newest[b].Compare(newest[a]); c != 0 {
@@ -896,7 +900,7 @@ func keepRecentSources(points []storage.CyclePoint, n int) []storage.CyclePoint 
 			out = append(out, p)
 		}
 	}
-	return out
+	return out, len(newest) - n
 }
 
 // ServerWriteTimeout is how long a response may take before the connection is
