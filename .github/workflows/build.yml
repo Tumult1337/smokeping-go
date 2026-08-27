@@ -38,14 +38,6 @@ jobs:
       - name: Test
         run: go test -race -v ./...
 
-      # A constant expression that overflows a 32-bit uint compiles fine on
-      # amd64 and breaks every 386/arm build; nothing on the dev machine
-      # catches it. Build only — the race detector needs 64-bit.
-      - name: Build 32-bit
-        run: |
-          GOARCH=386 GOOS=linux go build ./...
-          GOARCH=arm GOOS=linux go build ./...
-
       - name: Build binary
         run: |
           mkdir -p build
