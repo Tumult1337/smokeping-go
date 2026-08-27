@@ -174,11 +174,17 @@ export function HopsPath({
                   {h.LossPct.toFixed(1)}
                 </td>
                 <td className="num">{h.Sent}</td>
-                <td className="num">{h.Min.toFixed(1)}</td>
-                <td className="num">{h.Mean.toFixed(1)}</td>
-                <td className="num">{h.Max.toFixed(1)}</td>
+                {/* A hop that answered nothing has all three at 0, which is a
+                    latency nobody measured — rendering 0.0 puts it at the top
+                    of a latency column, the same defect the overview's
+                    fully-lost rows had. */}
+                <td className="num">{h.LossPct >= 100 ? "—" : h.Min.toFixed(1)}</td>
+                <td className="num">{h.LossPct >= 100 ? "—" : h.Mean.toFixed(1)}</td>
+                <td className="num">{h.LossPct >= 100 ? "—" : h.Max.toFixed(1)}</td>
                 <td>
-                  <HopBar min={h.Min} mean={h.Mean} max={h.Max} scale={scale} />
+                  {h.LossPct < 100 && (
+                    <HopBar min={h.Min} mean={h.Mean} max={h.Max} scale={scale} />
+                  )}
                 </td>
               </tr>
             ))}

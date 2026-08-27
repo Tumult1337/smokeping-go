@@ -1,6 +1,6 @@
 # Migration: configs that used to load and now do not
 
-This release adds three load-time refusals. Each closes a case where the
+This release adds four load-time refusals. Each closes a case where the
 process accepted a config and then failed — at boot, at the next restart, or
 silently at runtime. Check yours against the list **before** rolling the
 binary out, because a refused config exits non-zero rather than degrading.
@@ -40,7 +40,23 @@ discovered.
 (~79 years). Any real retention is far below it; a value in that range is
 almost always a units mistake (hours or minutes written as days).
 
-## 3. A cluster node's icmp ping budget is checked even without an icmp probe
+## 3. `cluster.name` and `cluster.advertise` are checked against the master's rules
+
+`cluster.name` must satisfy exactly what the master accepts: non-empty, at most
+128 bytes, not the literal `master`, and free of control characters.
+`cluster.advertise` must be at most 256 bytes.
+
+Both travel as headers on every request a slave makes. The master refuses
+either past its limit, and that refusal is now fatal to the slave process — so
+a config accepted locally produced a systemd crash loop that never resolved.
+`cluster.name: "master"` is the case to check first: it is the natural
+copy-paste from a master config, whose `cluster.source` defaults to that
+string.
+
+**If you hit this:** rename the slave. The name is also its `source` label in
+storage, so pick the one you want on charts.
+
+## 4. A cluster node's icmp ping budget is checked even without an icmp probe
 
 `config.ICMPPingBudget` refuses a schedule whose full-loss derived budget
 `(interval − (pings−1) × 200ms) / pings` falls below 50ms. It is now applied

@@ -799,3 +799,44 @@ func (r *oneHopRow) Scan(dest ...any) error {
 
 func (*oneHopRow) Err() error   { return nil }
 func (*oneHopRow) Close() error { return nil }
+
+// Past the counter budget the trim keeps the NEWEST pinned cycles. cycleKeys
+// preserves the hop query's ORDER BY source, so a prefix kept whichever
+// sources sort first alphabetically and dropped the cycles an operator is
+// looking at — target_loss unknown for exactly the window under investigation.
+// Observable in the bound arguments, which is the only handle without a live
+// server.
+func TestCycleCountersTrimKeepsTheNewestCycles(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	base := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	total := maxCycleCounterKeys + 200
+
+	// Alphabetically-first sources carry the OLDEST cycles, so a prefix trim
+	// and a newest-first trim select disjoint sets.
+	hops := make([]storage.HopPoint, 0, total)
+	for i := range total {
+		hops = append(hops, storage.HopPoint{
+			Source: fmt.Sprintf("edge-%05d", i),
+			Time:   base.Add(time.Duration(i) * time.Minute),
+		})
+	}
+
+	conn := &recordConn{}
+	if _, err := (&Reader{conn: conn}).queryCycleCounters(context.Background(), ref, hops); err != nil {
+		t.Fatalf("queryCycleCounters: %v", err)
+	}
+	// Args are target, group, first, last, then (source, ms) per key.
+	oldestKept := int64(1) << 62
+	for i := 4; i < len(conn.args); i += 2 {
+		ms, ok := conn.args[i+1].(int64)
+		if !ok {
+			t.Fatalf("arg %d is %T, want the millisecond bound", i+1, conn.args[i+1])
+		}
+		oldestKept = min(oldestKept, ms)
+	}
+	wantOldest := base.Add(time.Duration(total-maxCycleCounterKeys) * time.Minute).UnixMilli()
+	if oldestKept != wantOldest {
+		t.Fatalf("oldest kept cycle is %d, want %d — the trim kept the oldest pinned cycles, so target_loss is unknown for exactly the window an operator opened",
+			oldestKept, wantOldest)
+	}
+}

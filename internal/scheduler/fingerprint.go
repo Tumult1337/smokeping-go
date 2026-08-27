@@ -23,8 +23,12 @@ import (
 // Deliberately excluded: alert *definitions* (cfg.Alerts — condition,
 // sustained, actions, quorum), which the evaluator re-reads from the live
 // config store per cycle rather than from anything baked in at Build time,
-// so editing one doesn't need a rebuild. Also excluded: action URLs (re-read
-// per dispatch), listen/cluster/storage blocks (not scheduler-visible).
+// so editing one doesn't need a rebuild. Also excluded: action definitions and
+// listen/cluster/storage blocks (not scheduler-visible). Note that actions are
+// no longer re-read per dispatch — alert.resolveActions snapshots them when the
+// transition is committed — so an already-queued event still carries the old
+// URL after a SIGHUP. Rotating a leaked webhook URL therefore does not reach
+// events already in flight; the queue drains within its own budget.
 //
 // Family is included because it changes how a host is resolved — a family
 // change must trigger a scheduler rebuild. Slaves is included because

@@ -103,6 +103,27 @@ func newWriterChans(pings int) [numTables]chan any {
 // NewWriter opens a connection and starts one consumer goroutine per
 // table, sizing each table's buffer from pings. Returns an error if the
 // initial Ping fails.
+// batchInterval validates the whole batch block and returns the flush period.
+// Both fields, not just the one: config.Validate bounds them together for one
+// reason — they reach runTable, which runs on a goroutine with no recover(),
+// where a zero period panics time.NewTicker and a negative row count panics
+// makeslice. NewWriter is exported, so a caller that skipped validation gets
+// an error here rather than a stack trace. Called before dialing, so the check
+// does not depend on a reachable server.
+func batchInterval(b config.ClickHouseBatch) (time.Duration, error) {
+	if b.MaxRows <= 0 || b.MaxRows > config.MaxBatchRows {
+		return 0, fmt.Errorf("storage.clickhouse.batch.max_rows %d: must be in [1, %d]", b.MaxRows, config.MaxBatchRows)
+	}
+	d, err := time.ParseDuration(b.MaxInterval)
+	if err != nil {
+		return 0, fmt.Errorf("storage.clickhouse.batch.max_interval %q: %w", b.MaxInterval, err)
+	}
+	if d <= 0 || d > config.MaxBatchInterval {
+		return 0, fmt.Errorf("storage.clickhouse.batch.max_interval %s: must be in (0, %s]", d, config.MaxBatchInterval)
+	}
+	return d, nil
+}
+
 func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pings int) (*Writer, error) {
 	// Pool must be at least numTables so all four flushers can run
 	// concurrently on the ticker without queueing on the connection
@@ -134,13 +155,10 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pin
 	loopCtx, cancel := context.WithCancel(context.Background())
 	w := &Writer{log: log, conn: conn, cfg: cfg, cancel: cancel, chans: newWriterChans(pings)}
 
-	// config.Validate bounds this at both ends, but NewWriter is exported and
-	// a caller that skipped validation would otherwise reach time.NewTicker
-	// with a zero period — a panic on a goroutine with no recover().
-	maxInterval, err := time.ParseDuration(cfg.Batch.MaxInterval)
-	if err != nil || maxInterval <= 0 {
+	maxInterval, err := batchInterval(cfg.Batch)
+	if err != nil {
 		conn.Close() //nolint:errcheck // best-effort cleanup
-		return nil, fmt.Errorf("storage.clickhouse.batch.max_interval %q: must be a positive duration", cfg.Batch.MaxInterval)
+		return nil, err
 	}
 	for i := 0; i < numTables; i++ {
 		w.wg.Add(1)

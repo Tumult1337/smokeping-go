@@ -3915,3 +3915,17 @@ func TestQueueChargesTheActionSnapshot(t *testing.T) {
 			held, templateBytes)
 	}
 }
+
+// NewDispatcher must wire the real budgets; only the injected arithmetic was
+// tested, so setting actionBudget to an hour in the constructor stayed green
+// and every exec action would have run an hour past its event's own ceiling.
+func TestNewDispatcherWiresTheProductionBudgets(t *testing.T) {
+	d := NewDispatcher(slog.New(slog.DiscardHandler), config.NewStore("", &config.Config{}))
+	budget, wait := d.budgets()
+	if budget != actionTimeout {
+		t.Fatalf("actionBudget = %s, want actionTimeout (%s)", budget, actionTimeout)
+	}
+	if wait != execWaitDelay {
+		t.Fatalf("waitDelay = %s, want execWaitDelay (%s)", wait, execWaitDelay)
+	}
+}

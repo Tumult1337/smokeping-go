@@ -1426,3 +1426,61 @@ func TestCachingReader_MissesCountIssuedQueriesOnly(t *testing.T) {
 		t.Fatalf("a refused query counted %d misses; it issued none, so the /health ratio now reads as cache thrash that never happened", got-before)
 	}
 }
+
+// The hops half of the empty-stale rule, which shipped with the cycles half
+// tested and this one not. A tcp/http/dns target, or a _cluster health target
+// under health_hops:false, legitimately produces no hop rows; caching that and
+// then serving it in place of an outage hides the outage entirely on /hops —
+// the endpoint an operator opens during an incident.
+func TestCachingReader_EmptyCachedHopsAreNotServedInPlaceOfAnError(t *testing.T) {
+	inner := &hopsFailAfterFirst{}
+	c := NewCachingReader(inner, 8, 8)
+	ref := newRef("g", "t")
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+
+	if _, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{}); err != nil {
+		t.Fatalf("warming with an empty result: %v", err)
+	}
+	c.hopsMu.Lock()
+	for _, elem := range c.hopsItems {
+		elem.Value.(*hopsCacheEntry).expires = now.Add(-time.Hour)
+	}
+	c.hopsMu.Unlock()
+
+	if _, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{}); err == nil {
+		t.Fatal("an outage was served as an empty path view because the cached empty result read as no cached entry")
+	}
+}
+
+type hopsFailAfterFirst struct {
+	fakeReader
+	calls atomic.Int64
+}
+
+func (h *hopsFailAfterFirst) QueryLatestHops(context.Context, config.TargetRef, QueryFilter) (HopsResult, error) {
+	if h.calls.Add(1) > 1 {
+		return HopsResult{}, errors.New("clickhouse is down")
+	}
+	return HopsResult{}, nil
+}
+
+// The hops miss counter, same rule as the cycles one: a waiter joins a query
+// already paid for and a refusal issues none.
+func TestCachingReader_HopsMissesCountIssuedQueriesOnly(t *testing.T) {
+	c := NewCachingReader(&fakeReader{}, 8, 8)
+	ref := newRef("g", "t")
+
+	c.hopsMu.Lock()
+	for i := range maxInflightLeaders {
+		c.hopsInflight[hopsCacheKey{group: "g", name: fmt.Sprintf("filler-%d", i)}] = &hopsInflight{done: make(chan struct{})}
+	}
+	c.hopsMu.Unlock()
+
+	before := c.Stats().HopsMisses
+	if _, err := c.QueryLatestHops(context.Background(), ref, QueryFilter{}); !errors.Is(err, ErrOverloaded) {
+		t.Fatalf("want ErrOverloaded, got %v", err)
+	}
+	if got := c.Stats().HopsMisses; got != before {
+		t.Fatalf("a refused hops query counted %d misses; it issued none", got-before)
+	}
+}

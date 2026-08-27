@@ -2311,3 +2311,22 @@ func TestStatusReportsTheSourcesItOmitted(t *testing.T) {
 		t.Fatal("the least recently active source survived — selection fell back to alphabetical order")
 	}
 }
+
+// The documented boundary itself: 41d is served, 42d is the first refusal.
+// Without a row at the refusing side the constant is pinned from one direction
+// only, and README quotes the figure.
+func TestStepOverrideRefusesAtItsDocumentedBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		days int
+		want int
+	}{
+		{41, http.StatusOK},
+		{42, http.StatusBadRequest},
+	} {
+		path := fmt.Sprintf("/api/v1/targets/core/gw/cycles?from=-%dd&step=1h", tc.days)
+		code, body := do(t, newTestServer(t, withReader(&stubReader{})), http.MethodGet, path)
+		if code != tc.want {
+			t.Fatalf("%dd at step=1h: status %d, want %d (body %s)", tc.days, code, tc.want, body)
+		}
+	}
+}

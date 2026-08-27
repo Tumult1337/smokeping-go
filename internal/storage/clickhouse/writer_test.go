@@ -527,3 +527,33 @@ func TestFailingFlushLeavesRowsInThePerTableBuffer(t *testing.T) {
 			held, bufSize, want)
 	}
 }
+
+// The batch block reaches runTable, which runs on a goroutine with no
+// recover(): a zero period panics time.NewTicker and a non-positive row count
+// panics makeslice. NewWriter is exported, so an unvalidated caller must get
+// an error. Checked before dialing, which is also what makes it testable —
+// the previous guard sat after clickhouse.Open and no unit test could reach it.
+func TestBatchIntervalValidatesBothFields(t *testing.T) {
+	for _, tc := range []struct {
+		rows    int
+		iv      string
+		wantErr bool
+	}{
+		{1000, "1s", false},
+		{0, "1s", true},
+		{-1, "1s", true},
+		{config.MaxBatchRows + 1, "1s", true},
+		{1000, "0s", true},
+		{1000, "-1s", true},
+		{1000, "banana", true},
+		{1000, "2h", true},
+	} {
+		_, err := batchInterval(config.ClickHouseBatch{MaxRows: tc.rows, MaxInterval: tc.iv})
+		if tc.wantErr && err == nil {
+			t.Errorf("max_rows=%d max_interval=%q accepted; runTable panics on it with no recover", tc.rows, tc.iv)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("max_rows=%d max_interval=%q: %v", tc.rows, tc.iv, err)
+		}
+	}
+}

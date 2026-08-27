@@ -3,6 +3,8 @@ package main
 import (
 	"log/slog"
 	"net/netip"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,5 +94,34 @@ func TestCurrentSlavePins(t *testing.T) {
 	})
 	if want := netip.MustParseAddr("10.44.0.7"); pins["tokyo-1"] != want {
 		t.Fatalf("pins = %v, want tokyo-1 -> %s", pins, want)
+	}
+}
+
+// Link three of the path to Evaluator.PruneDeparted lives in a Supervisor
+// literal built inside runNode, which no unit test can reach without standing
+// up storage and a listener. Severing it leaves the sweep unreachable in the
+// shipped binary with the whole suite green, so the wiring is pinned by
+// reading the source — the same shape internal/config/tracebounds_test.go uses
+// for the trace bounds it cannot import.
+func TestRunNodeWiresOnRebuiltToPruneDeparted(t *testing.T) {
+	raw, err := os.ReadFile("run_node.go")
+	if err != nil {
+		t.Fatalf("read run_node.go: %v", err)
+	}
+	src := string(raw)
+	sup := strings.Index(src, "sup := &scheduler.Supervisor{")
+	if sup < 0 {
+		t.Fatal("run_node.go no longer builds a scheduler.Supervisor; update this guard")
+	}
+	end := strings.Index(src[sup:], "\n\t}")
+	if end < 0 {
+		t.Fatal("could not delimit the Supervisor literal")
+	}
+	lit := src[sup : sup+end]
+	if !strings.Contains(lit, "OnRebuilt:") {
+		t.Fatal("the Supervisor sets no OnRebuilt: Evaluator.PruneDeparted is unreachable, so state for a removed or renamed (target, alert) pair is stranded for the process's life — and a stranded StateFiring resumes firing if the target comes back, making the recovery a non-transition so the page never closes")
+	}
+	if !strings.Contains(lit, "PruneDeparted") {
+		t.Fatal("OnRebuilt is set but does not call PruneDeparted")
 	}
 }

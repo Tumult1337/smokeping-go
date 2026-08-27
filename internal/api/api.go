@@ -779,10 +779,13 @@ func redactAllHopAddresses(hops []storage.HopPoint) []storage.HopPoint {
 	return out
 }
 
-// statusRecentCycles is how many trailing raw cycles /status returns, and the
-// query window is derived from it (cycles × interval) so the handler never
-// scans rows it is about to trim — a fixed 24h window decoded ~690× what it
-// kept and each result held a 256-entry cycle-cache slot.
+// statusRecentCycles is how many trailing raw cycles /status returns per
+// source, and the query window is derived from it (cycles × interval, capped
+// at statusWindowCap) so the handler scans close to what it serves — a fixed
+// 24h window decoded ~690× what it kept and each result held a 256-entry
+// cycle-cache slot. "Close to", not "exactly": the window covers this many
+// cycles per source while the trim is also per source, so a multi-source
+// target scans a multiple of what one source contributes.
 const statusRecentCycles = 50
 
 // statusWindowCap bounds the scan whatever the configured interval, restoring
@@ -1042,20 +1045,6 @@ func parseRelativeDuration(s string) (time.Duration, error) {
 	return 0, fmt.Errorf("invalid duration %q", s)
 }
 
-// pickStep returns the toStartOfInterval width for a cycles query
-// covering [from, to]. The window-derived path delegates to
-// storage.PickCycleStep so the tier table stays single-sourced; this
-// wrapper exists solely to apply the back-compat `?step=` override:
-//
-//	?step=raw|1h|1d → forces a specific tier
-//	anything else   → derived from window width.
-//
-// ok is false when the override buckets finer than the tier the ladder derives
-// for the window — raw outside the raw tier, 1h past the 1h tier — because a
-// finer step multiplies the row count the ladder holds to ~500-1000 buckets
-// (?step=1h at 365d is 24x the ladder). Each bound is the ladder's own tier
-// rather than a second copy of its threshold, so widening a tier widens the
-// override with it.
 // maxOverrideBuckets is the row count a `?step=` override may reach, and it is
 // the ladder's own upper target. Comparing the override against the derived
 // *tier* instead refused by width rather than by cost, which put the boundary
@@ -1080,6 +1069,18 @@ func withinOverrideBuckets(step time.Duration, from, to time.Time) bool {
 	return int64(span/step) <= ceiling
 }
 
+// pickStep returns the toStartOfInterval width for a cycles query covering
+// [from, to]. The window-derived path delegates to storage.PickCycleStep so
+// the tier table stays single-sourced; this wrapper exists solely to apply the
+// back-compat `?step=` override:
+//
+//	?step=raw|1h|1d → forces a specific tier
+//	anything else   → derived from window width.
+//
+// ok is false when the override would cost more than the ladder's own target
+// or more than the ladder would itself return for this window — see
+// withinOverrideBuckets. raw is separate: it is served only inside the
+// ladder's raw tier, since a raw step has no bucket count to bound.
 func pickStep(override string, from, to time.Time) (step time.Duration, ok bool) {
 	derived := storage.PickCycleStep(to.Sub(from))
 	switch override {
