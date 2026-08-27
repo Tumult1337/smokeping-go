@@ -36,6 +36,15 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 		return fmt.Errorf("load config %q: %w", configPath, err)
 	}
 	store := config.NewStore(configPath, cfg)
+	// Before the watchers, not after the evaluator is built: this is a pure
+	// function of the config and needs nothing from the evaluator, and installing
+	// it later leaves a window in which a SIGHUP publishes a config whose alert
+	// conditions the evaluator cannot parse — which it then only logs, keeping
+	// its previous map while the API serves the new alerts.
+	store.SetValidator(func(c *config.Config) error {
+		_, err := alert.ValidateConditions(c)
+		return err
+	})
 
 	store.WatchSIGHUP(ctx, log)
 	if err := store.WatchFile(ctx, log); err != nil {

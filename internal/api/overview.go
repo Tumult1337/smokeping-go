@@ -103,7 +103,8 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 	// target — avoids an O(N*M) scan inside the configured-targets loop.
 	bySource := make(map[string][]storage.OverviewSourceRow, len(rows))
 	for _, row := range rows {
-		id := row.Group + "/" + row.Name
+		ref := config.TargetRef{Group: row.Group, Target: config.Target{Name: row.Name}}
+		id := ref.ID()
 		bySource[id] = append(bySource[id], row)
 	}
 
@@ -118,14 +119,15 @@ func (s *Server) getOverview(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]overviewRowDTO, 0, len(targets))
 	for _, t := range targets {
+		id := t.ID()
 		dto := overviewRowDTO{
-			ID:         t.ID(),
+			ID:         id,
 			Group:      t.Group,
 			GroupTitle: groupTitles[t.Group],
 			Title:      t.Target.Title,
 			ProbeType:  probeType(cfg, t.Target.Probe),
 		}
-		matches := bySource[t.ID()]
+		matches := bySource[id]
 		if source != "" && len(matches) > 0 {
 			filtered := make([]storage.OverviewSourceRow, 0, len(matches))
 			for _, m := range matches {

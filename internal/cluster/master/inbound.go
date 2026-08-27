@@ -9,11 +9,6 @@ import (
 	"github.com/tumult/gosmokeping/internal/scheduler"
 )
 
-// ingestBatch turns each wire-format CyclePayload back into a scheduler.Cycle
-// and feeds it through the master's sink. Returns the number of cycles ingested
-// and the number recognised as redeliveries; silently drops any whose
-// group/name no longer resolves (stale slave config vs. fresh master config).
-// That's acceptable — the slave will refresh and stop sending within 60s.
 // sinkCycleBudget bounds one cycle's trip through the fanout; sinkBatchBudget
 // bounds the whole POST's. Both are cluster.PushTimeout-derived, and both are
 // inert today — see deliver, where no sink reads either deadline.
@@ -39,11 +34,17 @@ const (
 	sinkCycleBudget = sinkBatchBudget / 3
 )
 
+// ingestBatch turns each wire-format CyclePayload back into a scheduler.Cycle
+// and feeds it through the master's sink. Returns the number of cycles ingested
+// and the number recognised as redeliveries; silently drops any whose
+// group/name no longer resolves (stale slave config vs. fresh master config).
+// That's acceptable — the slave will refresh and stop sending within 60s.
 func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, int) {
 	cfg := s.store.Current()
-	targets := make(map[string]config.Target, len(cfg.AllTargets()))
-	for _, t := range cfg.AllTargets() {
-		targets[t.ID()] = t.Target
+	all := cfg.AllTargets()
+	targets := make(map[string]config.TargetRef, len(all))
+	for _, t := range all {
+		targets[t.ID()] = t
 	}
 	// Health targets are synthesized at scheduler-build time and never stored
 	// in config, so AllTargets cannot see them — without this the mesh is
@@ -57,7 +58,8 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 	if hs := s.healthSet(); hs != nil {
 		for _, g := range hs.Probe("") {
 			for _, t := range g.Targets {
-				targets[g.Group+"/"+t.Name] = t
+				ref := config.TargetRef{Group: g.Group, Target: t}
+				targets[ref.ID()] = ref
 			}
 		}
 	}
@@ -72,12 +74,18 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 
 	accepted, duplicates := 0, 0
 	for _, p := range batch.Cycles {
-		key := p.Group + "/" + p.Name
-		target, ok := targets[key]
+		ref, ok := targets[p.Group+"/"+p.Name]
 		if !ok {
-			s.log.Debug("cluster cycle for unknown target, dropping", "target", key, "source", p.Source)
+			s.log.Debug("cluster cycle for unknown target, dropping",
+				"target", p.Group+"/"+p.Name, "source", p.Source)
 			continue
 		}
+		// The resolved target's own id, not the wire spelling that found it:
+		// neither group nor name has a character class, so one target is
+		// reachable under several flattened keys, and keying the dedup window on
+		// the caller's choice let the same measurement be admitted once per
+		// spelling.
+		key := ref.ID()
 		// Unconditionally overwrite with the batch-level Source, which
 		// handleCycles already pinned to the authenticated X-Slave-Name
 		// header. A per-cycle Source is wire-provided and untrusted — a
@@ -91,7 +99,7 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 		// probe_type is LowCardinality too, and the resolved target already
 		// names its probe, so the wire value is discarded for the same reason
 		// Source is: it is free text a token holder chooses.
-		p.ProbeName = target.Probe
+		p.ProbeName = ref.Target.Probe
 		// Delivery is at-least-once — PushSink.Requeue resends a batch whose
 		// ack was lost — and every storage table is a plain MergeTree that
 		// keeps both copies, so a redelivery doubles sum(sent) and every loss
@@ -101,7 +109,7 @@ func (s *Server) ingestBatch(_ *http.Request, batch cluster.CycleBatch) (int, in
 			duplicates++
 			continue
 		}
-		s.deliver(batchCtx, p.ToCycle(target), batch.Source, key, p.Time.UnixNano())
+		s.deliver(batchCtx, p.ToCycle(ref), batch.Source, key, p.Time.UnixNano())
 		accepted++
 	}
 	return accepted, duplicates

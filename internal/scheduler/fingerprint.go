@@ -36,10 +36,14 @@ import (
 // changes which targets the local scheduler probes.
 func Fingerprint(cfg *config.Config) string {
 	var out []byte
+	field := func(s string) {
+		out = append(out, config.EscapeSeparators(s)...)
+		out = append(out, config.SepField)
+	}
 	out = append(out, cfg.Interval.String()...)
-	out = append(out, '\x1f')
+	out = append(out, config.SepField)
 	out = append(out, strconv.Itoa(cfg.Pings)...)
-	out = append(out, '\x1d')
+	out = append(out, config.SepBlock)
 
 	names := make([]string, 0, len(cfg.Probes))
 	for name := range cfg.Probes {
@@ -48,42 +52,39 @@ func Fingerprint(cfg *config.Config) string {
 	slices.Sort(names)
 	for _, name := range names {
 		p := cfg.Probes[name]
-		out = append(out, name...)
-		out = append(out, '\x1f')
-		out = append(out, p.Type...)
-		out = append(out, '\x1f')
-		out = append(out, p.Timeout.String()...)
-		out = append(out, '\x1f')
-		out = append(out, strconv.FormatBool(p.Insecure)...)
-		out = append(out, '\x1e')
+		field(name)
+		field(p.Type)
+		field(p.Timeout.String())
+		field(strconv.FormatBool(p.Insecure))
+		// NoTrace is baked into the icmp prober at Build time, so only a rebuild
+		// can change it — omitting it made cluster.health_hops and every probe's
+		// no_trace edit take effect at the next process restart and not at SIGHUP.
+		field(strconv.FormatBool(p.NoTrace))
+		out = append(out, config.SepEntry)
 	}
-	out = append(out, '\x1d')
+	out = append(out, config.SepBlock)
 
 	for _, g := range cfg.Targets {
-		out = append(out, g.Group...)
-		out = append(out, '\x1f')
+		field(g.Group)
 		for _, t := range g.Targets {
-			out = append(out, t.Name...)
-			out = append(out, '\x1f')
-			out = append(out, t.Probe...)
-			out = append(out, '\x1f')
-			out = append(out, t.Host...)
-			out = append(out, '\x1f')
-			out = append(out, t.URL...)
-			out = append(out, '\x1f')
-			out = append(out, t.Family...)
-			out = append(out, '\x1f')
+			field(t.Name)
+			field(t.Probe)
+			field(t.Host)
+			field(t.URL)
+			field(t.Family)
 			for _, s := range t.Slaves {
-				out = append(out, s...)
-				out = append(out, '\x1f')
+				field(s)
 			}
+			// The two lists are delimited: run together on one separator, moving
+			// a name from slaves to alerts left the bytes unchanged, so the
+			// rebuild that reassigns the target and attaches the alert never ran.
+			out = append(out, config.SepList)
 			for _, a := range t.Alerts {
-				out = append(out, a...)
-				out = append(out, '\x1f')
+				field(a)
 			}
-			out = append(out, '\x1e')
+			out = append(out, config.SepEntry)
 		}
-		out = append(out, '\x1d')
+		out = append(out, config.SepBlock)
 	}
 	return string(out)
 }

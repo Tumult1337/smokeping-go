@@ -466,3 +466,28 @@ func TestLinkLocalFromANameIsRefusedRatherThanUnreachable(t *testing.T) {
 		t.Fatalf("an ordinary v6 name must still resolve: %v", err)
 	}
 }
+
+// A non-positive interval reaches scheduler.loopTarget, which feeds it to
+// rand.Int64N and time.NewTicker from a goroutine no recover() covers. Build
+// used to check it only when the map held an icmp probe, so a master-supplied
+// config with an http probe and no interval killed the slave process.
+func TestBuildRefusesNonPositiveIntervalWithoutICMPProbe(t *testing.T) {
+	probes := map[string]config.Probe{"web": {Type: "http", Timeout: time.Second}}
+	for _, interval := range []time.Duration{0, -time.Second} {
+		if _, err := Build(probes, interval, 5); err == nil {
+			t.Fatalf("Build accepted interval %s with no icmp probe; loopTarget panics on it", interval)
+		}
+	}
+	if _, err := Build(probes, time.Minute, 5); err != nil {
+		t.Fatalf("Build rejected a valid non-icmp schedule: %v", err)
+	}
+}
+
+// An interval past what a measured RTT can be stored as is refused on this path
+// too, not only through config.Validate.
+func TestBuildRefusesIntervalPastTheStorableCeiling(t *testing.T) {
+	probes := map[string]config.Probe{"web": {Type: "http", Timeout: time.Second}}
+	if _, err := Build(probes, config.MaxProbeInterval+time.Second, 5); err == nil {
+		t.Fatal("Build accepted an interval past config.MaxProbeInterval")
+	}
+}

@@ -320,12 +320,15 @@ type HTTPSampleDTO struct {
 	Err    string        `json:"err,omitempty"`
 }
 
-// ToCycle rebuilds a scheduler.Cycle from a received payload. TargetRef is
-// reconstructed from the cycle's group/name plus the probe definition pulled
-// from the current master config (the slave's probe map is authoritative for
-// type/timeout on the probe-execution side — the master only needs enough to
-// route the write).
-func (p CyclePayload) ToCycle(target config.Target) scheduler.Cycle {
+// ToCycle rebuilds a scheduler.Cycle from a received payload against the target
+// the master resolved it to. Both halves of the identity come from ref, never
+// from the payload: group and name are the flattened key ingest looked up, and
+// config bounds neither for characters — so a target {group:"eu", name:"lon/1"}
+// is equally reachable as {group:"eu/lon", name:"1"}, and taking the wire's
+// spelling wrote target_group/target_id under a pair present in no config, which
+// resolveTarget can never address and which mints a permanent LowCardinality
+// entry. Source and ProbeName are overridden by ingestBatch for the same reason.
+func (p CyclePayload) ToCycle(ref config.TargetRef) scheduler.Cycle {
 	hops := make([]probe.Hop, len(p.Hops))
 	for i, h := range p.Hops {
 		hops[i] = probe.Hop{
@@ -350,7 +353,7 @@ func (p CyclePayload) ToCycle(target config.Target) scheduler.Cycle {
 	}
 	return scheduler.Cycle{
 		Time:        p.Time,
-		Target:      config.TargetRef{Group: p.Group, Target: target},
+		Target:      ref,
 		ProbeName:   p.ProbeName,
 		Source:      p.Source,
 		RTTs:        p.RTTs,

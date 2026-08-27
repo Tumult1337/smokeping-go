@@ -7,6 +7,7 @@ package master
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -96,7 +97,10 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
-const maxSlaveNameLen = config.MaxSlaveNameLen
+// badSlaveNameMsg is the operator's only account of a permanent refusal that
+// exits the slave, so it derives its limit rather than restating it.
+var badSlaveNameMsg = fmt.Sprintf(
+	`name required: ≤%d bytes, not "master", no control chars`, config.MaxSlaveNameLen)
 
 // validSlaveName gates the identity a slave can claim. A valid bearer token
 // authenticates the request but does not bind it to a name, so the name is
@@ -110,6 +114,30 @@ const maxSlaveNameLen = config.MaxSlaveNameLen
 // Config.Validate can refuse a name this would, rather than a subset of it.
 func validSlaveName(name string) bool { return config.ValidSlaveName(name) }
 
+// nameCollidesWithMaster reports whether a claimed slave name is the label this
+// master stamps on its own cycles. ValidSlaveName reserves the literal
+// "master" — the default — but cluster.source is operator-settable, and a slave
+// taking that label shares one alertState with the master: their interleaved
+// cycles then skip each other on the replay guard's ordering arm, and a
+// "majority" quorum counts one live source where two exist.
+func (s *Server) nameCollidesWithMaster(name string) bool {
+	cl := s.store.Current().Cluster
+	return cl != nil && cl.Source != "" && name == cl.Source
+}
+
+// refuseCollision answers 503 rather than joining the permanent refusal above,
+// because cluster.source is read through store.Current() on every request: a
+// SIGHUP adopting a live slave's name would otherwise exit that slave, and the
+// operator's own next edit is what clears the condition. 503 is retried by
+// registerForever and requeued by PushSink, so the peer recovers on its own
+// with no restart. Logged at Error because nothing else reports it — a slave
+// looping on 503 is otherwise indistinguishable from a master that is down.
+func (s *Server) refuseCollision(w http.ResponseWriter, name string) {
+	s.log.Error("slave name collides with this master's cluster.source; refusing until one side is renamed",
+		"name", name)
+	http.Error(w, "name collides with the master's own source label", http.StatusServiceUnavailable)
+}
+
 // refusePermanently answers 400 and marks it as the master's own verdict, so
 // a slave can tell it from the same status arriving out of an intermediary.
 func refusePermanently(w http.ResponseWriter, msg string) {
@@ -117,15 +145,47 @@ func refusePermanently(w http.ResponseWriter, msg string) {
 	http.Error(w, msg, http.StatusBadRequest)
 }
 
+// refuseDecode answers a body that would not decode, marking it permanent only
+// when the error is about the content. A read deadline, a reset connection or
+// MaxBytesReader tripping are conditions of the moment, and the slave treats
+// the permanent marker as fatal — it exits non-zero at boot and drops the whole
+// batch mid-flight — so stamping it on a slow multi-MB push over the link
+// ReadTimeout exists to tolerate is the crash loop keying on the header rather
+// than the status was added to prevent. Anything unrecognised takes the
+// retryable side, which is the direction that only costs a retry.
+func refuseDecode(w http.ResponseWriter, err error) {
+	var maxBytes *http.MaxBytesError
+	if errors.As(err, &maxBytes) {
+		http.Error(w, "body exceeds the ingest limit", http.StatusRequestEntityTooLarge)
+		return
+	}
+	var syntax *json.SyntaxError
+	var unmarshalType *json.UnmarshalTypeError
+	if errors.As(err, &syntax) || errors.As(err, &unmarshalType) {
+		refusePermanently(w, "invalid json")
+		return
+	}
+	// 408, not a plain 400: the slave drops a batch on any 4xx outside
+	// retryable4xx, and a body that stopped arriving — a read deadline on a slow
+	// link, a reset connection, a truncated write — is the case RFC 9110 §15.5.9
+	// says the same request may be repeated for. A 400 here would trade the old
+	// crash loop for silent data loss.
+	http.Error(w, "could not read request body", http.StatusRequestTimeout)
+}
+
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRegisterBody)
 	var req cluster.RegisterReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		refusePermanently(w, "invalid json")
+		refuseDecode(w, err)
 		return
 	}
 	if !validSlaveName(req.Name) {
-		refusePermanently(w, `name required: ≤128 bytes, not "master", no control chars`)
+		refusePermanently(w, badSlaveNameMsg)
+		return
+	}
+	if s.nameCollidesWithMaster(req.Name) {
+		s.refuseCollision(w, req.Name)
 		return
 	}
 	if err := s.registry.Touch(req.Name, req.Version, r.RemoteAddr, req.Advertise); err != nil {
@@ -174,7 +234,7 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxCyclesBody)
 	var batch cluster.CycleBatch
 	if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
-		refusePermanently(w, "invalid json")
+		refuseDecode(w, err)
 		return
 	}
 	// The claimed identity comes from X-Slave-Name, falling back to
@@ -186,7 +246,11 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 		name, version = batch.Source, ""
 	}
 	if !validSlaveName(name) {
-		refusePermanently(w, `name required: ≤128 bytes, not "master", no control chars`)
+		refusePermanently(w, badSlaveNameMsg)
+		return
+	}
+	if s.nameCollidesWithMaster(name) {
+		s.refuseCollision(w, name)
 		return
 	}
 	// Checked before Touch, which would otherwise create the very entry it is
@@ -198,12 +262,19 @@ func (s *Server) handleCycles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unregistered slave: POST /register first", http.StatusForbidden)
 		return
 	}
+	// Before the bounds check, never after: a refusal of this batch is not a
+	// refusal of liveness, the rule Touch itself already applies per field. The
+	// name is one Has just confirmed, so this refreshes an entry rather than
+	// minting one — and skipping it let a slave whose clock drifts past
+	// MaxFutureSkew have every push refused while Sweep dropped its registry
+	// entry and dedup window 24h later, which under cluster.pull_every "0" is
+	// its only liveness signal.
+	_ = s.registry.Touch(name, version, r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
 	if err := batch.Validate(time.Now()); err != nil {
 		s.log.Warn("rejecting cluster batch outside ingest bounds", "slave", name, "err", err)
 		refusePermanently(w, "batch outside ingest bounds")
 		return
 	}
-	_ = s.registry.Touch(name, version, r.RemoteAddr, r.Header.Get(cluster.HeaderAdvertise))
 	batch.Source = name
 	n, dup := s.ingestBatch(r, batch)
 	if dup > 0 {

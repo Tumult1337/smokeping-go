@@ -254,8 +254,10 @@ type targetDTO struct {
 }
 
 // listSources returns the set of distinct probe origins the UI can filter on:
-// the master's own source stamp plus every slave currently registered. Since
-// slaves probe every target, the same list applies to every row in the UI.
+// the master's own source stamp plus every slave currently registered. It is
+// the filter vocabulary, not a per-target claim — `target.slaves` restricts
+// which of these actually probe a given target, which targetDTO.Sources
+// reports per row.
 func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Current()
 	list := []string{masterSourceName(cfg)}
@@ -929,19 +931,27 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 func (s *Server) resolveTarget(w http.ResponseWriter, r *http.Request) (config.TargetRef, bool) {
 	group := chi.URLParam(r, "group")
 	name := chi.URLParam(r, "name")
-	id := group + "/" + name
+	// Compared field by field rather than through AllTargets + ID(): the route
+	// matches exactly two segments, so this is the same predicate, and it runs
+	// on six read endpoints per UI poll where the slice and one ID concat per
+	// configured target were allocated only to be discarded.
 	cfg := s.store.Current()
-	for _, t := range cfg.AllTargets() {
-		if t.ID() == id {
-			return t, true
+	for _, g := range cfg.Targets {
+		if g.Group != group {
+			continue
+		}
+		for _, t := range g.Targets {
+			if t.Name == name {
+				return config.TargetRef{Group: g.Group, Target: t}, true
+			}
 		}
 	}
 	for _, t := range s.healthTargets() {
-		if t.ID() == id {
+		if t.Group == group && t.Target.Name == name {
 			return t, true
 		}
 	}
-	writeErr(w, http.StatusNotFound, fmt.Sprintf("target %q not found", id))
+	writeErr(w, http.StatusNotFound, fmt.Sprintf("target %q not found", group+"/"+name))
 	return config.TargetRef{}, false
 }
 

@@ -138,8 +138,10 @@ Key points a reader can't derive from a single file:
   draining while a flush is failing, `pending` cannot exceed `maxRows`
   during an outage and that cap binds only on the shutdown drain, which
   appends the whole channel at once — every row it still holds there is
-  counted as a drop, not just the overflow past the cap;
-  `slave.PushSink`'s ring is the third.
+  counted as a drop, not just the overflow past the cap. There are three
+  drop-oldest sites in the tree and they are counted separately:
+  `Writer.offer`'s channel overflow, `runTable`'s shutdown drain, and
+  `slave.PushSink`'s ring.
 
   **Window caps.** The binary ships no auth, so on every endpoint that
   returns unbucketed rows the window cap is the only bound on an
@@ -205,7 +207,7 @@ Key points a reader can't derive from a single file:
   the address of the slot's worst-loss cycle — the row the heatmap
   already picked out of the per-responder set and drew. Per-responder
   rows survive on `/hops?at=`, which pins one cycle and needs no grid.
-  `worst_time` is that cycle's own timestamp, and it is what a heatmap
+  `WorstTime` (the SQL alias is `worst_ts`) is that cycle's own timestamp, and it is what a heatmap
   cell clicks through to whether or not the slot lost: `/hops?at=`
   resolves the nearest cycle within ±15m, so a slot start is unreachable
   from every cycle in it once the probe interval floors the step past 30m.
@@ -255,6 +257,17 @@ Key points a reader can't derive from a single file:
   list. Colours are three entries of `ui/src/palette.ts` read as a latency
   ramp, keeping the icon inside the same CVD-gated set as the charts.
 
+- **A config the evaluator cannot apply never becomes current.** Alert
+  conditions are parsed in `internal/alert`, which imports `config`, so
+  `Config.Validate` cannot reach them — `config.Store.SetValidator` is the seam,
+  wired in `run_node.go` to `alert.ValidateConditions`. Without it `Store.Reload`
+  published the new config and `Evaluator.Refresh` only *logged* its parse
+  failure while keeping the previous map: every alert added in that edit was
+  silently skipped by `evaluate`'s `conds[name]` lookup for the life of the
+  process, while the API served the new alert list. `parseValue` additionally
+  refuses a non-finite threshold — `strconv.ParseFloat` accepts `inf` and `nan`,
+  and IEEE-754 makes `actual != NaN` true on every cycle.
+
 - **Alert state is in-memory only:** `alert.Evaluator` stores per-target
   state in a map. After a restart all alerts return to `StateOK` — no
   persistence in v1. This avoids replaying cycles from storage, at the cost
@@ -262,11 +275,14 @@ Key points a reader can't derive from a single file:
 
 - **ICMP sockets:** `probe.listen` prefers unprivileged UDP ping sockets
   (`udp4`/`udp6`) before falling back to raw ICMP. When using UDP sockets,
-  the kernel rewrites the ICMP ID to the source port, so `sendOne` matches
-  replies by **sequence number only**, not ID — don't "fix" that, it is
-  correct for both socket types — plus the same
-  peer-is-the-resolved-destination check `matchDatagram` applies on the
-  walk (`matchEchoReply`, the echo read path's trust boundary). Type, id
+  the kernel rewrites the ICMP ID to the source port, so on that path
+  `matchEchoReply` matches replies by **sequence number only** — don't "fix"
+  that by requiring the id there, it would never match. On the raw fallback
+  the kernel delivers every echo reply to every raw socket, so id **is**
+  enforced (`!isUDP && echo.ID != id`) and is the only thing separating two
+  concurrent batches against one destination. Both paths additionally apply the
+  peer-is-the-resolved-destination check `matchDatagram` applies on the walk
+  (`matchEchoReply`, the echo read path's trust boundary). Type, id
   and seq are all visible to any router on the path, so one could answer
   from its own address and a fully-down target read 0% loss with
   plausible RTTs.
@@ -359,6 +375,12 @@ Key points a reader can't derive from a single file:
   under-reports when the context is cancelled, when the cycle expires during
   spacing, or when DNS and socket setup already spent the deadline. Do not
   "fix" that by pre-setting `Sent`.
+  `config.ValidateInterval` refuses a non-positive or unstorable interval, and
+  **`probe.Build` calls it unconditionally** rather than only when the map holds
+  an icmp probe: `scheduler.loopTarget` feeds the interval to `rand.Int64N` and
+  `time.NewTicker` from a goroutine with no `recover()`, so a master-supplied
+  config carrying an http probe and no interval killed the slave process rather
+  than failing its build.
   `config.ICMPPingBudget` refuses a schedule whose full-loss derived budget
   `(interval − (pings−1)×config.ICMPPingSpacing) / pings` falls below
   `config.MinPingBudget` (50ms). It lives in `config` because `config.Validate`
@@ -531,7 +553,11 @@ Key points a reader can't derive from a single file:
   `maxSlaveFieldLen` (256): both are free strings arriving as headers,
   bounded only by net/http's 1 MiB cap, and both are retained per entry —
   advertise inside the log-dedup key even when `ParseAdvertise` rejects
-  it. The refusal is **per field and never a refusal of liveness**: a
+  it. The refusal is **per field and never a refusal of liveness**, and that
+  rule is `handleCycles`' too — it calls `Touch` *before* `CycleBatch.Validate`,
+  since the name is one `Has` just confirmed and skipping it let a slave whose
+  clock drifted past `MaxFutureSkew` have every push refused while `Sweep`
+  dropped its entry and its dedup window 24h later. A
   registered slave whose cycles are being ingested still advances
   `LastSeen` (returning first let `Sweep` drop it after 24h, dedup window
   included, and its next push 403s), and an over-length version still lets
@@ -562,7 +588,15 @@ Key points a reader can't derive from a single file:
   `registerForever` and `pullConfigInitial` do at boot: the master answers
   those bytes identically forever, so retrying leaves the ring
   head-of-line blocked while drop-oldest eats the live cycles behind the
-  batch, under a process reporting healthy. **`ErrMasterRefused`, not
+  batch, under a process reporting healthy. The marker is therefore reserved
+  for the master's own verdict about the *content*: `refuseDecode` stamps it
+  only on a `json.SyntaxError` or `UnmarshalTypeError`, answers an oversize body
+  413 (droppable, never fatal — it can never fit) and any other read failure 408,
+  which is in `retryable4xx` so a read deadline on a slow multi-MB push requeues
+  instead of being dropped. Marking every decode failure permanent put the
+  crash loop back inside the master, where the "a master predating the header is
+  never fatal" escape hatch does not reach.
+  **`ErrMasterRefused`, not
   `ErrRejected`:** the latter is every 4xx bar 401/403/404 and the
   retryable set, and any intermediary can produce one — a
   `client_max_body_size`, a header-buffer limit or a routing change
@@ -636,6 +670,14 @@ Key points a reader can't derive from a single file:
   http probe before the sample exists, and again in `ToCycle` so a slave
   predating it costs a truncated string rather than a dropped batch.
 
+  `ToCycle` takes the resolved `config.TargetRef`, so **both halves of the
+  identity come from the master's own config** rather than the wire: neither
+  group nor name has a character class, so `{group:"eu", name:"lon/1"}` is
+  equally reachable as `{group:"eu/lon", name:"1"}`, and taking the payload's
+  spelling wrote rows under a pair no config holds — unaddressable by
+  `resolveTarget`, and a permanent `LowCardinality` entry. The dedup window
+  keys on that resolved id for the same reason.
+
   **Every config `Config.Validate` accepts is ingestable**, which is a
   property to preserve rather than assume: it held for `MaxLabelLen` and not
   for latency, because a cycle runs under a context whose deadline is the
@@ -696,12 +738,13 @@ Key points a reader can't derive from a single file:
   responder), and a round contributes at most one responder per TTL — and
   `cluster.MaxHopsPerCycle` is twice it. A hand-picked 256 sat *below* the
   producer's own maximum, so a deep ECMP path was a legitimate batch the
-  master refused. The two constants mirror `probe`'s unexported `maxRounds`
-  and `MTR.maxTTL`, which cannot assert against them at compile time the
-  way `icmpTraceSeqReserve` does (probe already imports config, and the
-  values are unexported), so `internal/config/tracebounds_test.go` parses
-  `probe/mtr.go` and fails naming the value to update. Replace it with a
-  compile-time assertion in `probe` the next time that package is open.
+  master refused. The two constants are pinned to `probe`'s own
+  `maxRounds` and `maxTTL` by compile-time assertions in `probe/mtr.go`,
+  which also cover the icmp probe's `defaultTraceRounds` /
+  `defaultTraceMaxTTL` — a second producer of the same `probe_hop` rows
+  that the AST-parsing test they replaced never read. The assertion fails
+  the build in the direction that matters: a producer raised above the
+  bound would have its own legitimate output refused by the master.
 
   `config.MaxFutureSkew` (5m) and `config.MaxCycleAge` (7d) live in
   `config`, not `cluster`, because the reader needs the same window: a
@@ -1071,6 +1114,16 @@ Key points a reader can't derive from a single file:
   `queryHopsGrid` already leaves false, because the cost of a redundant
   clear on a disclosure path is nothing and the cost of a later select
   adding it back is the leak.
+
+  `scheduler.Fingerprint` includes `Probe.NoTrace` — it is baked into the icmp
+  prober at `Build` time, so without it `cluster.health_hops` and every probe's
+  `no_trace` edit was restart-only — delimits `Slaves` from `Alerts` with
+  `config.SepList`, since running them together on one field separator made
+  moving a name between the lists a no-op edit, and routes every
+  operator-supplied name through `config.EscapeSeparators`, the same helper
+  `slavehealth.Set.Fingerprint` uses. Names are bounded by `MaxLabelLen` and no
+  character class, so a raw separator inside one otherwise forges another
+  config's fingerprint and the SIGHUP silently does nothing.
 
   Because health targets live outside the stored config,
   `scheduler.LifecycleOptions.ExtraFingerprint` carries mesh membership

@@ -60,11 +60,6 @@ const (
 // request may succeed once in-flight work retires.
 var ErrOverloaded = errors.New("storage: too many queries in flight")
 
-// isRefusal reports whether err says the request was rejected rather than the
-// upstream failed. A refusal is deterministic — retrying it produces the same
-// answer — so serving an expired entry in its place would turn it into a 200
-// that never expires, since only a success bumps an entry's TTL. Every new
-// semantic sentinel a Reader can return belongs here.
 // isRefusal names the errors a stale entry must not stand in for. A refusal
 // is deterministic, so serving stale turns it into a 200 that never ends. A
 // panicked leader is here for a different reason: it is a bug, not the
@@ -93,9 +88,9 @@ type CachingReader struct {
 	order    *list.List // front = most recently used
 	inflight map[cycleCacheKey]*cycleInflight
 
-	// hopsMax bounds the hops LRU separately from cycles because each hops
-	// entry (a 7d timeline) can be hundreds of KB to a few MB — much bigger
-	// than a cycles entry. Set via NewCachingReader's hopsMax parameter.
+	// hopsMax bounds the hops LRU separately from cycles because a hops entry
+	// is far bigger than a cycles one. Set via NewCachingReader's hopsMax
+	// parameter.
 	hopsMax      int
 	hopsMu       sync.Mutex
 	hopsItems    map[hopsCacheKey]*list.Element
@@ -552,10 +547,6 @@ func (c *CachingReader) fetchHops(ctx context.Context, key hopsCacheKey, ttl tim
 	return cloneHopsResult(call.result), nil
 }
 
-// recoverToError converts a panic inside a detached leader's inner query into
-// an ordinary error, so the leader still releases its inflight slot and wakes
-// its waiters instead of killing the process — the same containment
-// scheduler.Fanout gives its sinks.
 // recoverToError converts a panic in the query leader into an error and logs
 // it with its stack. The log is the point: the leader is detached, so the
 // caller that started it may already be gone — a browser navigating away from

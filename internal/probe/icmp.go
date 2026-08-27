@@ -293,11 +293,27 @@ func traceErrLogAllowed(sinceStart time.Duration) (bool, uint64) {
 	}
 }
 
-var rawUnavailableOnce sync.Once
+var (
+	rawUnavailableOnce    sync.Once
+	rawUnavailableMTROnce sync.Once
+)
 
 func logRawUnavailableOnce(err error) {
 	rawUnavailableOnce.Do(func() {
 		slog.Warn("icmp trace disabled — raw socket unavailable; run `make setcap` for MTR hops",
+			"err", err)
+	})
+}
+
+// logRawUnavailableMTROnce is separate from the icmp line above, and Error
+// rather than Warn, because the same condition means something different here:
+// icmp loses an opportunistic extra and still measures, while the walk *is*
+// mtr's measurement, so every mtr target now records a gap. There is no
+// no_data alert condition, so nothing else pages on that — and the usual way
+// in is an upgrade that replaced the binary without re-running `make setcap`.
+func logRawUnavailableMTROnce(err error) {
+	rawUnavailableMTROnce.Do(func() {
+		slog.Error("mtr probe cannot run — raw socket unavailable; every mtr target will record no measurement until `make setcap` is re-run",
 			"err", err)
 	})
 }

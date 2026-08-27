@@ -245,8 +245,16 @@ func TestIntegrationLatestSinceFloorIsMillisecondExact(t *testing.T) {
 
 // The API's query-time bound is derived from the DateTime64(3) domain rather
 // than picked, so this pins the derivation against the server that defines it:
-// each edge round-trips exactly, and one millisecond outside wraps to an
-// instant hundreds of years from the one asked for.
+// every instant the bound admits round-trips exactly, which is the property
+// that keeps a query from addressing a different moment than it asked for.
+//
+// It deliberately does *not* require the bound to equal the server's domain.
+// ClickHouse widened DateTime64 past [1900, 2299] — verified against 26.7.5.10,
+// where both edges plus one millisecond round-trip intact — and an earlier
+// version of this test read that as a failure, so a current server reddened a
+// build over a bound that had only become conservative. Narrower than the
+// server is safe and stays safe; the direction that would break us is the
+// server narrowing below us, which the round-trip loop catches.
 func TestIntegrationQueryTimeRangeMatchesClickHouse(t *testing.T) {
 	cfg, cleanup := testDSN(t)
 	defer cleanup()
@@ -282,6 +290,9 @@ func TestIntegrationQueryTimeRangeMatchesClickHouse(t *testing.T) {
 			t.Errorf("%s: %s round-tripped as %s, want %s", tc.name, tc.at.UTC(), got, tc.want)
 		}
 	}
+	// One millisecond outside each edge: the contract under test is that our own
+	// validator refuses it, never that the server does. Whether the server also
+	// mangles it is recorded, not asserted — that is the part that drifts.
 	for _, tc := range []struct {
 		name string
 		at   time.Time
@@ -289,9 +300,14 @@ func TestIntegrationQueryTimeRangeMatchesClickHouse(t *testing.T) {
 		{"below min", storage.MinQueryTime.Add(-time.Millisecond)},
 		{"above max", storage.MaxQueryTime.Add(time.Millisecond)},
 	} {
+		if storage.ValidQueryTime(tc.at) {
+			t.Errorf("%s: ValidQueryTime admitted %s, which is outside the bound it enforces",
+				tc.name, tc.at.UTC())
+		}
 		got := roundTrip(tc.at.UnixMilli())
 		if want := tc.at.UTC().Format("2006-01-02 15:04:05.000"); got == want {
-			t.Errorf("%s: %s round-tripped intact; the domain is wider than the bound claims", tc.name, want)
+			t.Logf("%s: server round-tripped %s intact, so its domain is wider than the bound — conservative, not a failure",
+				tc.name, want)
 		}
 	}
 }

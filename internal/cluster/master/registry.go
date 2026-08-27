@@ -20,9 +20,13 @@ import (
 // anything that's expensive to track or that should outlive a master restart
 // belongs in a persistent store, not here.
 type SlaveInfo struct {
-	Name     string    `json:"name"`
-	Version  string    `json:"version,omitempty"`
-	Addr     string    `json:"addr,omitempty"`
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+	// Addr is the observed source address, json:"-" for the reason Advertise is:
+	// Snapshot copies it by value into a slice whose own doc invites a debug or
+	// UI consumer, and the Probe/Public split exists so no handler can publish a
+	// peer's address.
+	Addr     string    `json:"-"`
 	LastSeen time.Time `json:"last_seen"`
 
 	// Advertise is the validated address peers health-probe this slave at.
@@ -125,11 +129,6 @@ func (r *Registry) currentPins() map[string]netip.Addr {
 // ceiling never evicts a registered one.
 const maxRegisteredSlaves = 512
 
-// Touch records that a slave just checked in; a non-nil error names why the
-// registry refused the entry. Safe to call on every request that carries a
-// valid slave identity, not just /register. advertise is the raw
-// slave-reported health address; an empty or rejected value simply leaves the
-// slave out of the health mesh without blocking registration.
 // maxSlaveFieldLen bounds the header strings the registry retains per entry;
 // the longest legal advertise is a 45-byte IPv6 text form and a version is a
 // release tag, so 256 is ~5x either.
@@ -145,6 +144,11 @@ var (
 	errRegistryFull      = errors.New("slave registry full")
 )
 
+// Touch records that a slave just checked in; a non-nil error names why the
+// registry refused the entry. Safe to call on every request that carries a
+// valid slave identity, not just /register. advertise is the raw
+// slave-reported health address; an empty or rejected value simply leaves the
+// slave out of the health mesh without blocking registration.
 func (r *Registry) Touch(name, version, addr, advertise string) error {
 	if name == "" {
 		return errEmptySlaveName

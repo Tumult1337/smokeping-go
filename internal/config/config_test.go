@@ -909,3 +909,59 @@ func TestBoundsHoldTheirDocumentedValues(t *testing.T) {
 		t.Errorf("MaxBatchInterval = %s, want 1h — it is the writer's flush ticker period", MaxBatchInterval)
 	}
 }
+
+// no_trace carried a JSON tag on the public Probe type and was read on four
+// paths, but rawProbe never parsed it — so an operator setting it on an icmp
+// probe got no error and no effect, and the TTL walk the field exists to stop
+// kept running.
+func TestLoadParsesNoTrace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{
+	  "interval": "20s", "pings": 5,
+	  "storage": {"clickhouse": {"addr": "127.0.0.1:9000"}},
+	  "probes": {"quiet": {"type": "icmp", "timeout": "1s", "no_trace": true},
+	             "loud":  {"type": "icmp", "timeout": "1s"}},
+	  "targets": [{"group": "g", "targets": [{"name": "t", "host": "127.0.0.1", "probe": "quiet"}]}]
+	}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.Probes["quiet"].NoTrace {
+		t.Error(`"no_trace": true was dropped on load`)
+	}
+	if cfg.Probes["loud"].NoTrace {
+		t.Error("an absent no_trace defaulted to true")
+	}
+}
+
+// cluster.source is the label the master stamps on its own cycles: a
+// LowCardinality value on all four tables and a key in the alert evaluator's
+// per-source state, and the one identifier of that class that was unchecked.
+func TestValidateBoundsClusterSource(t *testing.T) {
+	base := func(source string) *Config {
+		return &Config{
+			Interval: 20 * time.Second,
+			Pings:    5,
+			Storage:  Storage{ClickHouse: ClickHouse{Addr: "127.0.0.1:9000"}},
+			Probes:   map[string]Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+			Targets: []Group{{Group: "g", Targets: []Target{
+				{Name: "t", Host: "127.0.0.1", Probe: "icmp"},
+			}}},
+			Cluster: &Cluster{Token: "tok", Source: source},
+		}
+	}
+	if err := base(strings.Repeat("a", MaxLabelLen+1)).Validate(); err == nil {
+		t.Error("Validate accepted a cluster.source past MaxLabelLen")
+	}
+	if err := base("fra\x001").Validate(); err == nil {
+		t.Error("Validate accepted a cluster.source carrying a control character")
+	}
+	if err := base("fra1").Validate(); err != nil {
+		t.Errorf("Validate refused an ordinary cluster.source: %v", err)
+	}
+}

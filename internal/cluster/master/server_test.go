@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tumult/gosmokeping/internal/cluster"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
 	"github.com/tumult/gosmokeping/internal/slavehealth"
@@ -498,5 +499,72 @@ func TestIngestBatchOverridesForgedProbeName(t *testing.T) {
 	}
 	if got := sink.got[0].ProbeName; got != "icmp" {
 		t.Fatalf("cycle stamped probe %q, want the configured %q", got, "icmp")
+	}
+}
+
+// The permanent-refusal marker is the slave's cue to exit at boot and to drop a
+// whole batch mid-flight, so it must mean "the master judged these bytes", not
+// "the body did not decode". A read deadline on a slow multi-MB push and
+// MaxBytesReader tripping are conditions of the moment.
+func TestDecodeFailuresAreNotAllPermanent(t *testing.T) {
+	srv := newTestServer()
+	srv.registry.Touch("edge-1", "", "", "")
+
+	post := func(body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("X-Slave-Name", "edge-1")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Malformed content is the master's own verdict and stays permanent.
+	rec := post([]byte(`{"source":"edge-1","cycles":[}`))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("syntax error: got %d, want 400", rec.Code)
+	}
+	if got := rec.Header().Get(cluster.HeaderRefusal); got != cluster.RefusalPermanent {
+		t.Errorf("syntax error: refusal header = %q, want %q", got, cluster.RefusalPermanent)
+	}
+
+	// A body past the cap is a transport condition: 413, and never permanent —
+	// marking it so crash-loops the fleet through a proxy's own size limit.
+	rec = post(append([]byte(`{"source":"edge-1","pad":"`),
+		append(bytes.Repeat([]byte("a"), maxCyclesBody+1), []byte(`"}`)...)...))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversize body: got %d, want 413", rec.Code)
+	}
+	if got := rec.Header().Get(cluster.HeaderRefusal); got != "" {
+		t.Errorf("oversize body: refusal header = %q, want none", got)
+	}
+}
+
+// A refusal of a batch is not a refusal of liveness — the rule Touch already
+// applies per header field. Skipping Touch let a slave whose clock drifted past
+// MaxFutureSkew have every push refused while Sweep dropped its registry entry
+// and its dedup window 24h later.
+func TestBatchOutsideBoundsStillAdvancesLiveness(t *testing.T) {
+	srv := newTestServer()
+	srv.registry.Touch("edge-1", "", "", "")
+	before := srv.registry.Snapshot()[0].LastSeen
+
+	body := `{"source":"edge-1","cycles":[{"time":"` +
+		time.Now().Add(2*config.MaxFutureSkew).UTC().Format(time.RFC3339Nano) +
+		`","group":"g","name":"t","sent":1,"lost":0}]}`
+	req := httptest.NewRequest(http.MethodPost, "/cycles", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("X-Slave-Name", "edge-1")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("future-dated batch: got %d, want 400", rec.Code)
+	}
+	if !srv.registry.Has("edge-1") {
+		t.Fatal("a refused batch removed the slave from the registry")
+	}
+	if after := srv.registry.Snapshot()[0].LastSeen; !after.After(before) {
+		t.Error("a refused batch did not advance LastSeen, so Sweep will reclaim a live slave")
 	}
 }

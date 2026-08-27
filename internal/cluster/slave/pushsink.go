@@ -123,8 +123,8 @@ func (p *PushSink) Requeue(payloads []cluster.CyclePayload) {
 	}
 }
 
-// Len reports the current buffered count. Used by the push loop to decide
-// whether to flush early (≥100 cycles buffered).
+// Len reports the current buffered count. Diagnostic only: the push loop drains
+// batchLimit once per tick and never consults it.
 func (p *PushSink) Len() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -4053,3 +4053,30 @@ func TestAnOversizedEventStillPagesOnAnEmptyShard(t *testing.T) {
 			ev.DispatchRefusals())
 	}
 }
+
+// strconv.ParseFloat accepts "inf" and "nan". A +Inf threshold is an alert no
+// finite measurement can trip; IEEE-754 makes `actual != NaN` true for every
+// cycle, so a NaN one pages the fleet on the first cycle from every source.
+// Both used to validate green at load and at SIGHUP.
+func TestParseConditionRejectsNonFiniteThresholds(t *testing.T) {
+	for _, s := range []string{
+		"loss_pct > inf", "loss_pct > Inf", "loss_pct > +Inf", "loss_pct < -inf",
+		"loss_pct > infinity", "rtt_median != nan", "rtt_median > NaN",
+	} {
+		if c, err := ParseCondition(s); err == nil {
+			t.Errorf("ParseCondition(%q) accepted a non-finite threshold %v", s, c.Value)
+		}
+	}
+	if _, err := ParseCondition("loss_pct > 5"); err != nil {
+		t.Errorf("ParseCondition refused an ordinary threshold: %v", err)
+	}
+}
+
+// A Condition built outside ParseCondition has no getter. Eval must not read as
+// "never triggered" for one — but the zero value is the only way to reach it,
+// and ParseCondition cannot produce it.
+func TestEvalOnUnparsedConditionDoesNotPanic(t *testing.T) {
+	if (Condition{Field: "loss_pct", Op: OpGT}).Eval(scheduler.Cycle{}) {
+		t.Error("a Condition with no resolved getter evaluated true")
+	}
+}

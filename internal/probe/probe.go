@@ -100,6 +100,13 @@ func Build(probes map[string]config.Probe, interval time.Duration, pings int) (*
 	// Defence in depth: config.Validate refuses this schedule too, so reaching
 	// it here means a config that never passed validation — a slave's
 	// master-supplied view, or a caller that built a Config in memory.
+	// Unconditional, unlike the icmp budget below: scheduler.loopTarget feeds
+	// interval to rand.Int64N and time.NewTicker from a goroutine with no
+	// recover(), so a non-positive one taken from a master-supplied config
+	// kills the process rather than failing the build.
+	if err := config.ValidateInterval(interval); err != nil {
+		return nil, err
+	}
 	if err := config.ValidatePingCount(pings); err != nil {
 		return nil, err
 	}

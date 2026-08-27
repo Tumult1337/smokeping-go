@@ -17,12 +17,14 @@ import (
 	"time"
 )
 
-// Reserved names owned by the cluster health mesh. Duplicated from
-// internal/slavehealth (which imports this package, so the dependency cannot
-// run the other way); slavehealth's tests assert the values match.
+// Reserved names owned by the cluster health mesh, defined here because
+// slavehealth imports this package and so the dependency cannot run the other
+// way. slavehealth.Group and slavehealth.ProbeName are these, which is what
+// keeps the group Validate refuses and the group IsHealthGroup admits one fact
+// rather than two literals a rename can separate.
 const (
-	reservedGroup = "_cluster"
-	reservedProbe = "_slave_health"
+	ReservedGroup = "_cluster"
+	ReservedProbe = "_slave_health"
 )
 
 type Config struct {
@@ -74,11 +76,6 @@ type ClickHouseRetention struct {
 type ClickHouseBatch struct {
 	MaxRows     int    `json:"max_rows"`
 	MaxInterval string `json:"max_interval"`
-}
-
-// Validate checks the Storage block is internally consistent.
-func (s *Storage) Validate() error {
-	return nil // full validation happens in applyDefaults via Load
 }
 
 type Probe struct {
@@ -277,6 +274,7 @@ type rawProbe struct {
 	Type     string `json:"type"`
 	Timeout  string `json:"timeout"`
 	Insecure bool   `json:"insecure"`
+	NoTrace  bool   `json:"no_trace"`
 }
 
 var envVar = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
@@ -370,7 +368,7 @@ func loadUnvalidated(path string) (*Config, error) {
 	}
 
 	for name, rp := range raw.Probes {
-		p := Probe{Type: rp.Type, Insecure: rp.Insecure}
+		p := Probe{Type: rp.Type, Insecure: rp.Insecure, NoTrace: rp.NoTrace}
 		if rp.Timeout != "" {
 			d, err := time.ParseDuration(rp.Timeout)
 			if err != nil {
@@ -501,6 +499,21 @@ const (
 	MaxSlaveNameLen  = 128
 	MaxSlaveFieldLen = 256
 )
+
+// ValidSourceLabel bounds a cycle's source stamp. Empty is legal — Load
+// defaults it to "master" — and unlike a slave name it may be "master", which
+// is what the master itself uses.
+func ValidSourceLabel(source string) bool {
+	if len(source) > MaxLabelLen {
+		return false
+	}
+	for _, c := range source {
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
 // ValidSlaveName is the master's own admission rule for a cluster name, kept
 // here so Validate applies exactly it rather than a subset. Mirroring only the
@@ -673,6 +686,51 @@ func HasICMPProbe(probes map[string]Probe) bool {
 	return false
 }
 
+// Separator bytes the fingerprint encodings delimit their levels with, and the
+// escape that keeps an operator-supplied name from spelling one. They live here
+// because scheduler.Fingerprint and slavehealth.Set.Fingerprint are two builders
+// of one format whose outputs are concatenated into a single rebuild decision.
+const (
+	SepField = '\x1f'
+	SepList  = '\x1c'
+	SepEntry = '\x1e'
+	SepBlock = '\x1d'
+)
+
+var sepEscaper = strings.NewReplacer(
+	"\\", `\\`,
+	string(SepField), `\u`,
+	string(SepList), `\f`,
+	string(SepEntry), `\r`,
+	string(SepBlock), `\g`,
+)
+
+// EscapeSeparators makes a name unable to forge a fingerprint's structure. A
+// group, target or alert name is bounded only by MaxLabelLen — no character
+// class — so a raw separator inside one otherwise reads back as a level break
+// and two materially different configs hash alike.
+func EscapeSeparators(s string) string {
+	if !strings.ContainsAny(s, "\\\x1c\x1d\x1e\x1f") {
+		return s
+	}
+	return sepEscaper.Replace(s)
+}
+
+// ValidateInterval bounds the cycle period for every schedule, icmp or not:
+// scheduler.loopTarget passes it to rand.Int64N and time.NewTicker, both of
+// which panic on a non-positive value from a goroutine no recover() covers.
+// probe.Build applies it as defence in depth for a master-supplied config a
+// slave never validated.
+func ValidateInterval(interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("interval must be positive, got %s", interval)
+	}
+	if interval > MaxProbeInterval {
+		return fmt.Errorf("interval %s exceeds %s, past which a measured rtt is no longer storable", interval, MaxProbeInterval)
+	}
+	return nil
+}
+
 // ValidatePingCount bounds pings for every schedule, icmp or not: the
 // scheduler stamps Sent = pings on any probe error and a cycle carries up to
 // one RTT per ping, so a count past MaxPingsPerCycle — cluster ingest's
@@ -717,11 +775,8 @@ func ICMPPingBudget(interval time.Duration, pings int) (time.Duration, error) {
 }
 
 func (c *Config) Validate() error {
-	if c.Interval <= 0 {
-		return fmt.Errorf("interval must be positive")
-	}
-	if c.Interval > MaxProbeInterval {
-		return fmt.Errorf("interval %s exceeds %s, past which a measured rtt is no longer storable", c.Interval, MaxProbeInterval)
+	if err := ValidateInterval(c.Interval); err != nil {
+		return err
 	}
 	if err := ValidatePingCount(c.Pings); err != nil {
 		return err
@@ -793,8 +848,8 @@ func (c *Config) Validate() error {
 	}
 
 	seenTargets := make(map[string]string)
-	if _, taken := c.Probes[reservedProbe]; taken {
-		return fmt.Errorf("probe %q is reserved for cluster slave health", reservedProbe)
+	if _, taken := c.Probes[ReservedProbe]; taken {
+		return fmt.Errorf("probe %q is reserved for cluster slave health", ReservedProbe)
 	}
 
 	for _, g := range c.Targets {
@@ -804,8 +859,8 @@ func (c *Config) Validate() error {
 		// The health mesh owns this group. A user-defined target here would
 		// shadow a synthetic one and inherit its address-stripping treatment
 		// in the API, so reject it at load rather than resolve it silently.
-		if g.Group == reservedGroup {
-			return fmt.Errorf("group %q is reserved for cluster slave health", reservedGroup)
+		if g.Group == ReservedGroup {
+			return fmt.Errorf("group %q is reserved for cluster slave health", ReservedGroup)
 		}
 		if len(g.Group) > MaxLabelLen {
 			return fmt.Errorf("group name is %d bytes, limit %d", len(g.Group), MaxLabelLen)
@@ -862,6 +917,13 @@ func (c *Config) Validate() error {
 	}
 
 	if c.Cluster != nil {
+		// cluster.source is the label the master stamps on its own cycles, so it
+		// is a LowCardinality value on all four tables and a key in the alert
+		// evaluator's per-source state — the same class MaxLabelLen bounds for a
+		// group, a target and a probe, and the only one that was never checked.
+		if !ValidSourceLabel(c.Cluster.Source) {
+			return fmt.Errorf("cluster.source must be at most %d bytes with no control characters", MaxLabelLen)
+		}
 		if _, err := c.Cluster.ParsedSlaveAddrs(); err != nil {
 			return err
 		}

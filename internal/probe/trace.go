@@ -45,7 +45,8 @@ func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, tim
 		return nil, roundStats{}, classifyListenErr(err)
 	}
 	defer func() { _ = conn.Close() }()
-	return traceOnConn(ctx, conn, dst, isV6, rounds, maxTTL, timeout, spacing)
+	hops, stats := traceOnConn(ctx, conn, dst, isV6, rounds, maxTTL, timeout, spacing)
+	return hops, stats, nil
 }
 
 // errRawUnavailable wraps the underlying OS error when a raw ICMP socket is
@@ -265,15 +266,17 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 }
 
 // traceOnConn is the core TTL-walk loop, separated from socket setup so the
-// caller can supply a shared conn if it already has one open.
-func traceOnConn(ctx context.Context, conn *icmp.PacketConn, dst netip.Addr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
+// per-round sequence derivation stays next to the walk it bounds. It reports no
+// error of its own — every failure mode is in the resolve and listen above it,
+// and a third always-nil return made callers write handling for a value only
+// traceHops can set.
+func traceOnConn(ctx context.Context, conn *icmp.PacketConn, dst netip.Addr, isV6 bool, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats) {
 	id := int(rand.Uint32() & 0xffff)
 	step := func(ctx context.Context, round, ttl int) ttlReply {
 		seq := ((round * (maxTTL + 1)) + ttl) & 0xffff
 		return sendTTL(ctx, conn, dst, isV6, id, seq, ttl, timeout)
 	}
-	hops, stats := walkRounds(ctx, rounds, maxTTL, spacing, step)
-	return hops, stats, nil
+	return walkRounds(ctx, rounds, maxTTL, spacing, step)
 }
 
 // peerAddr reduces a socket address to a comparable value. The socket type
@@ -289,6 +292,24 @@ func peerAddr(a net.Addr) netip.Addr {
 		return addrFromIP(pa.IP, pa.Zone)
 	}
 	return netip.Addr{}
+}
+
+// setHopLimit pins the outgoing probe's TTL, erroring when the socket exposes
+// no per-family packet conn to set it on — sending at the kernel default is
+// indistinguishable from a one-hop path.
+func setHopLimit(conn *icmp.PacketConn, isV6 bool, ttl int) error {
+	if isV6 {
+		p6 := conn.IPv6PacketConn()
+		if p6 == nil {
+			return errors.New("trace: no ipv6 packet conn to set hop limit on")
+		}
+		return p6.SetHopLimit(ttl)
+	}
+	p4 := conn.IPv4PacketConn()
+	if p4 == nil {
+		return errors.New("trace: no ipv4 packet conn to set ttl on")
+	}
+	return p4.SetTTL(ttl)
 }
 
 // sendAddr expands the destination back into the shape conn.WriteTo needs.
@@ -362,14 +383,12 @@ func sendTTL(ctx context.Context, conn *icmp.PacketConn, dst netip.Addr, isV6 bo
 		return ttlReply{err: err}
 	}
 
-	if isV6 {
-		if p6 := conn.IPv6PacketConn(); p6 != nil {
-			_ = p6.SetHopLimit(ttl)
-		}
-	} else {
-		if p4 := conn.IPv4PacketConn(); p4 != nil {
-			_ = p4.SetTTL(ttl)
-		}
+	// Refused rather than discarded: a probe sent at the socket's default TTL
+	// reaches the destination from ttl=1, so its echo is recorded as the hop at
+	// that TTL and the round ends there — fabricating a one-hop path at 0% loss
+	// out of a setsockopt failure, on rows /hops redaction then keys on.
+	if err := setHopLimit(conn, isV6, ttl); err != nil {
+		return ttlReply{err: err}
 	}
 
 	dl := time.Now().Add(timeout)

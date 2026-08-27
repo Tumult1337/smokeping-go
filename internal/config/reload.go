@@ -29,6 +29,10 @@ type Store struct {
 	cur  atomic.Pointer[Config]
 	mu   sync.Mutex
 	sub  chan<- struct{}
+	// validate is an extra admission check a reload must pass, for invariants
+	// this package cannot express: alert conditions are parsed in internal/alert,
+	// which imports this one, so Validate cannot reach them.
+	validate func(*Config) error
 }
 
 func NewStore(path string, initial *Config) *Store {
@@ -52,10 +56,30 @@ func (s *Store) Subscribe(ch chan<- struct{}) {
 	s.sub = ch
 }
 
+// SetValidator installs a check every later Reload must pass before the new
+// config becomes current. Without it a config that loads but that a consumer
+// cannot apply is published anyway, and the consumer's own refresh failure is
+// only a log line: the evaluator kept its previous condition map while
+// Store.Current() served the new alerts, so every alert added in that edit
+// silently never fired for the life of the process.
+func (s *Store) SetValidator(fn func(*Config) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.validate = fn
+}
+
 func (s *Store) Reload() error {
 	cfg, err := Load(s.path)
 	if err != nil {
 		return err
+	}
+	s.mu.Lock()
+	validate := s.validate
+	s.mu.Unlock()
+	if validate != nil {
+		if err := validate(cfg); err != nil {
+			return err
+		}
 	}
 	s.cur.Store(cfg)
 	s.mu.Lock()

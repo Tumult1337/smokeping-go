@@ -2,7 +2,6 @@ package clickhouse
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"math"
@@ -51,7 +50,7 @@ func NewReader(ctx context.Context, cfg config.ClickHouse) (*Reader, error) {
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr:         []string{cfg.Addr},
 		Auth:         clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
-		TLS:          tlsForReader(cfg.TLS),
+		TLS:          tlsConfig(cfg.TLS),
 		MaxOpenConns: maxConns,
 	})
 	if err != nil {
@@ -65,13 +64,6 @@ func NewReader(ctx context.Context, cfg config.ClickHouse) (*Reader, error) {
 }
 
 func (r *Reader) Close() error { return r.conn.Close() }
-
-func tlsForReader(enabled bool) *tls.Config {
-	if !enabled {
-		return nil
-	}
-	return &tls.Config{MinVersion: tls.VersionTLS12}
-}
 
 func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) ([]storage.CyclePoint, error) {
 	step := f.Step

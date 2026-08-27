@@ -552,16 +552,30 @@ func (e *Evaluator) pruneDepartedTargets() {
 	}
 }
 
-func (e *Evaluator) refreshConditions() error {
-	cfg := e.store.Current()
+// ValidateConditions parses every alert condition in cfg. Wire it into
+// config.Store.SetValidator so a config the evaluator cannot apply never
+// becomes current: Validate cannot call it directly, since this package
+// imports config rather than the other way around.
+func ValidateConditions(cfg *config.Config) (map[string]Condition, error) {
 	conds := make(map[string]Condition, len(cfg.Alerts))
-	enabled := make(map[string]bool, len(cfg.Alerts))
 	for name, a := range cfg.Alerts {
 		c, err := ParseCondition(a.Condition)
 		if err != nil {
-			return fmt.Errorf("alert %q: %w", name, err)
+			return nil, fmt.Errorf("alert %q: %w", name, err)
 		}
 		conds[name] = c
+	}
+	return conds, nil
+}
+
+func (e *Evaluator) refreshConditions() error {
+	cfg := e.store.Current()
+	conds, err := ValidateConditions(cfg)
+	if err != nil {
+		return err
+	}
+	enabled := make(map[string]bool, len(cfg.Alerts))
+	for name, a := range cfg.Alerts {
 		enabled[name] = a.Quorum.Enabled()
 	}
 	e.conds = conds
@@ -671,7 +685,7 @@ func (e *Evaluator) OnCycle(ctx context.Context, cy scheduler.Cycle) {
 	for _, ev := range toDispatch {
 		e.log.Info("alert state change",
 			"target", ev.Target.ID(), "alert", ev.AlertName, "source", cy.Source,
-			"prev", ev.Prev, "next", ev.Next, "hits", ev.Cycle.Sent,
+			"prev", ev.Prev, "next", ev.Next, "sent", ev.Cycle.Sent,
 			"firing", ev.Firing, "live", ev.Live)
 	}
 }

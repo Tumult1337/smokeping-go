@@ -37,6 +37,7 @@
 
   "probes": {
     "icmp":          { "type": "icmp", "timeout": "5s" },
+    "icmp-no-trace": { "type": "icmp", "timeout": "5s", "no_trace": true },
     "http":          { "type": "http", "timeout": "10s" },
     "http-insecure": { "type": "http", "timeout": "10s", "insecure": true },
     "tcp":           { "type": "tcp",  "timeout": "5s" },

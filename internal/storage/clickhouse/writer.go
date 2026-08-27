@@ -2,7 +2,6 @@ package clickhouse
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"math"
@@ -37,15 +36,38 @@ type Writer struct {
 	cfg     config.ClickHouse
 	chans   [numTables]chan any
 	dropped [numTables]uint64
-	wg      sync.WaitGroup
-	cancel  context.CancelFunc
-	closed  atomic.Bool
+	// noMeasurement counts cycles left out of probe_cycle for sending nothing,
+	// so the warning below can be sampled rather than emitted per target per
+	// interval.
+	noMeasurement uint64
+	wg            sync.WaitGroup
+	cancel        context.CancelFunc
+	closed        atomic.Bool
 }
 
 // dropLogEvery is how often the writer surfaces sustained overflow to the
 // log. The first drop after Close (or per restart) always logs; after that
 // it's one line per N drops so a saturating channel doesn't flood the log.
 const dropLogEvery = 10000
+
+// noMeasurementLogEvery rate-limits the Sent == 0 warning by the same rule.
+// That condition is fleet-wide by nature — a resolver outage or a reload
+// cancels every in-flight cycle at once — so one line per target per interval
+// is ~6/s sustained on the deployed shape, on the one log an operator reads
+// during the incident it is the only signal for.
+const noMeasurementLogEvery = 500
+
+// log is never nil, so a diagnostic path can never be the thing that panics a
+// write. NewWriter is exported and takes a *slog.Logger with no nil check, and
+// runTable's flush path called Warn unguarded from a goroutine with no
+// recover() — a nil logger there took the process down at exactly the moment
+// ClickHouse was already failing. Mirrors Reader.log().
+func (w *Writer) logger() *slog.Logger {
+	if w.log == nil {
+		return slog.Default()
+	}
+	return w.log
+}
 
 // The flushes name their columns explicitly so a table that gained a column
 // still accepts a batch built before it — a listless INSERT is positional and
@@ -100,9 +122,6 @@ func newWriterChans(pings int) [numTables]chan any {
 	return chans
 }
 
-// NewWriter opens a connection and starts one consumer goroutine per
-// table, sizing each table's buffer from pings. Returns an error if the
-// initial Ping fails.
 // batchInterval validates the whole batch block and returns the flush period.
 // Both fields, not just the one: config.Validate bounds them together for one
 // reason — they reach runTable, which runs on a goroutine with no recover(),
@@ -124,6 +143,9 @@ func batchInterval(b config.ClickHouseBatch) (time.Duration, error) {
 	return d, nil
 }
 
+// NewWriter opens a connection and starts one consumer goroutine per table,
+// sizing each table's buffer from pings. Returns an error if the initial Ping
+// fails.
 func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pings int) (*Writer, error) {
 	// Before the dial, which is what the doc on batchInterval claims and what
 	// makes the guard reachable without a server: a bad batch block should not
@@ -140,7 +162,7 @@ func NewWriter(ctx context.Context, log *slog.Logger, cfg config.ClickHouse, pin
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{cfg.Addr},
 		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
-		TLS:  tlsForWriter(cfg.TLS),
+		TLS:  tlsConfig(cfg.TLS),
 		Settings: clickhouse.Settings{
 			"async_insert":          0,
 			"wait_for_async_insert": 0,
@@ -204,11 +226,13 @@ func (w *Writer) OnCycle(ctx context.Context, c scheduler.Cycle) {
 // logNoMeasurement surfaces the skipped cycle, so the resulting chart gap and
 // silent alert have a reason in the log rather than looking like a lost write.
 func (w *Writer) logNoMeasurement(c scheduler.Cycle) {
-	if w.log == nil {
+	n := atomic.AddUint64(&w.noMeasurement, 1)
+	if n != 1 && n%noMeasurementLogEvery != 0 {
 		return
 	}
-	w.log.Warn("clickhouse.writer.no_measurement",
-		"target", c.Target.ID(), "probe", c.ProbeName, "source", c.Source)
+	w.logger().Warn("clickhouse.writer.no_measurement",
+		"example_target", c.Target.ID(), "probe", c.ProbeName, "source", c.Source,
+		"total", n)
 }
 
 type rttRow struct {
@@ -282,11 +306,8 @@ func (w *Writer) offer(table int, row any) {
 // allocation-free under steady-state.
 func (w *Writer) recordDrop(table int) {
 	n := atomic.AddUint64(&w.dropped[table], 1)
-	if w.log == nil {
-		return
-	}
 	if n == 1 || n%dropLogEvery == 0 {
-		w.log.Warn("clickhouse.writer.drop",
+		w.logger().Warn("clickhouse.writer.drop",
 			"table", tableName(table),
 			"dropped_total", n,
 		)
@@ -332,7 +353,7 @@ func (w *Writer) runTable(ctx context.Context, table, maxRows int, maxInterval t
 		}
 		if err != nil {
 			flushFailing = true
-			w.log.Warn("clickhouse.flush", "table", tableName(table), "err", err, "rows", len(pending))
+			w.logger().Warn("clickhouse.flush", "table", tableName(table), "err", err, "rows", len(pending))
 			// Retain the batch for retry on the next ticker tick instead of
 			// dropping it on a transient ClickHouse hiccup. Bound the backlog so
 			// a long outage can't grow pending without limit: keep the newest
@@ -541,11 +562,4 @@ func (w *Writer) Close() error {
 		return w.conn.Close()
 	}
 	return nil
-}
-
-func tlsForWriter(enabled bool) *tls.Config {
-	if !enabled {
-		return nil
-	}
-	return &tls.Config{MinVersion: tls.VersionTLS12}
 }

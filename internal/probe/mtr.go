@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/tumult/gosmokeping/internal/config"
 )
 
 // MTR discovers the path to a target by sending ICMP echoes with increasing
@@ -28,7 +30,7 @@ func NewMTR(name string, timeout time.Duration) *MTR {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
-	return &MTR{name: name, timeout: timeout, maxTTL: 30, spacing: 50 * time.Millisecond, trace: traceHops}
+	return &MTR{name: name, timeout: timeout, maxTTL: maxTTL, spacing: 50 * time.Millisecond, trace: traceHops}
 }
 
 func (m *MTR) Name() string { return m.name }
@@ -39,6 +41,23 @@ func (m *MTR) Name() string { return m.name }
 // estimates and stays well under a 5m interval in the worst case.
 const maxRounds = 10
 
+// maxTTL is the deepest TTL one round walks. A const rather than the literal it
+// was, so the assertions below can name it.
+const maxTTL = 30
+
+// config.MaxHopRowsPerCycle is derived from these two, and cluster ingest
+// refuses a batch above twice it — so a walk that outgrew the bound would have
+// its own legitimate output refused by the master. Negative fails the build,
+// which is what the AST-parsing mirror test in internal/config was standing in
+// for. The icmp probe's opportunistic walk feeds the same probe_hop rows, so it
+// is pinned here too.
+const (
+	_ uint = config.MaxTraceRounds - maxRounds
+	_ uint = config.MaxTraceTTL - maxTTL
+	_ uint = config.MaxTraceRounds - defaultTraceRounds
+	_ uint = config.MaxTraceTTL - defaultTraceMaxTTL
+)
+
 func (m *MTR) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	if t.Host == "" {
 		return nil, errors.New("mtr: host required")
@@ -48,6 +67,15 @@ func (m *MTR) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	}
 	hops, stats, err := m.trace(ctx, t.Host, t.Family, count, m.maxTTL, m.timeout, m.spacing)
 	if err != nil {
+		// A missing CAP_NET_RAW is a measurement never taken, not a target that
+		// did not answer: returning nil lets the scheduler stamp Sent = pings,
+		// which writes a fabricated full-loss cycle every interval and pages
+		// every mtr target. &Result{} leaves the gap instead, and the hint is
+		// the one the icmp probe already prints for the same condition.
+		if errors.Is(err, errRawUnavailable) {
+			logRawUnavailableMTROnce(err)
+			return &Result{}, err
+		}
 		return nil, err
 	}
 

@@ -94,7 +94,7 @@ func TestCycleRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	got := decoded.ToCycle(target)
+	got := decoded.ToCycle(config.TargetRef{Group: "prod", Target: target})
 
 	if !reflect.DeepEqual(got, original) {
 		t.Errorf("round-trip mismatch:\n got:  %#v\n want: %#v", got, original)
@@ -133,7 +133,7 @@ func TestCycleRoundTripEmptySlices(t *testing.T) {
 	if err := json.Unmarshal(buf, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	got := decoded.ToCycle(target)
+	got := decoded.ToCycle(config.TargetRef{Group: "g", Target: target})
 
 	if len(got.Hops) != 0 {
 		t.Errorf("hops should round-trip empty, got %d", len(got.Hops))
@@ -153,13 +153,13 @@ func TestToCycleNormalizesUnreach(t *testing.T) {
 	mk := func(unreach string) cluster.CyclePayload {
 		return cluster.CyclePayload{Hops: []cluster.HopDTO{{Index: 2, IP: "10.0.0.2", Unreach: unreach}}}
 	}
-	if got := mk("admin-prohibited").ToCycle(target).Hops[0].Unreach; got != "admin-prohibited" {
+	if got := mk("admin-prohibited").ToCycle(config.TargetRef{Target: target}).Hops[0].Unreach; got != "admin-prohibited" {
 		t.Fatalf("valid label rewritten: %q", got)
 	}
-	if got := mk("").ToCycle(target).Hops[0].Unreach; got != "" {
+	if got := mk("").ToCycle(config.TargetRef{Target: target}).Hops[0].Unreach; got != "" {
 		t.Fatalf("empty label invented: %q", got)
 	}
-	if got := mk("<img src=x onerror=alert(1)>").ToCycle(target).Hops[0].Unreach; got != "unreachable-other" {
+	if got := mk("<img src=x onerror=alert(1)>").ToCycle(config.TargetRef{Target: target}).Hops[0].Unreach; got != "unreachable-other" {
 		t.Fatalf("hostile label survived ingest: %q", got)
 	}
 }
@@ -177,7 +177,7 @@ func TestCycleRoundTripCarriesHopAnnotations(t *testing.T) {
 	if err := json.Unmarshal(buf, &back); err != nil {
 		t.Fatal(err)
 	}
-	got := back.ToCycle(config.Target{Name: "gw"}).Hops[0]
+	got := back.ToCycle(config.TargetRef{Target: config.Target{Name: "gw"}}).Hops[0]
 	if got.Unreach != "no-route" || !got.TargetReply {
 		t.Fatalf("annotations lost over the wire: %+v", got)
 	}
@@ -430,14 +430,14 @@ func TestToCycleCanonicalizesHopAddresses(t *testing.T) {
 	}
 	for in, want := range cases {
 		p := cluster.CyclePayload{Hops: []cluster.HopDTO{{Index: 1, IP: in}}}
-		if got := p.ToCycle(target).Hops[0].IP; got != want {
+		if got := p.ToCycle(config.TargetRef{Target: target}).Hops[0].IP; got != want {
 			t.Errorf("ToCycle(%q) stored %q, want %q", in, got, want)
 		}
 	}
 	// Fail closed if validation was somehow skipped: unparseable text must
 	// never reach the dictionary as itself.
 	p := cluster.CyclePayload{Hops: []cluster.HopDTO{{Index: 1, IP: "not-an-ip"}}}
-	if got := p.ToCycle(target).Hops[0].IP; got != "" {
+	if got := p.ToCycle(config.TargetRef{Target: target}).Hops[0].IP; got != "" {
 		t.Errorf("unvalidated text stored as %q, want the empty no-reply value", got)
 	}
 }
@@ -533,7 +533,7 @@ func TestToCycleDropsAnOversizedZone(t *testing.T) {
 	cy := cluster.CyclePayload{Hops: []cluster.HopDTO{
 		{Index: 1, IP: "fe80::1%" + strings.Repeat("a", 1<<20)},
 		{Index: 2, IP: "fe80::1%eth0"},
-	}}.ToCycle(target)
+	}}.ToCycle(config.TargetRef{Target: target})
 	if got := cy.Hops[0].IP; got != "" {
 		t.Errorf("oversized zone stored as %d bytes, want dropped", len(got))
 	}
@@ -557,7 +557,7 @@ func TestOversizedHTTPErrIsTruncatedNotRejected(t *testing.T) {
 	if err := batch.Validate(now); err != nil {
 		t.Fatalf("a long error string rejected the batch: %v", err)
 	}
-	got := c.ToCycle(config.Target{Name: "gw", Probe: "http"}).HTTPSamples[0].Err
+	got := c.ToCycle(config.TargetRef{Target: config.Target{Name: "gw", Probe: "http"}}).HTTPSamples[0].Err
 	if len(got) > probe.MaxHTTPErrLen {
 		t.Fatalf("stored error is %d bytes, limit %d", len(got), probe.MaxHTTPErrLen)
 	}
@@ -632,7 +632,7 @@ func TestHopAddrZoneAcceptsAPercent(t *testing.T) {
 			t.Errorf("%q: refused a zone the producer can emit: %v", ip, err)
 			continue
 		}
-		if got := p.ToCycle(target).Hops[0].IP; got != ip {
+		if got := p.ToCycle(config.TargetRef{Target: target}).Hops[0].IP; got != ip {
 			t.Errorf("%q: stored as %q", ip, got)
 		}
 	}

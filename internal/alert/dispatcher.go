@@ -85,13 +85,10 @@ func (d *ActionDispatcher) Wants(e Event) bool {
 }
 
 func (d *ActionDispatcher) Dispatch(ctx context.Context, e Event) {
-	cfg := d.store.Current()
-	actions := make([]NamedAction, 0, len(e.Alert.Actions))
-	for _, name := range e.Alert.Actions {
-		a, ok := cfg.Actions[name]
-		actions = append(actions, NamedAction{Name: name, Action: a, Found: ok})
-	}
-	d.DispatchActions(ctx, e, actions)
+	// resolveActions, not a second copy of it: the snapshot path and this live
+	// path must agree on what an alert notifies, which is the whole point of
+	// ActionSnapshotDispatcher.
+	d.DispatchActions(ctx, e, resolveActions(d.store.Current(), e.Alert.Actions))
 }
 
 // DispatchActions implements ActionSnapshotDispatcher: it runs the actions it

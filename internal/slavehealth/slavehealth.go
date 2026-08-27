@@ -27,7 +27,7 @@ const (
 	// underscore keeps it outside the user namespace; config validation
 	// rejects a user-defined group of the same name so a real target cannot
 	// shadow a health target and inherit its address-stripping behaviour.
-	Group = "_cluster"
+	Group = config.ReservedGroup
 
 	// GroupTitle is the sidebar label for the group.
 	GroupTitle = "Slaves"
@@ -35,7 +35,7 @@ const (
 	// ProbeName is the synthesized probe definition health targets use. It
 	// is injected into the probe registry at build time rather than required
 	// in the operator's config, so the mesh needs no probe setup.
-	ProbeName = "_slave_health"
+	ProbeName = config.ReservedProbe
 
 	// defaultTimeout applies when the caller has no interval-derived value.
 	defaultTimeout = 2 * time.Second
@@ -185,28 +185,20 @@ func (s *Set) Fingerprint() string {
 	}
 	var b strings.Builder
 	for _, p := range s.peers {
-		b.WriteString(escapeSep(p.Name))
-		b.WriteByte(0x1f)
+		b.WriteString(config.EscapeSeparators(p.Name))
+		b.WriteByte(config.SepField)
 		b.WriteString(p.Addr.String())
-		b.WriteByte(0x1e)
+		b.WriteByte(config.SepEntry)
 	}
-	b.WriteByte(0x1d)
+	b.WriteByte(config.SepBlock)
 	// Order is significant: the alert list is stored as given, so a reorder is
 	// treated as a change and rebuilds. That is a cheap false positive, and
 	// the alternative (sorting) would hide a genuine edit that only permutes.
 	for _, a := range s.alerts {
-		b.WriteString(escapeSep(a))
-		b.WriteByte(0x1e)
+		b.WriteString(config.EscapeSeparators(a))
+		b.WriteByte(config.SepEntry)
 	}
 	return b.String()
-}
-
-func escapeSep(s string) string {
-	if !strings.ContainsAny(s, "\x1d\x1e\x1f\\") {
-		return s
-	}
-	r := strings.NewReplacer("\\", `\\`, "\x1f", `\u`, "\x1e", `\r`, "\x1d", `\g`)
-	return r.Replace(s)
 }
 
 func familyOf(addr netip.Addr) string {

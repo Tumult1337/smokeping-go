@@ -2,6 +2,7 @@ package alert
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,11 @@ type Condition struct {
 	Op    Op
 	Value float64 // for rtt_* fields this is milliseconds; for loss_pct it's a percentage
 	Raw   string
+	// get is the field's accessor, resolved once by ParseCondition. Eval used to
+	// re-run the lookup per cycle behind an `ok` branch that only a Condition
+	// built outside ParseCondition could take — and that branch returned false,
+	// which reads as "never triggered" rather than as an error.
+	get func(scheduler.Cycle) float64
 }
 
 // ParseCondition parses strings like "loss_pct > 5" or "rtt_median > 50ms".
@@ -56,7 +62,8 @@ func ParseCondition(s string) (Condition, error) {
 		return Condition{}, fmt.Errorf("malformed condition %q", raw)
 	}
 
-	if _, ok := fieldGetter(field); !ok {
+	get, ok := fieldGetter(field)
+	if !ok {
 		return Condition{}, fmt.Errorf("unknown field %q", field)
 	}
 
@@ -64,7 +71,7 @@ func ParseCondition(s string) (Condition, error) {
 	if err != nil {
 		return Condition{}, fmt.Errorf("invalid value %q: %w", rhs, err)
 	}
-	return Condition{Field: field, Op: op, Value: val, Raw: raw}, nil
+	return Condition{Field: field, Op: op, Value: val, Raw: raw, get: get}, nil
 }
 
 func parseValue(field, s string) (float64, error) {
@@ -74,16 +81,26 @@ func parseValue(field, s string) (float64, error) {
 			return float64(d) / float64(time.Millisecond), nil
 		}
 	}
-	return strconv.ParseFloat(s, 64)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, err
+	}
+	// ParseFloat accepts "inf" and "nan". A threshold of +Inf is an alert no
+	// finite measurement can trip, and IEEE-754 makes `actual != NaN` true for
+	// every cycle — so both validate green and then either never fire or page
+	// the fleet on the first cycle from every source.
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("threshold must be a finite number, got %q", s)
+	}
+	return v, nil
 }
 
 // Eval returns true if the cycle satisfies the condition.
 func (c Condition) Eval(cy scheduler.Cycle) bool {
-	getter, ok := fieldGetter(c.Field)
-	if !ok {
+	if c.get == nil {
 		return false
 	}
-	actual := getter(cy)
+	actual := c.get(cy)
 	switch c.Op {
 	case OpGT:
 		return actual > c.Value
