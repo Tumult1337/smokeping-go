@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/http"
 	"net/netip"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -173,7 +174,21 @@ func (s *Server) Router() http.Handler {
 		r.Get("/", s.serveIndex)
 		r.Get("/assets/*", fileServer.ServeHTTP)
 		r.Get("/favicon.ico", fileServer.ServeHTTP)
-		r.NotFound(s.serveIndex) // SPA fallback
+		// Root-level build output is not enumerable when routes are registered
+		// — `npm run icon` regenerates favicon.svg and icon.svg, and Vite copies
+		// whatever else public/ holds — so try the embedded FS before falling
+		// back to the SPA. Listed routes alone answered /favicon.svg with
+		// index.html at text/html, which a browser rejects as an icon.
+		r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+			name := strings.TrimPrefix(path.Clean(req.URL.Path), "/")
+			if name != "." && fs.ValidPath(name) {
+				if st, err := fs.Stat(s.uiFS, name); err == nil && !st.IsDir() {
+					fileServer.ServeHTTP(w, req)
+					return
+				}
+			}
+			s.serveIndex(w, req)
+		})
 	}
 	return r
 }
