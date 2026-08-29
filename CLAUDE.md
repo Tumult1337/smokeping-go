@@ -803,9 +803,14 @@ Key points a reader can't derive from a single file:
   `timestamp <= now() + MaxFutureSkew` so rows already in the table stop
   being served — `QueryHopsAt` needed it as much as `QueryLatestHops`,
   since `storage.ValidQueryTime` admits an `at` far enough ahead to reach
-  them. `MaxCycleAge` is 7d because `PushSink` is a 600-cycle drop-oldest
-  ring — even a multi-day outage delivers cycles far younger — while a row
-  past the shortest default retention (14d) is written already expired.
+  them. `MaxCycleAge` is 7d because a row past the shortest default retention
+  (14d) is written already expired. It is **not** because the slave's buffer
+  cannot reach it — that was true of the old 600-entry ring and is not true of
+  `config.DefaultBufferBytes`, which holds roughly 480,000 hopless cycles, so a
+  handful of targets on a wide interval buffers more than 7d through a long
+  outage. On recovery ingest refuses each over-age batch whole and
+  `slave.flushOnce` drops it, taking up to 99 fresh cycles with the boundary
+  batch. Bounded and rare, but reachable at ordinary configs.
 
   **Every hop read carries a row cap, and each is derived from real
   limits rather than sized against a typical read** — twice now a cap
@@ -1002,8 +1007,105 @@ Key points a reader can't derive from a single file:
   per push: sustained duplicates mean acks are being lost between the peers,
   which is a link fault rather than a slave fault.
 
-- **Slave push buffer + auth:** `slave.PushSink` is a fixed 600-cycle
-  ring with drop-oldest on overflow; a failed push `Requeue`s on 5xx /
+- **Slave push buffer + auth:** `slave.PushSink` is a ring bounded in
+  **bytes**, not entries — `cluster.buffer_bytes`, default
+  `config.DefaultBufferBytes` (256 MiB), refused outside
+  `[MinBufferBytes, MaxBufferBytes]` by `ValidateMinimal` on the slave path
+  alone. An entry count cannot serve: a buffered cycle measures 557 B with no
+  hops, 2,671 B for a typical icmp trace, 16,037 B for the icmp producer's own
+  worst case, and 52,157 B for mtr's — a hundredfold spread, so a count sized
+  for one shape is wrong for every other. Those two ceilings are
+  `rounds × TTLs` rows at one sample each, **not** rows × samples: a round
+  contributes at most one responder per TTL, so `walkRounds` can emit 300 rows
+  or 10 samples a row and never both. The deployed rate is 122 user targets
+  plus the 5 health peers a six-node mesh gives each slave, at 20s — 6.35
+  cycles a second, so the old flat 600 held **94 seconds**. The byte budget
+  holds 30 minutes of the worst icmp shape at 174.8 MB. Every figure here is
+  computed by
+  `slave.TestDocumentedCycleSizesAreTheOnesTheAccountingProduces` and
+  `TestMtrOutageKeepsTheDocumentedPathHistory` rather than derived by hand.
+
+  Past the budget it sheds in two steps and the order is the whole point:
+  **strip `Hops` from the oldest cycle still carrying them, and only once no
+  buffered cycle carries hops, drop the oldest cycle whole.** Loss, RTTs and
+  the percentile summary therefore survive an outage the path history does
+  not — the graph an operator opens during one, and every alert condition,
+  read the first set. A shed payload is `Hops: nil`, the same shape a
+  `no_trace` probe emits, so `CycleBatch.Validate` and `ToCycle` accept it
+  unchanged. The accepted cost: an all-mtr fleet at that rate keeps loss and
+  latency for the full 30 minutes but hop rows only for the newest ~5,000
+  cycles, about 13 minutes of path history. On-disk spill is the only way to
+  hold all of it and is out of scope for a binary that persists nothing else.
+
+  The budget covers the ring's **own backing array** as well as the
+  payloads' heap, which is what makes it a ceiling rather than an estimate,
+  and the array is the majority of the bill: a hopless cycle's 557 B is 360 B
+  of `CyclePayload` against ~197 B of heap. It bounds *accounted live bytes*,
+  not RSS — four gaps sit between them, all named at `DefaultBufferBytes`.
+  `MaxBufferBytes` is 16 GiB because of those gaps and because the ring doubles
+  under `mu`, not as a round number.
+
+  **The array is also returned.** `Drain` calls `shrinkIfIdle` once the buffer
+  falls below a quarter of the ring, because growth is driven by shedding — a
+  shed cycle is small, so more of them fit, so the ring doubles — and a ring
+  that only grew left one hopless backlog taxing every later outage for the
+  life of the process. Measured at an 8 MiB budget, a second identical outage
+  kept 69% of the hop rows the first did.
+
+  A payload alone in an empty ring is admitted **past** the budget, the same
+  escape `alert.dispatchShardBytes` takes: refusing one that can never fit
+  would refuse it again on every cycle for the life of the process. Emptying
+  the ring is also the reclaim loop's only other exit — the array term is
+  inside the budget and neither shed nor drop can reduce it, so a budget
+  under it spun forever holding `mu`.
+
+  `Requeue` sizes for the **whole batch in one pass** and prepends
+  afterwards, rather than interleaving the two. Every prepend shifts each
+  live entry's offset by one, so an interleaved reclaim left `stripIdx`
+  pointing past entries that still carried hops: the walk skipped them and
+  the sink dropped a cycle it could have shed. `stripIdx` is a performance
+  **load-bearing, not a hint**: a stale value cannot corrupt the ring, since
+  `stripOldestHops` skips a hopless entry and advances past it, but one sitting
+  above a live hop-bearing entry makes that walk report nothing to shed and
+  `makeRoom` then drops a measurement it could have kept. That is why `Requeue`
+  resets it to 0 and `dropNewest` documents that `Requeue` is its only caller.
+
+  `pushLoop` keeps flushing while the master accepts full batches instead of
+  shipping one `batchLimit` per tick: at the deployed rate the 30 minutes the
+  sink now holds would otherwise take a further 14 minutes to reach the
+  master. Only an accepted batch reports progress — every requeue, drop and
+  failure path in `flushOnce` returns 0, which is what stops a failing batch
+  from being re-pushed without pause. The flush size is
+  `cluster.PushBatchCycles` (100), a protocol constant rather than a private
+  slave one **because `cluster.MaxCyclesBody` is derived from it**: the body
+  cap has to admit what a slave actually sends, and a cap derived from a
+  constant the slave could change alone is one that drifts. Anything past the
+  cap is a 413, and `flushOnce` drops a 413, so a content validator accepting a
+  batch the body cap refuses is silent data loss on a config `config.Validate`
+  approved. Measured, `PushBatchCycles` cycles at the widest shape
+  `CycleBatch.Validate` accepts is **55.65 MB against the 100 MiB cap, 1.9x**.
+  The pings term is what holds it there: a slave's schedule always comes from a
+  master config, a master config always carries a cluster token, so
+  `config.ICMPPingBudget` always applies and caps pings near 17,000 rather than
+  `MaxPingsPerCycle`'s 65,443. The cap deliberately does **not** admit
+  `MaxCyclesPerBatch` (1024) cycles at that shape — ~570 MB, where it would be
+  the memory bound rather than a guard — and both directions are pinned by
+  `TestCyclesBodyCapAdmitsWhatASlaveCanSend` and
+  `TestProtocolCeilingExceedsTheBodyCapOnPurpose`, so neither the margin
+  closing nor the ceiling becoming reachable passes unnoticed.
+  `master.dedupWindowPerSource` is still exactly 1024 per source.
+
+  **Health-target hops are withheld at the drain as well as at admission.** The
+  advertisement that governs redaction is the one current when the batch goes
+  on the wire; a master restarted onto a binary predating `hop_markers` clears
+  the flag at the next `/config` pull, and every health cycle already buffered
+  still carries the slave's own address, which a marker-blind master redacts by
+  position and serves on the unauthenticated `/hops`. That window was ~94
+  seconds under the old ring and is tens of minutes under the budget, and an
+  outage is exactly when a master is replaced. The admission-time clear stays:
+  it is what keeps those bytes from being retained and accounted at all.
+
+  A failed push `Requeue`s on 5xx /
   network errors and drops on 404 (master lost state; next /register
   re-establishes us) and on `ErrRejected` — every 4xx except 401, 403, 404
   and the transient `retryable4xx` set. A 4xx the master

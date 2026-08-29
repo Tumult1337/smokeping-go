@@ -169,6 +169,11 @@ type Cluster struct {
 	// only, then rely on operator restart for changes). Any positive
 	// duration is used as-is.
 	PullEvery string `json:"pull_every,omitempty"`
+	// BufferBytes is the ceiling slave.PushSink holds unpushed cycles under
+	// (slave-side). Zero means DefaultBufferBytes. Past the budget the sink
+	// sheds hop rows from its oldest cycles before it drops a cycle whole, so
+	// loss and latency survive an outage the path history does not.
+	BufferBytes int64 `json:"buffer_bytes,omitempty"`
 	// InsecureMasterURL permits a plaintext http:// master_url. The shared
 	// bearer token and all cycle data otherwise require https — set this only
 	// on a trusted network (e.g. TLS terminated at a loopback sidecar).
@@ -466,6 +471,13 @@ func (c *Config) ValidateMinimal() error {
 	if c.Cluster.Name == "" {
 		return fmt.Errorf("cluster.name is required for slave mode")
 	}
+	// Refused rather than clamped: a slave that cannot hold what its operator
+	// asked for must say so at boot. Slave path only, like the header bounds
+	// below — nothing on the master path reads this field.
+	if b := c.Cluster.BufferBytes; b != 0 && (b < MinBufferBytes || b > MaxBufferBytes) {
+		return fmt.Errorf("cluster.buffer_bytes is %d, outside [%d, %d] (0 means the %d default)",
+			b, MinBufferBytes, MaxBufferBytes, DefaultBufferBytes)
+	}
 	return validateClusterHeaders(c.Cluster)
 }
 
@@ -499,6 +511,36 @@ func validateClusterHeaders(c *Cluster) error {
 const (
 	MaxSlaveNameLen  = 128
 	MaxSlaveFieldLen = 256
+)
+
+// Bounds on cluster.buffer_bytes, the ceiling slave.PushSink holds its
+// unpushed cycles under.
+//
+// DefaultBufferBytes is a byte ceiling, not a product of producer limits, for
+// the reason clickhouse.maxHopRows and alert.dispatchQueueBytes are: a slave's
+// cycle rate is its target count over its interval, the master supplies both,
+// and the master bounds neither — so no producer maximum exists to derive
+// from. 256 MiB is what holds 30 minutes of the worst icmp trace shape at the
+// deployed rate of 122 user targets plus 5 health peers at 20s: 90 hop rows
+// over 3 rounds measures 16,037 B retained per cycle, so 11,430 cycles cost
+// 174.8 MB, on a slave with 2 GB.
+// slave.TestDocumentedCycleSizesAreTheOnesTheAccountingProduces computes every
+// figure in this comment, so none can drift from the accounting.
+//
+// It bounds accounted live bytes, not resident memory, and four gaps sit
+// between the two: growing the ring holds the old and new arrays at once, a
+// drained batch leaves the accounting between Drain and the master's ack, the
+// allocator rounds every object up to a size class, and the default GOGC puts
+// RSS near twice the live heap. MaxBufferBytes is 16 GiB rather than a larger
+// round number because of those gaps — a budget set near the host's RAM
+// reaches it through them — and because the ring doubles under one lock, so a
+// budget that large makes the final growth a copy measured in seconds with
+// every probe goroutine behind it. Both bounds catch operator error; neither
+// is derived.
+const (
+	DefaultBufferBytes int64 = 256 << 20
+	MinBufferBytes     int64 = 1 << 20
+	MaxBufferBytes     int64 = 16 << 30
 )
 
 // ValidSourceLabel bounds a cycle's source stamp. Empty is legal — Load
@@ -668,10 +710,17 @@ const (
 	// which is derived from the row timestamp — only a manual ClickHouse
 	// delete clears it.
 	MaxFutureSkew = 5 * time.Minute
-	// MaxCycleAge is how stale a pushed cycle may be. slave.PushSink is a
-	// 600-cycle drop-oldest ring, so even a multi-day master outage delivers
-	// cycles far younger than this; a row older than the shortest default
-	// retention (14d, probe_rtt and probe_http) is written already expired.
+	// MaxCycleAge is how stale a pushed cycle may be: a row older than the
+	// shortest default retention (14d, probe_rtt and probe_http) is written
+	// already expired.
+	//
+	// It is no longer true that the slave's buffer cannot reach it. A hopless
+	// cycle costs 557 B, so the DefaultBufferBytes budget holds roughly
+	// 480,000 of them, and a small slave — a handful of targets on a wide
+	// interval — buffers more than 7d through a long enough outage. On
+	// recovery ingest refuses each over-age batch whole and slave.flushOnce
+	// drops it, taking up to 99 fresh cycles with the boundary batch. Bounded
+	// and rare, but reachable at ordinary configs rather than impossible.
 	MaxCycleAge = 7 * 24 * time.Hour
 )
 

@@ -245,7 +245,7 @@ func TestClusterIngestDedupsARealPushSinkRequeue(t *testing.T) {
 
 	h.registry.Touch("edge-1", "", "", "")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sink := slave.NewPushSink(log, 600)
+	sink := slave.NewPushSink(log, config.DefaultBufferBytes)
 	sink.SetHopMarkers(true)
 
 	at := time.Now().UTC().Truncate(time.Millisecond)

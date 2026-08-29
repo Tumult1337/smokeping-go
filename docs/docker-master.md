@@ -423,10 +423,13 @@ The slave name (`frankfurt-1` here) shows up as a chip in the master's
 UI. Use it in `target.slaves: ["frankfurt-1"]` on the master if you
 want a target probed only from that location.
 
-Slaves never touch ClickHouse; they buffer up to 600 cycles in memory
-if the master goes away (drop-oldest on overflow) and re-register once
+Slaves never touch ClickHouse; they buffer cycles in memory under
+`cluster.buffer_bytes` (256 MiB by default) if the master goes away and
+re-register once
 it comes back — a restarted master forgets its registry, so that
-re-registration is what resumes ingest. It exists only in binaries from
+re-registration is what resumes ingest. Past the budget a slave sheds hop
+rows from its oldest buffered cycles before it drops a cycle whole, so loss
+and latency survive an outage the path history does not. It exists only in binaries from
 the release described in
 [`migrate-cluster-ingest-bounds.md`](migrate-cluster-ingest-bounds.md);
 an older slave stays refused until it is restarted, by which point its

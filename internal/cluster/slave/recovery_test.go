@@ -110,7 +110,7 @@ func TestSlaveRecoversFromMasterRestartWithoutConfigPull(t *testing.T) {
 		Sent:   5,
 	})
 
-	if err := r.flushOnce(ctx); err != nil {
+	if _, err := r.flushOnce(ctx); err != nil {
 		t.Fatalf("first flush after restart: %v", err)
 	}
 	if !m.registry.Load().Has("tokyo-1") {
@@ -123,7 +123,7 @@ func TestSlaveRecoversFromMasterRestartWithoutConfigPull(t *testing.T) {
 		t.Fatalf("master ingested %d cycles from a refused push, want 0", m.sink.len())
 	}
 
-	if err := r.flushOnce(ctx); err != nil {
+	if _, err := r.flushOnce(ctx); err != nil {
 		t.Fatalf("second flush: %v", err)
 	}
 	if got := r.sink.Len(); got != 0 {
@@ -165,7 +165,7 @@ func TestPermanentlyRejectedReRegisterExitsRatherThanLooping(t *testing.T) {
 
 	// The master has never seen this slave, so /cycles answers 403 and the
 	// re-register that follows is refused for the oversized advertise.
-	err := r.flushOnce(ctx)
+	_, err := r.flushOnce(ctx)
 	if err == nil {
 		t.Fatal("flushOnce returned nil on a permanently refused re-registration — the runner keeps going and pushes nothing forever")
 	}
@@ -258,7 +258,7 @@ func TestUnmarkedRefusalDoesNotBlameTheMaster(t *testing.T) {
 				Target: config.TargetRef{Group: "g", Target: config.Target{Name: "t", Probe: "icmp"}},
 				Sent:   5,
 			})
-			_ = r.flushOnce(ctx)
+			_, _ = r.flushOnce(ctx)
 
 			log := buf.String()
 			if !strings.Contains(log, tc.wantHas) {

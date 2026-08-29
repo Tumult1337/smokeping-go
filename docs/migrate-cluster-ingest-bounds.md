@@ -15,7 +15,7 @@ succeeds. That path exists only in the new binary.
 An **un-upgraded** slave reads the 403 as a generic retryable error and
 re-registers only at boot. If it also runs `cluster.pull_every: "0"` it has no
 `/config` heartbeat either, so nothing re-creates its registry entry: every push
-requeues until the 600-cycle ring overwrites live data. It does not recover on
+requeues until the push buffer overwrites live data. It does not recover on
 its own — it must be restarted, and by then the buffered window is gone.
 
 There is no compatibility shim. Upgrading a master while slaves lag loses those
@@ -37,8 +37,8 @@ any proxy on the path can answer one; 421 also drops the idle connections it was
 misrouted over.
 
 A cycle buffered through an outage longer than seven days is now refused and
-dropped rather than written already past retention. At the shipped 600-cycle
-ring and any realistic interval, no legitimate slave reaches that age.
+dropped rather than written already past retention. At the shipped buffer
+budget and any realistic interval, no legitimate slave reaches that age.
 
 The hop-row bound is derived from the probe's own ceiling
 (`config.MaxHopRowsPerCycle` = 10 rounds × 30 TTLs = 300) rather than picked, so
@@ -139,7 +139,7 @@ migration are safe. Only the master writes ClickHouse; slaves are unaffected.
 # master first
 git pull && make deploy      # or: systemctl restart gosmokeping
 
-# then every slave, before its 600-cycle ring wraps
+# then every slave, before its push buffer wraps
 ```
 
 ## Verifying

@@ -965,3 +965,50 @@ func TestValidateBoundsClusterSource(t *testing.T) {
 		t.Errorf("Validate refused an ordinary cluster.source: %v", err)
 	}
 }
+
+// buffer_bytes is refused rather than clamped: a slave that cannot hold what
+// its operator asked for must say so at boot instead of silently holding less.
+// Zero means the default, so it stays legal.
+func TestBufferBytesBoundsAreSlaveOnly(t *testing.T) {
+	slaveCfg := func(b int64) *Config {
+		return &Config{Cluster: &Cluster{
+			MasterURL: "https://master.example", Token: "tok", Name: "tokyo-1", BufferBytes: b,
+		}}
+	}
+	for _, tc := range []struct {
+		name  string
+		bytes int64
+		ok    bool
+	}{
+		{"zero means the default", 0, true},
+		{"exactly the minimum", MinBufferBytes, true},
+		{"exactly the maximum", MaxBufferBytes, true},
+		{"one byte under the minimum", MinBufferBytes - 1, false},
+		{"one byte over the maximum", MaxBufferBytes + 1, false},
+		{"negative", -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := slaveCfg(tc.bytes).ValidateMinimal()
+			if tc.ok && err != nil {
+				t.Fatalf("ValidateMinimal(%d) = %v, want nil", tc.bytes, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("ValidateMinimal(%d) = nil, want a refusal", tc.bytes)
+			}
+		})
+	}
+
+	// Nothing on the master path reads the field, so Validate must not refuse
+	// a master config over it — the mistake validateClusterHeaders records.
+	master := &Config{
+		Interval: 20 * time.Second,
+		Pings:    3,
+		Storage:  Storage{ClickHouse: ClickHouse{Addr: "127.0.0.1:9000"}},
+		Targets:  []Group{{Group: "core", Targets: []Target{{Name: "gw", Host: "192.0.2.1", Probe: "icmp"}}}},
+		Probes:   map[string]Probe{"icmp": {Type: "icmp"}},
+		Cluster:  &Cluster{Token: "tok", BufferBytes: MaxBufferBytes + 1},
+	}
+	if err := master.Validate(); err != nil {
+		t.Fatalf("Validate refused a master config over buffer_bytes, a field the master never reads: %v", err)
+	}
+}

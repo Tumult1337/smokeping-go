@@ -98,9 +98,34 @@ type CycleBatch struct {
 // shape — 122 targets, 6 sources, a 20s interval, an mtr walk of 30 TTLs over
 // 10 rounds — which sits at or below 10% of every one of them.
 const (
-	// MaxCyclesPerBatch bounds one POST /cycles. slave.Runner drains at most
-	// batchLimit (100) cycles per push, so this is 10× the shipped flush.
+	// MaxCyclesPerBatch bounds one POST /cycles. This is 10x PushBatchCycles,
+	// the shipped flush.
 	MaxCyclesPerBatch = 1024
+	// PushBatchCycles is how many cycles slave.Runner drains per push. It is a
+	// protocol constant rather than a private client one because MaxCyclesBody
+	// is derived from it: the master's body cap has to admit what a slave
+	// actually sends, and deriving that from a constant the slave could change
+	// alone is what lets the two drift apart.
+	PushBatchCycles = 100
+	// MaxCyclesBody caps the POST /cycles request body. The bound it has to
+	// clear is PushBatchCycles cycles at the widest shape Validate accepts,
+	// because anything past it is a 413 and slave.flushOnce drops a 413 — the
+	// content validator accepting a batch the body cap refuses is silent data
+	// loss on a config config.Validate approved.
+	//
+	// Measured, that bound is 55.65 MB, so this clears it by 1.9x. The pings
+	// term is what keeps it there: a slave's schedule always comes from a
+	// master config, a master config always carries a cluster token, so
+	// config.ICMPPingBudget always applies and caps pings near 17,000 rather
+	// than MaxPingsPerCycle's 65,443.
+	//
+	// It deliberately does not admit MaxCyclesPerBatch cycles at that shape —
+	// ~570 MB, where a cap covering it would be the memory bound rather than a
+	// guard. Both directions are pinned by
+	// TestCyclesBodyCapAdmitsWhatASlaveCanSend and
+	// TestProtocolCeilingExceedsTheBodyCapOnPurpose, so neither the margin
+	// closing nor the ceiling becoming reachable can pass unnoticed.
+	MaxCyclesBody = 100 << 20
 	// MaxHopsPerCycle bounds hop rows in one cycle at twice
 	// config.MaxHopRowsPerCycle — the producer's own exact ceiling, 300 rows
 	// for an mtr walk whose path diverges on all 10 rounds of all 30 TTLs.

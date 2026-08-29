@@ -21,6 +21,10 @@ import (
 	"github.com/tumult/gosmokeping/internal/slavehealth"
 )
 
+// testBudget is wide enough that no test here trips the shed ladder: these
+// cases assert hop redaction and drain order, not the byte budget.
+const testBudget = config.DefaultBufferBytes
+
 func cycleWithHops(group, name string) scheduler.Cycle {
 	return scheduler.Cycle{
 		Time:      time.Now(),
@@ -67,7 +71,7 @@ func TestPushSinkWithholdsHealthHopsFromMarkerBlindMaster(t *testing.T) {
 		{"marker-aware master", markerAware, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sink := NewPushSink(slog.New(slog.NewTextHandler(io.Discard, nil)), 10)
+			sink := NewPushSink(slog.New(slog.NewTextHandler(io.Discard, nil)), testBudget)
 			sink.SetHopMarkers(tc.resp.HopMarkers)
 			sink.OnCycle(context.Background(), cycleWithHops(slavehealth.Group, "frankfurt-1"))
 			sink.OnCycle(context.Background(), cycleWithHops("core", "gw"))
@@ -88,7 +92,7 @@ func TestPushSinkWithholdsHealthHopsFromMarkerBlindMaster(t *testing.T) {
 
 // The slave holds the fail-closed state until its first /config pull answers.
 func TestPushSinkDefaultsToWithholdingHealthHops(t *testing.T) {
-	sink := NewPushSink(slog.New(slog.NewTextHandler(io.Discard, nil)), 10)
+	sink := NewPushSink(slog.New(slog.NewTextHandler(io.Discard, nil)), testBudget)
 	sink.OnCycle(context.Background(), cycleWithHops(slavehealth.Group, "frankfurt-1"))
 
 	batch := sink.Drain(10)
@@ -164,7 +168,7 @@ func TestFlushOnceReregistersAndRequeuesWhenUnregistered(t *testing.T) {
 		Target: config.TargetRef{Group: "g", Target: config.Target{Name: "t"}},
 	})
 
-	if err := r.flushOnce(context.Background()); err != nil {
+	if _, err := r.flushOnce(context.Background()); err != nil {
 		t.Fatalf("flushOnce: %v", err)
 	}
 	if registers != 1 {
@@ -195,7 +199,7 @@ func pushOnce(t *testing.T, status int, body string) (buffered int, err error) {
 	r.sink.OnCycle(context.Background(), scheduler.Cycle{
 		Target: config.TargetRef{Group: "g", Target: config.Target{Name: "t"}},
 	})
-	err = r.flushOnce(context.Background())
+	_, err = r.flushOnce(context.Background())
 	return r.sink.Len(), err
 }
 
@@ -343,5 +347,68 @@ func TestMisdirectedRequestRetriesOnANewConnection(t *testing.T) {
 	if conns != 2 {
 		t.Fatalf("retry reused the pooled connection (%d connections for 2 requests); "+
 			"RFC 9110 15.5.20 requires a different one", conns)
+	}
+}
+
+// The advertisement that governs redaction is the one current when the batch
+// goes on the wire, not when the cycle was buffered. A master restarted onto a
+// binary predating the TargetReply marker clears hop_markers at the next
+// /config pull, and every health cycle already buffered still carries the
+// slave's own address — which a marker-blind master redacts by position and
+// serves on the unauthenticated /hops. The buffer now holds tens of minutes
+// rather than ninety seconds, and an outage is exactly when a master is
+// replaced.
+func TestBufferedHealthHopsAreWithheldFromAMasterThatDowngrades(t *testing.T) {
+	// Wide enough that nothing is shed: a tight budget would blank the hops
+	// for the wrong reason and fake a pass.
+	sink := NewPushSink(slog.New(slog.DiscardHandler), testBudget)
+	sink.SetHopMarkers(true)
+	for range 200 {
+		sink.OnCycle(context.Background(), cycleWithHops(slavehealth.Group, "frankfurt-1"))
+	}
+	sink.OnCycle(context.Background(), cycleWithHops("core", "gw"))
+
+	sink.SetHopMarkers(false) // the master restarts onto an older binary
+
+	health, ordinary, leaked := 0, 0, 0
+	for {
+		batch := sink.Drain(64)
+		if len(batch) == 0 {
+			break
+		}
+		for _, p := range batch {
+			if p.Group != slavehealth.Group {
+				ordinary++
+				if len(p.Hops) != 2 {
+					t.Fatalf("an ordinary target lost its hops: %+v", p.Hops)
+				}
+				continue
+			}
+			health++
+			for _, h := range p.Hops {
+				if h.IP == "10.44.0.2" {
+					leaked++
+				}
+			}
+		}
+	}
+	if health != 200 || ordinary != 1 {
+		t.Fatalf("drained %d health and %d ordinary cycles, want 200 and 1", health, ordinary)
+	}
+	if leaked > 0 {
+		t.Fatalf("%d buffered health cycles shipped the slave's own address to a marker-blind master", leaked)
+	}
+}
+
+// The mirror case: a master that gains the marker while cycles are buffered
+// must still receive the hops it can redact.
+func TestBufferedHealthHopsReachAMasterThatUpgrades(t *testing.T) {
+	sink := NewPushSink(slog.New(slog.DiscardHandler), testBudget)
+	sink.SetHopMarkers(true)
+	sink.OnCycle(context.Background(), cycleWithHops(slavehealth.Group, "frankfurt-1"))
+
+	batch := sink.Drain(10)
+	if len(batch) != 1 || len(batch[0].Hops) != 2 {
+		t.Fatalf("a marker-aware master was denied health hops: %+v", batch)
 	}
 }

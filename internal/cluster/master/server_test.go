@@ -531,7 +531,7 @@ func TestDecodeFailuresAreNotAllPermanent(t *testing.T) {
 	// A body past the cap is a transport condition: 413, and never permanent —
 	// marking it so crash-loops the fleet through a proxy's own size limit.
 	rec = post(append([]byte(`{"source":"edge-1","pad":"`),
-		append(bytes.Repeat([]byte("a"), maxCyclesBody+1), []byte(`"}`)...)...))
+		append(bytes.Repeat([]byte("a"), cluster.MaxCyclesBody+1), []byte(`"}`)...)...))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversize body: got %d, want 413", rec.Code)
 	}

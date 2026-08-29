@@ -5,6 +5,7 @@
     "name": "frankfurt-1",
     "advertise": "${ADVERTISE_IP}",
     "push_every": "5s",
-    "pull_every": "60s"
+    "pull_every": "60s",
+    "buffer_bytes": 268435456
   }
 }

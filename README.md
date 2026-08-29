@@ -389,7 +389,7 @@ set `master_url`, `token`, and a unique `name`, then:
 ```
 
 The slave registers with the master, pulls the target list, probes locally,
-and pushes cycle batches back every few seconds. A 600-cycle ring buffer
+and pushes cycle batches back every few seconds. A byte-bounded ring buffer
 absorbs short master outages. Slaves never touch ClickHouse or the UI.
 
 ## Development

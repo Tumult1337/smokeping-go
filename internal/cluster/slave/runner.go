@@ -55,13 +55,17 @@ func NewRunner(log *slog.Logger, local *config.Config, version string) *Runner {
 		}
 	}
 	return &Runner{
-		log:        log,
-		local:      local,
-		client:     NewClient(local.Cluster.MasterURL, local.Cluster.Token, local.Cluster.Name, version, local.Cluster.Advertise),
-		sink:       NewPushSink(log, 600),
-		pushEvery:  pushEvery,
-		pullEvery:  pullEvery,
-		batchLimit: 100,
+		log:       log,
+		local:     local,
+		client:    NewClient(local.Cluster.MasterURL, local.Cluster.Token, local.Cluster.Name, version, local.Cluster.Advertise),
+		sink:      NewPushSink(log, local.Cluster.BufferBytes),
+		pushEvery: pushEvery,
+		pullEvery: pullEvery,
+		// cluster.MaxCyclesPerBatch is 1024, but cluster.MaxCyclesBody is
+		// derived from this flush size, and master.dedupWindowPerSource is
+		// exactly 1024 identities per source. pushLoop clears a backlog by
+		// repeating the flush, not by widening it.
+		batchLimit: cluster.PushBatchCycles,
 	}
 }
 
@@ -81,7 +85,8 @@ func (r *Runner) Run(ctx context.Context) error {
 		"name", r.local.Cluster.Name,
 		"master", r.local.Cluster.MasterURL,
 		"push_every", r.pushEvery,
-		"pull_every", pullEveryLog)
+		"pull_every", pullEveryLog,
+		"buffer_bytes", r.sink.Budget())
 
 	if err := r.registerForever(ctx); err != nil {
 		return err
@@ -270,9 +275,17 @@ func (r *Runner) buildScheduler(shim *config.Config) (*scheduler.Scheduler, erro
 	return scheduler.NewWithSource(r.log, registry, r.sink, shim, r.local.Cluster.Name), nil
 }
 
-// pushLoop flushes the buffer on every pushEvery tick. Returns ErrAuth on
-// fatal auth failure so Run can propagate it to main(); nil on normal
-// ctx-cancelled shutdown.
+// pushLoop drains the buffer on every pushEvery tick, and keeps draining
+// while the master is accepting full batches — one batch per tick left a
+// backlog clearing at batchLimit/pushEvery, so the 30 minutes of outage the
+// sink now holds took a further 14 minutes to ship at the deployed rate.
+//
+// Only an accepted batch reports progress. Every requeue, drop and failure
+// path in flushOnce returns 0, which is what stops this loop from re-pushing
+// a failing batch without pause.
+//
+// Returns ErrAuth on fatal auth failure so Run can propagate it to main(); nil
+// on normal ctx-cancelled shutdown.
 func (r *Runner) pushLoop(ctx context.Context) error {
 	t := time.NewTicker(r.pushEvery)
 	defer t.Stop()
@@ -281,8 +294,14 @@ func (r *Runner) pushLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			if err := r.flushOnce(ctx); err != nil {
-				return err
+			for {
+				pushed, err := r.flushOnce(ctx)
+				if err != nil {
+					return err
+				}
+				if pushed < r.batchLimit || ctx.Err() != nil {
+					break
+				}
 			}
 		}
 	}
@@ -301,10 +320,10 @@ func (r *Runner) pushLoop(ctx context.Context) error {
 //     process.
 //   - anything else (5xx, network, timeout): requeue for the next tick
 //   - ctx cancellation during shutdown: returns nil so finalFlush can run
-func (r *Runner) flushOnce(ctx context.Context) error {
+func (r *Runner) flushOnce(ctx context.Context) (int, error) {
 	batch := r.sink.Drain(r.batchLimit)
 	if len(batch) == 0 {
-		return nil
+		return 0, nil
 	}
 	err := r.client.PushCycles(ctx, cluster.CycleBatch{
 		Source: r.local.Cluster.Name,
@@ -312,15 +331,15 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 	})
 	if err == nil {
 		r.log.Debug("pushed cycle batch", "count", len(batch))
-		return nil
+		return len(batch), nil
 	}
 	if errors.Is(err, ErrAuth) {
 		r.log.Error("push auth failed, exiting", "count", len(batch))
-		return err
+		return 0, err
 	}
 	if errors.Is(err, ErrNotFound) {
 		r.log.Warn("master returned 404, dropping batch", "count", len(batch))
-		return nil
+		return 0, nil
 	}
 	if errors.Is(err, ErrRejected) {
 		// The message distinguishes the two, because the remedies differ and
@@ -337,7 +356,7 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 			r.log.Error("batch refused with an unmarked 4xx, dropping it; if the master's own limits look fine, check any proxy in front of it",
 				"count", len(batch), "err", err)
 		}
-		return nil
+		return 0, nil
 	}
 	if errors.Is(err, ErrUnregistered) {
 		r.log.Warn("master does not know this slave, re-registering", "count", len(batch))
@@ -350,21 +369,21 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 			// reporting healthy. Requeued because the process is exiting.
 			if errors.Is(rerr, ErrAuth) {
 				r.sink.Requeue(batch)
-				return rerr
+				return 0, rerr
 			}
 			if errors.Is(rerr, ErrMasterRefused) {
 				r.log.Error("master permanently rejected re-registration, exiting", "err", rerr)
 				r.sink.Requeue(batch)
-				return rerr
+				return 0, rerr
 			}
 			r.log.Warn("re-register failed", "err", rerr)
 		}
 		r.sink.Requeue(batch)
-		return nil
+		return 0, nil
 	}
 	r.log.Warn("push failed, requeueing", "count", len(batch), "err", err)
 	r.sink.Requeue(batch)
-	return nil
+	return 0, nil
 }
 
 // finalFlush is a single best-effort flush attempt on shutdown with a short
@@ -372,5 +391,5 @@ func (r *Runner) flushOnce(ctx context.Context) error {
 func (r *Runner) finalFlush() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_ = r.flushOnce(ctx)
+	_, _ = r.flushOnce(ctx)
 }

@@ -87,11 +87,11 @@ func TestRefuseDecodeDistinguishesTransportFromContent(t *testing.T) {
 }
 
 // Driven directly rather than through the handler: tripping MaxBytesReader for
-// real means pushing maxCyclesBody (100 MiB) through a test, and the branch
+// real means pushing cluster.MaxCyclesBody (100 MiB) through a test, and the branch
 // under test is the classification, not the reader.
 func TestRefuseDecodeAnswersOversizeWithoutTheMarker(t *testing.T) {
 	rec := httptest.NewRecorder()
-	refuseDecode(rec, &http.MaxBytesError{Limit: maxCyclesBody})
+	refuseDecode(rec, &http.MaxBytesError{Limit: cluster.MaxCyclesBody})
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413 for a body past the ingest cap", rec.Code)
