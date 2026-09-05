@@ -313,6 +313,8 @@ func (r *Runner) pushLoop(ctx context.Context) error {
 //     re-establishes us)
 //   - ErrRejected: a permanent 4xx; drop the batch loudly, because retrying it
 //     blocks every cycle queued behind it until drop-oldest eats them
+//   - ErrRedirected: a 3xx the redirect policy refused; requeue, and log at
+//     Error because the condition is a configuration that repeats forever
 //   - ErrUnregistered: master's registry has no entry for us; re-register and
 //     requeue. Registration is otherwise only attempted at boot, so with
 //     cluster.pull_every "0" (no /config refresh to heartbeat through) a
@@ -356,6 +358,12 @@ func (r *Runner) flushOnce(ctx context.Context) (int, error) {
 			r.log.Error("batch refused with an unmarked 4xx, dropping it; if the master's own limits look fine, check any proxy in front of it",
 				"count", len(batch), "err", err)
 		}
+		return 0, nil
+	}
+	if errors.Is(err, ErrRedirected) {
+		r.log.Error("master answered a redirect the policy refuses to follow, requeueing; nothing clears this on its own — check any proxy in front of the master",
+			"count", len(batch), "err", err)
+		r.sink.Requeue(batch)
 		return 0, nil
 	}
 	if errors.Is(err, ErrUnregistered) {

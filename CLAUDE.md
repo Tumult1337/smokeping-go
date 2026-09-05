@@ -513,6 +513,80 @@ Key points a reader can't derive from a single file:
   AAAA is the semantically correct reading; how the resolver reaches the
   upstream is left to the OS.
 
+- **Outbound HTTP policy is one function and one jar builder**, in
+  `internal/probe/http.go`, for the reason `probe.UserAgent` is one constant: a
+  client that sets neither gets net/http's defaults — ten hops to any host the
+  responder names. `probe.CheckRedirect` follows a redirect only while
+  `URL.Host` is unchanged, the scheme is not a downgrade out of `https`, and
+  the depth is at most `probe.MaxHTTPRedirects` (3). The comparison is host **and port**: a hop to another port of the same
+  machine reaches a different service, which is the internal-service scan the
+  rule refuses, and a plain http-to-https upgrade writes an explicit port in
+  neither URL so it still matches. A cross-host hop stops with
+  `http.ErrUseLastResponse` rather than an error, because a redirecting host is
+  serving normally and the http probe recorded that 3xx as reachable before the
+  policy existed; exceeding the depth is an error, because a chain that does
+  not converge is a page nothing reached. The downgrade arm exists because
+  net/http strips `Authorization` and `Cookie` on a **host** change alone
+  (`client.go`'s `stripSensitiveHeaders`), and this policy requires the hosts
+  to be equal — so without it the cluster bearer token rode a same-host
+  `https`-to-`http` hop and a 307 re-sent the batch body in plaintext. A hop
+  net/http answered by changing the method stops too, and that arm is the one that costs data: 301, 302 and
+  303 rewrite a POST into a bodyless GET, so following one shipped an empty
+  `POST /cycles` the master answered 405 to and `ErrRejected` dropped the batch
+  as permanently refused.
+
+  `slave.Client.do` therefore classifies any 3xx that is not 304 as
+  `slave.ErrRedirected`, retryable. Without it a refused redirect fell through to the JSON
+  decode, and `PushCycles` — which reads only the error — reported nil: an
+  undelivered batch recorded as delivered. The `< 400` half of that condition
+  is load-bearing and the existing suite is what pins it; a bare `>= 300` sits
+  above the `>= 400` block and swallows every `ErrRejected` and
+  `ErrMasterRefused` classification below it.
+
+  Requeueing it is the deliberate half. Every condition `CheckRedirect`
+  refuses is a configuration the responder repeats forever, so this is the
+  head-of-line block `ErrRejected` exists to avoid — taken anyway, on the
+  reasoning `retryable4xx` applies to 407: an operator can fix the proxy and
+  recover everything still in the ring, where dropping loses each batch
+  immediately for a verdict no master handler issued. Nothing clears it on
+  its own, so `flushOnce` logs it at **Error**, not as one more transient
+  push failure.
+
+  **The jar's lifetime differs by caller, and the two are opposite on purpose.**
+  The http probe builds one per *request*: `clientFor`'s clients are shared
+  across targets and goroutines, so a jar on one is state a probed host writes
+  and every other target reads, and a jar surviving the cycle would make the
+  first sample pay the challenge and the second skip it — two samples that
+  cannot share a percentile. The master client holds one for the client's
+  *life*: a challenge in front of the master sets a cookie every later push and
+  pull must carry, and re-solving it per flush is what trips the challenge
+  again. `probe.NewCookieJar` bounds both at `probe.MaxJarCookies` (64)
+  entries and `probe.MaxJarCookieBytes` (4096) per entry, because
+  `net/http/cookiejar` bounds nothing and every field of a `Set-Cookie` is
+  responder-written against net/http's 10 MB response-header ceiling — an
+  entry count alone let 64 cookies retain tens of megabytes for the life of
+  the master client's jar. 4096 is RFC 6265 6.1's minimum a server must
+  support, so the whole jar retains 256 KiB and nothing a real responder
+  sets is refused. The key is `probe.jarKey`, **mirrored from `cookiejar`'s
+  own storage id** rather than built from the wire bytes: keyed on the raw
+  fields, a `Set-Cookie` carrying no `Path` attribute is one key here and one
+  entry per request path there, so a responder choosing its own `Location`
+  values grew the jar without end under a single budget slot. An update to a key
+  already held is admitted whatever the count: a challenge cookie rotates on
+  every response, so counting each rotation as a new key exhausts the budget
+  and then refuses the one cookie the caller needs. The public-suffix list is
+  what stops a responder scoping a cookie to a registry suffix such as `co.uk`.
+  The alert dispatcher's webhook and discord clients keep net/http's default
+  policy — their endpoints are third parties an operator configured, not the
+  fleet's own master.
+
+  Accepted: following a same-host redirect means the probed host chooses which
+  port on itself the probe connects to next; the recorded RTT is now the
+  whole chain's time to first byte rather than the first hop's; and a cycle
+  costs up to `maxHTTPRequests` x (`MaxHTTPRedirects` + 1) requests rather
+  than `maxHTTPRequests`, with the responder deciding where in that range it
+  lands.
+
 - **Schema versioning:** `internal/storage/clickhouse/bootstrap.go` issues
   `CREATE TABLE IF NOT EXISTS` at startup, so adding new tables is safe
   and idempotent. Column additions ride `addColumnStatements` in

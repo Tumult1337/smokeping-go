@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/tumult/gosmokeping/internal/cluster"
+	"github.com/tumult/gosmokeping/internal/probe"
 )
 
 // ErrAuth is returned when the master rejects our bearer token with 401.
@@ -33,6 +34,17 @@ var ErrAuth = errors.New("cluster: 401 unauthorized")
 // keep the batch. A WAF 403 lands here too and costs one extra /register
 // attempt, which is the same retry the previous generic-error path made.
 var ErrUnregistered = errors.New("cluster: 403 slave not registered")
+
+// ErrRedirected signals a 3xx the redirect policy refused to follow. Every
+// condition that produces one is a configuration the responder repeats
+// forever — a proxy redirecting to another host, an https enforcement in front
+// of a plaintext master URL, a 302 on a POST — so the batch is requeued rather
+// than dropped, on the reasoning retryable4xx applies to 407: an operator can
+// fix it and recover everything still in the ring, where dropping loses each
+// batch immediately for a verdict no master handler issued. The residual is
+// that nothing clears it on its own, which is why flushOnce logs it at Error
+// rather than as one more transient push failure.
+var ErrRedirected = errors.New("cluster: redirect not followed")
 
 // ErrNotModified signals that a GET /config returned 304 — caller keeps its
 // current config.
@@ -113,7 +125,18 @@ func NewClient(masterURL, token, name, version, advertise string) *Client {
 		name:      name,
 		version:   version,
 		advertise: advertise,
-		http:      &http.Client{Timeout: cluster.PushTimeout},
+		// The jar persists for the client's life, unlike the http probe's
+		// per-request one: a challenge in front of the master sets a cookie
+		// that every later push and pull must carry, and re-solving it on each
+		// flush is what trips the challenge again. One host, and
+		// probe.NewCookieJar bounds the distinct keys a responder can make us
+		// hold. probe.CheckRedirect is what keeps a same-host 302 from
+		// rewriting a POST /cycles into a bodyless GET.
+		http: &http.Client{
+			Timeout:       cluster.PushTimeout,
+			Jar:           probe.NewCookieJar(),
+			CheckRedirect: probe.CheckRedirect,
+		},
 	}
 }
 
@@ -183,6 +206,7 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 	if err != nil {
 		return 0, httpResult{}, err
 	}
+	req.Header.Set("User-Agent", probe.UserAgent)
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if c.advertise != "" {
 		req.Header.Set(cluster.HeaderAdvertise, c.advertise)
@@ -211,6 +235,16 @@ func (c *Client) do(ctx context.Context, method, path string, headers map[string
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return resp.StatusCode, httpResult{}, ErrNotFound
+	}
+	// A 3xx that is not 304 is a redirect probe.CheckRedirect refused to
+	// follow: another host, a method net/http rewrote, or a chain past
+	// probe.MaxHTTPRedirects. None of them reached a master handler, so it is
+	// not the master's verdict on these bytes and must stay retryable —
+	// falling through to the decode below would let a redirected POST /cycles
+	// read as an accepted push and drop the batch.
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 && resp.StatusCode != http.StatusNotModified {
+		return resp.StatusCode, httpResult{body: buf},
+			fmt.Errorf("%w: %s %s: %d", ErrRedirected, method, path, resp.StatusCode)
 	}
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotModified {
 		if resp.StatusCode == http.StatusMisdirectedRequest {

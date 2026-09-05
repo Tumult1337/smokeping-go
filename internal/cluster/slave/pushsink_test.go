@@ -412,3 +412,39 @@ func TestBufferedHealthHopsReachAMasterThatUpgrades(t *testing.T) {
 		t.Fatalf("a marker-aware master was denied health hops: %+v", batch)
 	}
 }
+
+// Every request this client makes carries the program's own User-Agent. A
+// client that sets none sends Go's default, which names the negotiated protocol
+// and not the program, so the master and anything in front of it cannot tell
+// what called them.
+func TestEveryMasterRequestSendsTheProgramUserAgent(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path] = r.Header.Get("User-Agent")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ack":true}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "tok", "tokyo-1", "v9", "")
+	if err := c.Register(context.Background()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := c.PushCycles(context.Background(), cluster.CycleBatch{Source: "tokyo-1"}); err != nil {
+		t.Fatalf("PushCycles: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("saw %d paths, want 2: %v", len(seen), seen)
+	}
+	for path, ua := range seen {
+		if ua != probe.UserAgent {
+			t.Errorf("%s User-Agent = %q, want %q", path, ua, probe.UserAgent)
+		}
+	}
+}

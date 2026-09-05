@@ -4080,3 +4080,56 @@ func TestEvalOnUnparsedConditionDoesNotPanic(t *testing.T) {
 		t.Error("a Condition with no resolved getter evaluated true")
 	}
 }
+
+// Both outbound action clients set the program's own User-Agent. A client that
+// sets none sends Go's default, which names the negotiated protocol and not the
+// program, so the operator of the receiving server cannot tell what called it.
+func TestWebhookAndDiscordActionsSendTheProgramUserAgent(t *testing.T) {
+	for _, actionType := range []string{"webhook", "discord"} {
+		t.Run(actionType, func(t *testing.T) {
+			var mu sync.Mutex
+			var got string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				got = r.Header.Get("User-Agent")
+				mu.Unlock()
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+
+			cfg := &config.Config{
+				Interval: time.Minute,
+				Pings:    5,
+				Storage:  config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
+				Probes:   map[string]config.Probe{"icmp": {Type: "icmp", Timeout: time.Second}},
+				Alerts:   map[string]config.Alert{"down": {Condition: "loss_pct > 0", Sustained: 1, Actions: []string{"a"}}},
+				Actions:  map[string]config.Action{"a": {Type: actionType, URL: srv.URL}},
+				Targets: []config.Group{{
+					Group: "g", Targets: []config.Target{{Name: "a", Host: "1.1.1.1", Probe: "icmp"}},
+				}},
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("config: %v", err)
+			}
+			d := NewDispatcher(slog.New(slog.NewTextHandler(io.Discard, nil)), config.NewStore("/dev/null", cfg))
+			d.client = srv.Client()
+
+			ref := cfg.AllTargets()[0]
+			d.Dispatch(context.Background(), Event{
+				Time:      time.Unix(1_700_000_000, 0),
+				Target:    ref,
+				AlertName: "down",
+				Alert:     cfg.Alerts["down"],
+				Prev:      StatePending,
+				Next:      StateFiring,
+				Cycle:     scheduler.Cycle{Target: ref, ProbeName: "icmp", Sent: 5, LossCount: 5},
+			})
+
+			mu.Lock()
+			defer mu.Unlock()
+			if got != probe.UserAgent {
+				t.Errorf("User-Agent = %q, want %q", got, probe.UserAgent)
+			}
+		})
+	}
+}

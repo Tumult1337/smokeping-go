@@ -156,6 +156,7 @@ func (d *ActionDispatcher) webhook(ctx context.Context, a config.Action, body st
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", probe.UserAgent)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		d.log.Warn("webhook deliver", "err", httpFailureCategory(err))
@@ -280,6 +281,7 @@ func (d *ActionDispatcher) discord(ctx context.Context, a config.Action, body st
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", probe.UserAgent)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		d.log.Warn("discord deliver", "err", httpFailureCategory(err))
