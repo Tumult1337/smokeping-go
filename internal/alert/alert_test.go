@@ -1434,6 +1434,8 @@ func TestWebhookPayloadCarriesFiringSources(t *testing.T) {
 	store := config.NewStore("/dev/null", cfg)
 	d := NewDispatcher(slog.New(slog.DiscardHandler), store)
 	d.client = srv.Client()
+	d.webhookGracePeriod = 10 * time.Millisecond
+	t.Cleanup(d.Close)
 
 	ref := cfg.AllTargets()[0]
 	d.Dispatch(context.Background(), Event{
@@ -1476,12 +1478,124 @@ func TestWebhookPayloadCarriesFiringSources(t *testing.T) {
 		Alert: cfg.Alerts["down"], Prev: StateFiring, Next: StateOK,
 		Cycle: scheduler.Cycle{Target: ref, Source: "tokyo-1"},
 	})
-	calls = snapshot()
+	deadline := time.NewTimer(100 * time.Millisecond)
+	defer deadline.Stop()
+	for {
+		calls = snapshot()
+		if len(calls) == 2 {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("got %d webhook calls, want 2", len(calls))
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
 	if len(calls) != 2 {
 		t.Fatalf("got %d webhook calls, want 2", len(calls))
 	}
 	if sources, ok := calls[1]["sources"].([]any); !ok || len(sources) != 0 {
 		t.Fatalf("got sources %#v on resolve, want an empty array", calls[1]["sources"])
+	}
+}
+
+func TestWebhookResolveGraceCancelsOnRefire(t *testing.T) {
+	var mu sync.Mutex
+	var states []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		mu.Lock()
+		states = append(states, body["state"].(string))
+		mu.Unlock()
+	}))
+	defer srv.Close()
+
+	d := &ActionDispatcher{
+		log: slog.New(slog.DiscardHandler), client: srv.Client(),
+		webhookGracePeriod: 30 * time.Millisecond,
+	}
+	t.Cleanup(d.Close)
+	ref := config.TargetRef{Group: "g", Target: config.Target{Name: "a"}}
+	action := config.Action{Type: "webhook", URL: srv.URL}
+	event := func(prev, next State) Event {
+		return Event{Target: ref, AlertName: "loss", Prev: prev, Next: next}
+	}
+	args := []NamedAction{{Name: "hook", Action: action, Found: true}}
+	d.DispatchActions(context.Background(), event(StateOK, StateFiring), args)
+	d.DispatchActions(context.Background(), event(StateFiring, StateOK), args)
+	mu.Lock()
+	if len(states) != 1 || states[0] != string(StateFiring) {
+		t.Fatalf("before refire got states %v, want [firing]", states)
+	}
+	mu.Unlock()
+	d.DispatchActions(context.Background(), event(StateOK, StateFiring), args)
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(states) != 2 || states[1] != string(StateFiring) {
+		t.Fatalf("after refire got states %v, want [firing firing]", states)
+	}
+}
+
+func TestWebhookResolveGraceDeliversAfterQuietPeriod(t *testing.T) {
+	requests := make(chan map[string]any, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		requests <- body
+	}))
+	defer srv.Close()
+
+	d := &ActionDispatcher{
+		log: slog.New(slog.DiscardHandler), client: srv.Client(),
+		webhookGracePeriod: 20 * time.Millisecond,
+	}
+	t.Cleanup(d.Close)
+	ref := config.TargetRef{Group: "g", Target: config.Target{Name: "a"}}
+	action := config.Action{Type: "webhook", URL: srv.URL, Template: "no packetloss"}
+	args := []NamedAction{{Name: "hook", Action: action, Found: true}}
+	d.DispatchActions(context.Background(), Event{Target: ref, AlertName: "loss", Prev: StateOK, Next: StateFiring}, args)
+	if got := <-requests; got["state"] != string(StateFiring) {
+		t.Fatalf("firing state = %v", got["state"])
+	}
+	d.DispatchActions(context.Background(), Event{Target: ref, AlertName: "loss", Prev: StateFiring, Next: StateOK}, args)
+	select {
+	case got := <-requests:
+		if got["state"] != string(StateOK) || got["message"] != "no packetloss" {
+			t.Fatalf("resolve payload = %v", got)
+		}
+	case <-time.After(10 * time.Millisecond):
+	}
+	select {
+	case got := <-requests:
+		if got["state"] != string(StateOK) || got["message"] != "no packetloss" {
+			t.Fatalf("resolve payload = %v", got)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("resolve webhook was not delivered after grace period")
+	}
+}
+
+func TestWebhookResolveGraceCloseCancels(t *testing.T) {
+	called := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called <- struct{}{} }))
+	defer srv.Close()
+
+	d := &ActionDispatcher{log: slog.New(slog.DiscardHandler), client: srv.Client(), webhookGracePeriod: 20 * time.Millisecond}
+	ref := config.TargetRef{Group: "g", Target: config.Target{Name: "a"}}
+	action := config.Action{Type: "webhook", URL: srv.URL}
+	d.DispatchActions(context.Background(), Event{Target: ref, AlertName: "loss", Prev: StateFiring, Next: StateOK}, []NamedAction{{Name: "hook", Action: action, Found: true}})
+	d.Close()
+	select {
+	case <-called:
+		t.Fatal("resolve webhook delivered after dispatcher close")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

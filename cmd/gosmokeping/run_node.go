@@ -90,6 +90,7 @@ func runNode(ctx context.Context, log *slog.Logger, configPath, version string) 
 	// lets a later SIGHUP that adds the first alert take effect via Refresh —
 	// otherwise the nil→non-nil transition would require a process restart.
 	dispatcher := alert.NewDispatcher(log, store)
+	defer dispatcher.Close()
 	evaluator, err := alert.NewEvaluator(log, store, dispatcher)
 	if err != nil {
 		return fmt.Errorf("init alert evaluator: %w", err)

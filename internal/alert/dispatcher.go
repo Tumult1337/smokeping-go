@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 	"unicode/utf8"
@@ -32,8 +33,21 @@ type ActionDispatcher struct {
 	// waiting actionTimeout for it. Their sum is what Evaluator.deliver
 	// budgets per action, which is why WaitDelay is subtracted from the
 	// context rather than added to it.
-	actionBudget time.Duration
-	waitDelay    time.Duration
+	actionBudget       time.Duration
+	waitDelay          time.Duration
+	webhookGracePeriod time.Duration
+	pendingMu          sync.Mutex
+	pending            map[webhookKey][]*pendingWebhookResolve
+	closed             bool
+}
+
+type webhookKey struct {
+	target string
+	alert  string
+}
+
+type pendingWebhookResolve struct {
+	cancel context.CancelFunc
 }
 
 func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
@@ -42,8 +56,10 @@ func NewDispatcher(log *slog.Logger, store *config.Store) *ActionDispatcher {
 		store:  store,
 		client: &http.Client{Timeout: actionTimeout},
 
-		actionBudget: actionTimeout,
-		waitDelay:    execWaitDelay,
+		actionBudget:       actionTimeout,
+		waitDelay:          execWaitDelay,
+		webhookGracePeriod: 2 * time.Minute,
+		pending:            make(map[webhookKey][]*pendingWebhookResolve),
 	}
 }
 
@@ -98,6 +114,10 @@ func (d *ActionDispatcher) DispatchActions(ctx context.Context, e Event, actions
 	if !d.Wants(e) {
 		return
 	}
+	key := webhookKey{target: e.Target.ID(), alert: e.AlertName}
+	if e.Next == StateFiring {
+		d.cancelPending(key)
+	}
 	for _, na := range actions {
 		name, action := na.Name, na.Action
 		if !na.Found {
@@ -111,6 +131,10 @@ func (d *ActionDispatcher) DispatchActions(ctx context.Context, e Event, actions
 		}
 		switch action.Type {
 		case "webhook":
+			if e.Prev == StateFiring && e.Next == StateOK {
+				d.delayWebhook(key, action, body, e)
+				continue
+			}
 			d.webhook(ctx, action, body, e)
 		case "discord":
 			d.discord(ctx, action, body, e)
@@ -123,6 +147,79 @@ func (d *ActionDispatcher) DispatchActions(ctx context.Context, e Event, actions
 		default:
 			d.log.Warn("unknown action type", "type", action.Type, "action", name)
 		}
+	}
+}
+
+func (d *ActionDispatcher) delayWebhook(key webhookKey, action config.Action, body string, e Event) {
+	grace := d.webhookGracePeriod
+	if grace <= 0 {
+		grace = 2 * time.Minute
+	}
+	timerCtx, cancel := context.WithCancel(context.Background())
+	pending := &pendingWebhookResolve{cancel: cancel}
+	d.pendingMu.Lock()
+	if d.closed {
+		d.pendingMu.Unlock()
+		cancel()
+		return
+	}
+	if d.pending == nil {
+		d.pending = make(map[webhookKey][]*pendingWebhookResolve)
+	}
+	d.pending[key] = append(d.pending[key], pending)
+	d.pendingMu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			deliveryCtx, cancelDelivery := context.WithTimeout(timerCtx, actionTimeout)
+			d.webhook(deliveryCtx, action, body, e)
+			cancelDelivery()
+		case <-timerCtx.Done():
+		}
+		d.removePending(key, pending)
+	}()
+}
+
+func (d *ActionDispatcher) cancelPending(key webhookKey) {
+	d.pendingMu.Lock()
+	cancels := d.pending[key]
+	delete(d.pending, key)
+	d.pendingMu.Unlock()
+	for _, pending := range cancels {
+		pending.cancel()
+	}
+}
+
+func (d *ActionDispatcher) removePending(key webhookKey, pending *pendingWebhookResolve) {
+	d.pendingMu.Lock()
+	defer d.pendingMu.Unlock()
+	cancels := d.pending[key]
+	for i, pendingCancel := range cancels {
+		if pendingCancel == pending {
+			d.pending[key] = append(cancels[:i], cancels[i+1:]...)
+			if len(d.pending[key]) == 0 {
+				delete(d.pending, key)
+			}
+			return
+		}
+	}
+}
+
+// Close cancels webhook resolves that have not reached their grace period.
+func (d *ActionDispatcher) Close() {
+	d.pendingMu.Lock()
+	d.closed = true
+	cancels := make([]*pendingWebhookResolve, 0)
+	for key, pending := range d.pending {
+		cancels = append(cancels, pending...)
+		delete(d.pending, key)
+	}
+	d.pendingMu.Unlock()
+	for _, pending := range cancels {
+		pending.cancel()
 	}
 }
 
