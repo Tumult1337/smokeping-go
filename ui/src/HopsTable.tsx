@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getHops, type HopPoint } from "./api";
+import { getHops, type CycleLoss, type HopPoint } from "./api";
 import { groupBySource } from "./mtrUtils";
 import { lossTextColor } from "./palette";
 
@@ -15,13 +15,15 @@ interface Props {
   // Hide hops whose loss is 0% across the window. Used at wide ranges
   // (≥ 6h) to collapse the clean-hop noise in long paths.
   hideZeroLoss?: boolean;
+  probeType?: string;
 }
 
 // Renders an MTR path for a target: one row per hop showing TTL, discovered
 // router IP, sample count, loss%, and a min/avg/max latency bar. Defaults to
 // the latest cycle; when atSec is provided, shows the nearest historical one.
-export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hideZeroLoss }: Props) {
+export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hideZeroLoss, probeType }: Props) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
+  const [cycleLoss, setCycleLoss] = useState<CycleLoss[] | null>(null);
   const [cycleTime, setCycleTime] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const prevKeyRef = useRef<string>("");
@@ -41,6 +43,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
       .then((r) => {
         const rows = r.hops ?? [];
         setHops(rows);
+        setCycleLoss(r.target_loss ?? null);
         setCycleTime(rows.length > 0 ? rows[0].Time : null);
       })
       .catch((e) => {
@@ -55,7 +58,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
     return (
       <>
         {atSec != null && (
-          <HopsHeader atSec={atSec} cycleTime={null} onResetAt={onResetAt} />
+          <HopsHeader atSec={atSec} cycleTime={null} rounds={roundsForSource(cycleLoss, source, probeType)} onResetAt={onResetAt} />
         )}
         <div className="empty">
           {atSec != null ? "No MTR cycle near this time" : "No hop data yet"}
@@ -68,7 +71,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
   if (visible.length === 0) {
     return (
       <>
-        <HopsHeader atSec={atSec} cycleTime={cycleTime} onResetAt={onResetAt} />
+        <HopsHeader atSec={atSec} cycleTime={cycleTime} rounds={roundsForSource(cycleLoss, source, probeType)} onResetAt={onResetAt} />
         <div className="empty">All hops clean in this range</div>
       </>
     );
@@ -87,6 +90,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
       <HopsHeader
         atSec={atSec}
         cycleTime={groups.length === 1 ? cycleTime : null}
+        rounds={groups.length === 1 ? roundsForSource(cycleLoss, groups[0].source, probeType) : undefined}
         onResetAt={onResetAt}
       />
       {groups.map((g) => (
@@ -198,10 +202,12 @@ export function HopsPath({
 function HopsHeader({
   atSec,
   cycleTime,
+  rounds,
   onResetAt,
 }: {
   atSec?: number;
   cycleTime: string | null;
+  rounds?: number;
   onResetAt?: () => void;
 }) {
   if (atSec == null) return null;
@@ -210,7 +216,7 @@ function HopsHeader({
     : new Date(atSec * 1000).toLocaleString();
   return (
     <div className="hops-header">
-      <span>Showing cycle at {label}</span>
+      <span>Showing cycle at {label}{rounds != null ? ` · MTR rounds: ${rounds}` : ""}</span>
       {onResetAt && (
         <button className="hops-reset" onClick={onResetAt} title="Show latest">
           ← latest
@@ -218,6 +224,12 @@ function HopsHeader({
       )}
     </div>
   );
+}
+
+function roundsForSource(cycles: CycleLoss[] | null, source: string | undefined, probeType: string | undefined): number | undefined {
+  if (probeType !== "mtr" || cycles == null) return undefined;
+  const row = cycles.find((c) => (c.Source ?? "") === (source ?? ""));
+  return row?.Sent;
 }
 
 function HopBar({
@@ -266,4 +278,3 @@ function HopBar({
     </div>
   );
 }
-

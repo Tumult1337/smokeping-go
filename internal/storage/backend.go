@@ -222,6 +222,10 @@ type HopsResult struct {
 	// for a source whose cycle sent nothing and so wrote no probe_cycle row,
 	// and empty for QueryHopsTimeline, which buckets across many cycles.
 	Cycles []CycleCounters
+	// TimelineLoss carries target-level loss aggregated on the same bucket grid
+	// as QueryHopsTimeline. It is separate from hop rows because target loss is
+	// counted once per probe cycle, while a trace can emit several target rows.
+	TimelineLoss []HopTimelineLoss
 }
 
 // CycleCounters is one cycle's own round accounting for one source. Loss at
@@ -229,6 +233,15 @@ type HopsResult struct {
 // rows: a per-round walk marks the target at every TTL it ever answered at,
 // so summing those rows counts one round once per marked TTL.
 type CycleCounters struct {
+	Source    string
+	Time      time.Time
+	Sent      int64
+	LossCount int64
+	LossPct   float64
+}
+
+// HopTimelineLoss is one source's target-level loss for one timeline bucket.
+type HopTimelineLoss struct {
 	Source    string
 	Time      time.Time
 	Sent      int64

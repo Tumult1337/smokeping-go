@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getHopsTimeline, type HopPoint } from "./api";
+import { getHopsTimeline, type HopPoint, type HopTimelineLoss } from "./api";
 import { lossColor } from "./palette";
 import { cycleAtSec } from "./chartUtils";
 
@@ -62,6 +62,7 @@ interface Props {
   // The probe origin this heatmap draws. Required: /hops/timeline serves one
   // origin per request, and "" is the untagged pre-cluster origin, not "all".
   source: string;
+  probeType?: string;
 }
 
 // Per-hop packet-loss heatmap over a time window for one probe origin. The
@@ -75,8 +76,10 @@ export function MtrHeatmap({
   onCyclePick,
   selectedSec,
   source,
+  probeType,
 }: Props) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
+  const [targetLoss, setTargetLoss] = useState<HopTimelineLoss[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   const [stepSec, setStepSec] = useState(0);
@@ -96,6 +99,7 @@ export function MtrHeatmap({
       setStepSec(0);
     }
     setErr(null);
+    setTargetLoss([]);
     // The backend enforces a 7d cap for timeline queries — if the user
     // selected a wider range (30d, 1y) we just don't render anything.
     const span = toSec - fromSec;
@@ -114,6 +118,7 @@ export function MtrHeatmap({
       .then((r) => {
         setHops(r.hops ?? []);
         setStepSec(r.step_sec ?? 0);
+        setTargetLoss(r.target_loss ?? []);
       })
       .catch((e) => {
         // AbortError is the controller cleaning up — not a user-visible error.
@@ -134,6 +139,8 @@ export function MtrHeatmap({
       <PathHeatmap
         source={source}
         hops={hops}
+        targetLoss={targetLoss}
+        probeType={probeType}
         fromSec={fromSec}
         toSec={toSec}
         stepSec={stepSec}
@@ -156,6 +163,8 @@ const MIN_COL_PX = 3;
 function PathHeatmap({
   source,
   hops,
+  targetLoss,
+  probeType,
   fromSec,
   toSec,
   stepSec,
@@ -165,6 +174,8 @@ function PathHeatmap({
 }: {
   source: string;
   hops: HopPoint[];
+  targetLoss: HopTimelineLoss[];
+  probeType?: string;
   fromSec: number;
   toSec: number;
   stepSec: number;
@@ -191,6 +202,7 @@ function PathHeatmap({
     hop: number;
     sec: number;
     p: HopPoint;
+    target?: HopTimelineLoss;
   } | null>(null);
 
   // hops is replaced on every 15s refresh, so a tooltip left open describes a
@@ -237,6 +249,15 @@ function PathHeatmap({
       visibleHops: visible,
     };
   }, [hops]);
+
+  const targetLossByCycle = useMemo(() => {
+    const byCycle = new Map<number, HopTimelineLoss>();
+    for (const loss of targetLoss) {
+      const t = Math.floor(new Date(loss.Time).getTime() / 1000);
+      byCycle.set(t, loss);
+    }
+    return byCycle;
+  }, [targetLoss]);
 
   // Adaptive height: at least 14px per hop row, plus a fixed bottom axis
   // strip. Clamped so a 30-hop path doesn't push the page to 500+px.
@@ -327,6 +348,24 @@ function PathHeatmap({
       }
     }
 
+    // Target loss is measured once per cycle, independently of the hop rows.
+    // Put it on the last path row so an end-to-end loss remains visible when
+    // no hop row carries the lost target probes.
+    const targetRow = visibleHops[visibleHops.length - 1];
+    const targetRowData = rows.get(targetRow);
+    if (targetRowData) {
+      for (const t of cycles) {
+        const target = targetLossByCycle.get(t);
+        if (!target || target.LossPct <= 0) continue;
+        const p = targetRowData.get(t);
+        const hopLoss = p ? ((p as { MaxLossPct?: number }).MaxLossPct ?? p.LossPct) : 0;
+        if (hopLoss >= target.LossPct) continue;
+        const x = stepSec > 0 ? xForSec(t) : xForSec(t) - colW / 2;
+        ctx.fillStyle = lossColor(target.LossPct, heatOk);
+        ctx.fillRect(x, 2 + visibleHops.indexOf(targetRow) * actualRowH, Math.max(1, colW), actualRowH - 1);
+      }
+    }
+
     // Hop index gutter labels.
     ctx.fillStyle = "#8a93a6";
     ctx.font = '10px "JetBrains Mono Variable", ui-monospace, monospace';
@@ -367,7 +406,7 @@ function PathHeatmap({
       ctx.fillStyle = markerFill;
       ctx.fillRect(Math.round(x), 2, 2, plotH - 4);
     }
-  }, [rows, cycles, visibleHops, height, fromSec, toSec, selectedSec, stepSec, repaintCount]);
+  }, [rows, cycles, visibleHops, targetLossByCycle, height, fromSec, toSec, selectedSec, stepSec, repaintCount]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -414,7 +453,14 @@ function PathHeatmap({
       return;
     }
     const rect = wrap.getBoundingClientRect();
-    setHover({ x: e.clientX - rect.left, y: e.clientY - rect.top, hop, sec, p });
+    setHover({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+      hop,
+      sec,
+      p,
+      target: targetLossByCycle.get(sec),
+    });
   }
 
   // worstCycleSec maps a clicked bucket-start (unix sec, as keyed in `rows`) to
@@ -548,6 +594,12 @@ function PathHeatmap({
             loss {(hover.p.MaxLossPct ?? hover.p.LossPct).toFixed(1)}%
             {hover.p.MaxLossPct != null ? " (worst cycle)" : ""}
           </div>
+          {hover.target && hover.target.LossPct > 0 && (
+            <div>
+              target loss {hover.target.LossPct.toFixed(1)}%
+              {probeType === "mtr" ? ` · ${hover.target.Sent} MTR rounds` : ""}
+            </div>
+          )}
           {/* Absent on a pre-step_sec server and blanked with the address on
               redacted rows — both render as an ordinary cell. */}
           {hover.p.Unreach && (

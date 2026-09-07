@@ -18,6 +18,7 @@ interface Props {
   // down to one source-filtered (path + heatmap) pair instead of the
   // multi-source list of collapsibles.
   sourceParam: string | null;
+  probeType: string;
 }
 
 // MtrSection owns the MTR view for the active target. Two modes:
@@ -40,6 +41,7 @@ export function MtrSection({
   onResetAt,
   onCyclePick,
   sourceParam,
+  probeType,
 }: Props) {
   // Single-source path stays on the existing components — HopsTable's
   // own fetch + render is simpler than re-implementing it here, and the
@@ -55,6 +57,7 @@ export function MtrSection({
         onResetAt={onResetAt}
         onCyclePick={onCyclePick}
         source={sourceParam}
+        probeType={probeType}
       />
     );
   }
@@ -67,6 +70,7 @@ export function MtrSection({
       atSec={atSec}
       onResetAt={onResetAt}
       onCyclePick={onCyclePick}
+      probeType={probeType}
     />
   );
 }
@@ -80,6 +84,7 @@ function SingleSourceLayout({
   onResetAt,
   onCyclePick,
   source,
+  probeType,
 }: {
   targetId: string;
   refreshTick: number;
@@ -89,6 +94,7 @@ function SingleSourceLayout({
   onResetAt: () => void;
   onCyclePick: (timeSec: number, source?: string) => void;
   source: string;
+  probeType: string;
 }) {
   return (
     <>
@@ -103,6 +109,7 @@ function SingleSourceLayout({
           onResetAt={onResetAt}
           source={source}
           hideZeroLoss={false}
+          probeType={probeType}
         />
       </div>
       {fromSec != null && toSec != null && (
@@ -116,6 +123,7 @@ function SingleSourceLayout({
             onCyclePick={onCyclePick}
             selectedSec={atSec ?? undefined}
             source={source}
+            probeType={probeType}
           />
         </div>
       )}
@@ -131,6 +139,7 @@ function MultiSourceLayout({
   atSec,
   onResetAt,
   onCyclePick,
+  probeType,
 }: {
   targetId: string;
   refreshTick: number;
@@ -139,6 +148,7 @@ function MultiSourceLayout({
   atSec: number | null;
   onResetAt: () => void;
   onCyclePick: (timeSec: number, source?: string) => void;
+  probeType: string;
 }) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [cycleLoss, setCycleLoss] = useState<CycleLoss[] | null>(null);
@@ -225,6 +235,7 @@ function MultiSourceLayout({
         // stale-while-revalidate guards each of them implements.
         onCyclePick={(t) => onCyclePick(t)}
         source={groups[0].source}
+        probeType={probeType}
       />
     );
   }
@@ -279,6 +290,9 @@ function MultiSourceLayout({
                     }
                   >
                     loss {endToEndLoss == null ? "—" : `${endToEndLoss.toFixed(1)}%`}
+                    {probeType === "mtr" && endToEndLoss != null && (
+                      <> · rounds {roundsForSource(cycleLoss, g.source)}</>
+                    )}
                   </span>
                 </span>
               </button>
@@ -305,6 +319,7 @@ function MultiSourceLayout({
                       onCyclePick={(t) => onCyclePick(t)}
                       selectedSec={atSec ?? undefined}
                       source={g.source}
+                      probeType={probeType}
                     />
                   )}
                 </div>
@@ -326,4 +341,10 @@ function lossForSource(cycles: CycleLoss[] | null, source: string): number | nul
   const row = cycles.find((c) => (c.Source ?? "") === source);
   if (row == null || row.Sent <= 0) return null;
   return row.LossPct;
+}
+
+function roundsForSource(cycles: CycleLoss[] | null, source: string): number | null {
+  if (cycles == null) return null;
+  const row = cycles.find((c) => (c.Source ?? "") === source);
+  return row?.Sent ?? null;
 }

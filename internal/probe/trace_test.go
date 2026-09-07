@@ -242,7 +242,8 @@ func TestWalkRoundsMarksEarlyEchoRow(t *testing.T) {
 	}
 }
 
-// Cancellation stops the walk but still emits what was collected.
+// Cancellation stops the walk but still emits what was collected. The partial
+// round never reached its terminal, so it is not a target-loss observation.
 func TestWalkRoundsEmitsPartialOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
@@ -257,8 +258,8 @@ func TestWalkRoundsEmitsPartialOnCancel(t *testing.T) {
 	if stats.reached > 0 {
 		t.Fatal("nothing echoed; reached must be false")
 	}
-	if stats.attempted != 1 {
-		t.Fatalf("attempted = %d, want only the round that ran before cancel", stats.attempted)
+	if stats.attempted != 0 {
+		t.Fatalf("attempted = %d, want no completed rounds after mid-round cancel", stats.attempted)
 	}
 	if len(hops) != 2 {
 		t.Fatalf("got %d hops, want the 2 collected before cancel: %+v", len(hops), hops)

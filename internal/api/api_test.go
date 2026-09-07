@@ -29,6 +29,7 @@ type stubReader struct {
 	// cycleCounters is what the hop reads pair with s.hops: target loss comes
 	// from the cycle, not from a hop row.
 	cycleCounters []storage.CycleCounters
+	timelineLoss  []storage.HopTimelineLoss
 	overview      []storage.OverviewSourceRow
 	err           error
 	// lastSource captures the source filter passed to the most recent query,
@@ -92,7 +93,7 @@ func (s *stubReader) QueryHopsAt(ctx context.Context, ref config.TargetRef, at t
 func (s *stubReader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, from, to time.Time, f storage.QueryFilter) (storage.HopsResult, error) {
 	s.lastSource = f.Source
 	s.queries++
-	return storage.HopsResult{Hops: s.hops}, s.err
+	return storage.HopsResult{Hops: s.hops, TimelineLoss: s.timelineLoss}, s.err
 }
 
 func (s *stubReader) QueryOverview(ctx context.Context, from, to time.Time, targets []config.TargetRef) ([]storage.OverviewSourceRow, error) {
@@ -1809,6 +1810,35 @@ func TestGetHopsOmitsTargetLossWithoutAMeasurement(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"target_loss":[]`) {
 		t.Fatalf("target_loss is not an empty array: %s", raw)
+	}
+}
+
+func TestGetHopsTimelineCarriesTargetLoss(t *testing.T) {
+	bucket := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	r := &stubReader{
+		hops: []storage.HopPoint{{Source: "master", Time: bucket, Index: 1, IP: "10.0.0.1"}},
+		timelineLoss: []storage.HopTimelineLoss{{
+			Source: "master", Time: bucket, Sent: 10, LossCount: 2, LossPct: 20,
+		}},
+	}
+	srv := newTestServer(t, withReader(r))
+
+	var body struct {
+		TargetLoss []struct {
+			Source    string  `json:"Source"`
+			Time      string  `json:"Time"`
+			Sent      int64   `json:"Sent"`
+			LossCount int64   `json:"LossCount"`
+			LossPct   float64 `json:"LossPct"`
+		} `json:"target_loss"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline?source=master&from=-24h", &body)
+	if len(body.TargetLoss) != 1 {
+		t.Fatalf("got %d target_loss entries, want one: %+v", len(body.TargetLoss), body.TargetLoss)
+	}
+	got := body.TargetLoss[0]
+	if got.Source != "master" || got.Sent != 10 || got.LossCount != 2 || got.LossPct != 20 {
+		t.Fatalf("target_loss = %+v, want master 10/2/20%%", got)
 	}
 }
 

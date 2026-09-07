@@ -192,6 +192,15 @@ export interface HopsTimelineResponse {
   // holds a single bucket.
   step_sec: number;
   hops: HopPoint[];
+  target_loss: HopTimelineLoss[];
+}
+
+export interface HopTimelineLoss {
+  Source: string;
+  Time: string;
+  Sent: number;
+  LossCount: number;
+  LossPct: number;
 }
 
 export interface OverviewRow {

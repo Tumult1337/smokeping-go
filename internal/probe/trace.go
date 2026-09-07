@@ -158,9 +158,9 @@ type ttlReply struct {
 // stepFunc sends one probe at ttl during round and reports what answered.
 type stepFunc func(ctx context.Context, round, ttl int) ttlReply
 
-// roundStats counts the trace rounds that sent at least one probe and the
-// subset of them the target echoed in. Attempted trails the requested round
-// count when the cycle deadline cuts the walk short.
+// roundStats counts completed trace rounds and the subset of them the target
+// echoed in. A cycle deadline can leave hop rows from a partial round, but that
+// round is excluded from target-level accounting.
 type roundStats struct {
 	attempted int
 	reached   int
@@ -192,12 +192,13 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 		if ctx.Err() != nil {
 			break
 		}
+		roundComplete := false
+		roundReached := false
 		for ttl := 1; ttl <= maxTTL; ttl++ {
 			if ctx.Err() != nil {
 				break
 			}
 			r := step(ctx, round, ttl)
-			stats.attempted = round + 1
 			if r.err != nil || !r.addr.IsValid() {
 				agg[ttl].losses++
 			} else {
@@ -221,16 +222,25 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 				}
 			}
 			if r.kind == replyEcho {
-				stats.reached++
+				roundReached = true
 			}
 			if r.kind == replyEcho || r.kind == replyUnreachable {
+				roundComplete = true
 				break
 			}
-			if ttl < maxTTL {
-				select {
-				case <-ctx.Done():
-				case <-time.After(spacing):
-				}
+			if ttl == maxTTL {
+				roundComplete = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(spacing):
+			}
+		}
+		if roundComplete {
+			stats.attempted++
+			if roundReached {
+				stats.reached++
 			}
 		}
 	}

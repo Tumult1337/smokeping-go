@@ -253,6 +253,9 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		result.Sent++
 		rtt, err := i.send(ctx, conn, ip, isV6, id, seq, timeout)
 		if err != nil {
+			if ctx.Err() != nil {
+				return result, ctx.Err()
+			}
 			result.LossCount++
 		} else {
 			result.RTTs = append(result.RTTs, rtt)

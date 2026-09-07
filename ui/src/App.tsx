@@ -1011,6 +1011,7 @@ export default function App() {
                 }}
                 onCyclePick={handleCyclePick}
                 sourceParam={pickedSource ?? sourceParam ?? null}
+                probeType={selected.probe_type ?? ""}
               />
             )}
           </>

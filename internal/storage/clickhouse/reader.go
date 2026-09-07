@@ -652,9 +652,53 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 	if err != nil {
 		return storage.HopsResult{}, err
 	}
-	// No Cycles: a grid slot spans whatever cycles fell in it, so there is no
-	// single cycle whose counters it could carry.
-	return storage.HopsResult{Hops: hops}, nil
+	loss, err := r.queryHopTimelineLoss(ctx, ref, from, to, f.Source, f.Step)
+	if err != nil {
+		return storage.HopsResult{}, err
+	}
+	return storage.HopsResult{Hops: hops, TimelineLoss: loss}, nil
+}
+
+// queryHopTimelineLoss aggregates probe_cycle independently of probe_hop.
+// Target loss is one count per cycle; joining or summing hop rows would count
+// the same MTR round once for every TTL at which the target replied.
+func (r *Reader) queryHopTimelineLoss(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopTimelineLoss, error) {
+	if step <= 0 {
+		return nil, fmt.Errorf("query hop timeline loss: step %s is not a grid", step)
+	}
+	slot := fmt.Sprintf("toStartOfInterval(timestamp, INTERVAL %d SECOND)", int(step.Seconds()))
+	q := `
+SELECT ` + slot + ` AS bucket_ts,
+       source,
+       sum(sent),
+       sum(lost),
+       if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent))
+FROM probe_cycle
+WHERE target_id = ?
+  AND target_group = ?
+  AND source = ?
+  AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + `
+GROUP BY bucket_ts, source
+ORDER BY bucket_ts` + hopRowLimit(hopTimelineRowCap)
+	rows, err := r.conn.Query(ctx, q, ref.Target.Name, ref.Group, source, from.UnixMilli(), to.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("query hop timeline loss: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // rows.Err() returned below captures close-time errors
+	var out []storage.HopTimelineLoss
+	for rows.Next() {
+		var p storage.HopTimelineLoss
+		var sent, lost uint64
+		var lossPct float64
+		if err := rows.Scan(&p.Time, &p.Source, &sent, &lost, &lossPct); err != nil {
+			return nil, err
+		}
+		p.Sent = int64(sent)
+		p.LossCount = int64(lost)
+		p.LossPct = lossPct
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // queryHopsGrid reads the heatmap's grid — one row per (bucket, ttl) for one

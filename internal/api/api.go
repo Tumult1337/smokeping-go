@@ -603,6 +603,13 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 	if slavehealth.IsHealthGroup(ref.Group) {
 		hops = redactAllHopAddresses(hops)
 	}
+	loss := make([]hopTimelineLossDTO, len(res.TimelineLoss))
+	for i, p := range res.TimelineLoss {
+		loss[i] = hopTimelineLossDTO{
+			Source: p.Source, Time: p.Time, Sent: p.Sent,
+			LossCount: p.LossCount, LossPct: p.LossPct,
+		}
+	}
 	// Slim DTO: the heatmap renders only LossPct + MaxLossPct, so the
 	// per-row RTT fields (Min/Max/Mean/Median) the storage row carries
 	// for the path-table view get dropped here. Saves ~40% of the JSON
@@ -628,12 +635,21 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 	// the rows: a window holding a single bucket carries no gap to measure, and
 	// guessing from row count paints that bucket across the whole window.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"target":   ref.ID(),
-		"from":     from,
-		"to":       to,
-		"step_sec": int64(step / time.Second),
-		"hops":     dtos,
+		"target":      ref.ID(),
+		"from":        from,
+		"to":          to,
+		"step_sec":    int64(step / time.Second),
+		"hops":        dtos,
+		"target_loss": loss,
 	})
+}
+
+type hopTimelineLossDTO struct {
+	Source    string    `json:"Source"`
+	Time      time.Time `json:"Time"`
+	Sent      int64     `json:"Sent"`
+	LossCount int64     `json:"LossCount"`
+	LossPct   float64   `json:"LossPct"`
 }
 
 // cycleCounterDTOs serves storage.CycleCounters as-is (its five fields are
