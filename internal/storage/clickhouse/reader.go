@@ -642,6 +642,7 @@ func scanHopRows(rows driver.Rows) ([]storage.HopPoint, error) {
 		p.WorstTime = p.Time // raw rows are one cycle each
 		p.LossCount = int64(lost)
 		p.Sent = int64(sent)
+		p.ReplyCount = p.Sent - p.LossCount
 		out = append(out, p)
 	}
 	return hopRowsWithinCap(hopRowCap, out, rows.Err())
@@ -672,7 +673,8 @@ SELECT ` + slot + ` AS bucket_ts,
        source,
        sum(sent),
        sum(lost),
-       if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent))
+       if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)),
+       argMax(timestamp, loss_pct)
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
@@ -690,7 +692,7 @@ ORDER BY bucket_ts` + hopRowLimit(hopTimelineRowCap)
 		var p storage.HopTimelineLoss
 		var sent, lost uint64
 		var lossPct float64
-		if err := rows.Scan(&p.Time, &p.Source, &sent, &lost, &lossPct); err != nil {
+		if err := rows.Scan(&p.Time, &p.Source, &sent, &lost, &lossPct, &p.WorstTime); err != nil {
 			return nil, err
 		}
 		p.Sent = int64(sent)
@@ -725,6 +727,7 @@ SELECT ` + slot + ` AS bucket_ts,
        worst.2                                             AS worst_unreach,
        sum(sent)                                           AS total_sent,
        sum(lost)                                           AS total_lost,
+       sum(sent) - sum(lost)                               AS total_replies,
        if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS avg_loss_pct,
        max(loss_pct)                                       AS max_loss_pct,
        worst.3                                             AS worst_ts
@@ -744,16 +747,17 @@ ORDER BY bucket_ts, ttl` + hopRowLimit(hopTimelineRowCap)
 	for rows.Next() {
 		var p storage.HopPoint
 		var ttl uint8
-		var sent, lost uint64
+		var sent, lost, replies uint64
 		var lossPct float64
 		var maxLossPct float32
 		var worstTs time.Time
-		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &p.Unreach, &sent, &lost, &lossPct, &maxLossPct, &worstTs); err != nil {
+		if err := rows.Scan(&p.Time, &p.Source, &ttl, &p.IP, &p.Unreach, &sent, &lost, &replies, &lossPct, &maxLossPct, &worstTs); err != nil {
 			return nil, err
 		}
 		p.Index = int64(ttl)
 		p.Sent = int64(sent)
 		p.LossCount = int64(lost)
+		p.ReplyCount = int64(replies)
 		p.LossPct = lossPct
 		p.MaxLossPct = float64(maxLossPct)
 		p.WorstTime = worstTs

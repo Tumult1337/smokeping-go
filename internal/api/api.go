@@ -607,7 +607,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 	for i, p := range res.TimelineLoss {
 		loss[i] = hopTimelineLossDTO{
 			Source: p.Source, Time: p.Time, Sent: p.Sent,
-			LossCount: p.LossCount, LossPct: p.LossPct,
+			LossCount: p.LossCount, LossPct: p.LossPct, WorstTime: p.WorstTime,
 		}
 	}
 	// Slim DTO: the heatmap renders only LossPct + MaxLossPct, so the
@@ -650,6 +650,7 @@ type hopTimelineLossDTO struct {
 	Sent      int64     `json:"Sent"`
 	LossCount int64     `json:"LossCount"`
 	LossPct   float64   `json:"LossPct"`
+	WorstTime time.Time `json:"WorstTime"`
 }
 
 // cycleCounterDTOs serves storage.CycleCounters as-is (its five fields are
@@ -677,6 +678,7 @@ type hopTimelineDTO struct {
 	MaxLossPct float64   `json:"MaxLossPct"`
 	LossCount  int64     `json:"LossCount"`
 	Sent       int64     `json:"Sent"`
+	ReplyCount int64     `json:"ReplyCount"`
 	// Unreach is the closed-set unreachable label aggregated over the bucket.
 	// TargetReply deliberately has no counterpart here: the heatmap has no
 	// consumer for it, and a field with no consumer on an unauthenticated

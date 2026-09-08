@@ -256,7 +256,10 @@ function MultiSourceLayout({
       <div className="mtr-sections">
         {groups.map((g) => {
           const isCollapsed = collapsed.has(g.source);
-          const endToEndLoss = lossForSource(cycleLoss, g.source);
+          // For ICMP targets, probe_cycle is the ordinary echo batch while
+          // these rows come from a separate opportunistic trace. Its loss is
+          // not MTR loss, so only show the cycle counter for real MTR probes.
+          const endToEndLoss = probeType === "mtr" ? lossForSource(cycleLoss, g.source) : null;
           const scale = Math.max(1, ...g.hops.map((h) => h.Max));
           return (
             <div key={g.source || "(unspecified)"} className="mtr-section">

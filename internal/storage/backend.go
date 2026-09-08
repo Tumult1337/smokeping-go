@@ -247,6 +247,7 @@ type HopTimelineLoss struct {
 	Sent      int64
 	LossCount int64
 	LossPct   float64
+	WorstTime time.Time
 }
 
 // HopPoint is the most recent stats for one hop on an MTR path. Source
@@ -282,6 +283,7 @@ type HopPoint struct {
 	MaxLossPct float64
 	LossCount  int64
 	Sent       int64
+	ReplyCount int64
 	// WorstTime is the exact timestamp of the worst-loss cycle inside the
 	// bucket, read off the same row its address came from. Lets a
 	// heatmap-cell click jump to the cycle that justifies the cell's colour

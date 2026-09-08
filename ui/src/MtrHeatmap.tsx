@@ -342,18 +342,22 @@ function PathHeatmap({
           // muted "no reply" neutral instead of the loss ramp so transit noise
           // doesn't read as a genuine outage; only hops that actually replied
           // get the red ramp.
-          ctx.fillStyle = p.IP ? lossColor(worst, heatOk) : noReply;
+          const replyCount = p.ReplyCount ?? Math.max(0, p.Sent - p.LossCount);
+          ctx.fillStyle = replyCount > 0 ? lossColor(worst, heatOk) : noReply;
           ctx.fillRect(x, y, Math.max(1, colW), actualRowH - 1);
         }
       }
     }
 
-    // Target loss is measured once per cycle, independently of the hop rows.
-    // Put it on the last path row so an end-to-end loss remains visible when
-    // no hop row carries the lost target probes.
+    // Target loss is measured once per MTR cycle, independently of the hop
+    // rows. ICMP targets also have opportunistic hop rows, but their
+    // probe_cycle is the normal echo batch, not this trace; mixing it into
+    // the MTR matrix makes an ICMP graph outage look like MTR loss.
+    // Put MTR loss on the last path row so it remains visible when no hop row
+    // carries the lost target probes.
     const targetRow = visibleHops[visibleHops.length - 1];
     const targetRowData = rows.get(targetRow);
-    if (targetRowData) {
+    if (probeType === "mtr" && targetRowData) {
       for (const t of cycles) {
         const target = targetLossByCycle.get(t);
         if (!target || target.LossPct <= 0) continue;
@@ -485,6 +489,11 @@ function PathHeatmap({
         worstISO = p.WorstTime;
       }
     }
+    const target = probeType === "mtr" ? targetLossByCycle.get(bucketSec) : undefined;
+    if (target?.WorstTime && target.LossPct > bestLoss) {
+      const s = new Date(target.WorstTime).getTime() / 1000;
+      if (Number.isFinite(s)) return s;
+    }
     if (worstISO) {
       const s = new Date(worstISO).getTime() / 1000;
       if (Number.isFinite(s)) return s;
@@ -594,7 +603,10 @@ function PathHeatmap({
             loss {(hover.p.MaxLossPct ?? hover.p.LossPct).toFixed(1)}%
             {hover.p.MaxLossPct != null ? " (worst cycle)" : ""}
           </div>
-          {hover.target && hover.target.LossPct > 0 && (
+          <div>
+            replies {hover.p.ReplyCount ?? Math.max(0, hover.p.Sent - hover.p.LossCount)}/{hover.p.Sent}
+          </div>
+          {probeType === "mtr" && hover.target && hover.target.LossPct > 0 && (
             <div>
               target loss {hover.target.LossPct.toFixed(1)}%
               {probeType === "mtr" ? ` · ${hover.target.Sent} MTR rounds` : ""}
