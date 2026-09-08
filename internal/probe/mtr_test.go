@@ -2,147 +2,121 @@ package probe
 
 import (
 	"context"
+	"errors"
+	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// The mirror must key on TargetReply, not on the deepest index: after an
-// early echo followed by deeper silent rounds (the shape
-// TestWalkRoundsMarksEarlyEchoRow pins), the deepest row is a silent
-// intermediate — mirroring it reports an unresponsive router's numbers as
-// the target's.
-func TestMTRMirrorsTargetRows(t *testing.T) {
+func TestMTRUsesDirectTargetLoss(t *testing.T) {
 	m := NewMTR("mtr", time.Second)
-	var called bool
-	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
-		called = true
-		return []Hop{
-			{Index: 1, IP: "10.0.0.1", RTTs: []time.Duration{time.Millisecond}, Sent: 2},
-			{Index: 2, IP: "192.0.2.9", RTTs: []time.Duration{2 * time.Millisecond}, Sent: 2, Lost: 1, TargetReply: true},
-			{Index: 3, IP: "", Sent: 1, Lost: 1},
-			{Index: 4, IP: "", Sent: 1, Lost: 1},
-		}, roundStats{attempted: 2, reached: 1}, nil
+	wantRTTs := []time.Duration{
+		1 * time.Millisecond,
+		2 * time.Millisecond,
+		3 * time.Millisecond,
+		4 * time.Millisecond,
+		5 * time.Millisecond,
+		6 * time.Millisecond,
+		7 * time.Millisecond,
+		8 * time.Millisecond,
 	}
-	res, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 2)
+	wantHops := []Hop{
+		{Index: 1, IP: "10.0.0.1", Sent: 10},
+		{Index: 2, IP: "192.0.2.9", Sent: 10, TargetReply: true},
+	}
+	m.echo = func(_ context.Context, target Target, count int) (*Result, error) {
+		if target.Host != "example.invalid" || count != 10 {
+			t.Fatalf("echo called with target=%+v count=%d", target, count)
+		}
+		return &Result{Sent: 10, LossCount: 2, RTTs: wantRTTs}, nil
+	}
+	m.trace = func(_ context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
+		return wantHops, roundStats{attempted: 10, reached: 10}, nil
+	}
+
+	result, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !called {
-		t.Fatal("m.trace seam bypassed")
+	if result.Sent != 10 || result.LossCount != 2 {
+		t.Fatalf("Sent=%d LossCount=%d, want direct result 10/2", result.Sent, result.LossCount)
 	}
-	if res.Sent != 2 || res.LossCount != 1 || len(res.RTTs) != 1 {
-		t.Fatalf("mirror did not key on the marked row: Sent=%d Lost=%d RTTs=%d",
-			res.Sent, res.LossCount, len(res.RTTs))
+	if !reflect.DeepEqual(result.RTTs, wantRTTs) {
+		t.Fatalf("RTTs=%v, want direct RTTs %v", result.RTTs, wantRTTs)
 	}
-	if res.RTTs[0] != 2*time.Millisecond {
-		t.Fatalf("mirror carried a foreign RTT: %v", res.RTTs)
+	if !reflect.DeepEqual(result.Hops, wantHops) {
+		t.Fatalf("Hops=%v, want trace hops %v", result.Hops, wantHops)
 	}
 }
 
-// Unreached traces keep reporting full loss, not a mirrored intermediate.
-func TestMTRUnreachedReportsFullLoss(t *testing.T) {
+func TestMTRPreservesDirectResultOnTraceError(t *testing.T) {
 	m := NewMTR("mtr", time.Second)
-	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
-		return []Hop{{Index: 1, IP: "10.0.0.1", RTTs: []time.Duration{time.Millisecond}, Sent: 3}}, roundStats{attempted: 3}, nil
+	traceErr := errors.New("trace failed")
+	wantRTTs := []time.Duration{3 * time.Millisecond, 5 * time.Millisecond}
+	wantHops := []Hop{{Index: 1, IP: "10.0.0.1", Sent: 3}}
+	var echoFinished atomic.Bool
+	var traceFinished atomic.Bool
+	m.echo = func(context.Context, Target, int) (*Result, error) {
+		echoFinished.Store(true)
+		return &Result{Sent: 3, LossCount: 1, RTTs: wantRTTs}, nil
 	}
-	res, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
-	if err != nil {
-		t.Fatal(err)
+	m.trace = func(context.Context, string, string, int, int, time.Duration, time.Duration) ([]Hop, roundStats, error) {
+		traceFinished.Store(true)
+		return wantHops, roundStats{attempted: 3, reached: 2}, traceErr
 	}
-	if res.Sent != 3 || res.LossCount != 3 || len(res.RTTs) != 0 {
-		t.Fatalf("unreached mirror leaked intermediate stats: %+v", res)
+
+	result, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
+	if !errors.Is(err, traceErr) {
+		t.Fatalf("err=%v, want wrapped trace error", err)
+	}
+	if !strings.Contains(err.Error(), "mtr trace") {
+		t.Fatalf("err=%q, want trace context", err)
+	}
+	if result.Sent != 3 || result.LossCount != 1 || !reflect.DeepEqual(result.RTTs, wantRTTs) {
+		t.Fatalf("direct result not preserved: %+v", result)
+	}
+	if !reflect.DeepEqual(result.Hops, wantHops) {
+		t.Fatalf("partial trace hops not preserved: %v", result.Hops)
+	}
+	if !echoFinished.Load() || !traceFinished.Load() {
+		t.Fatalf("Probe returned before both operations finished: echo=%v trace=%v", echoFinished.Load(), traceFinished.Load())
 	}
 }
 
-// Two marked rows (anycast at the terminal) aggregate their RTTs into the
-// mirror; the deepest row is a silent intermediate and must contribute
-// nothing. Three rounds probe ttl 2 three times — one silent, one answered by
-// each sibling — so the rows are what a real walk can produce.
-func TestMTRMirrorsAggregateAcrossMarkedRows(t *testing.T) {
+func TestMTRPreservesHopsOnDirectError(t *testing.T) {
 	m := NewMTR("mtr", time.Second)
-	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
-		return []Hop{
-			{Index: 1, IP: "10.0.0.1", RTTs: []time.Duration{time.Millisecond}, Sent: 3},
-			{Index: 2, IP: "192.0.2.9", RTTs: []time.Duration{2 * time.Millisecond}, Sent: 2, Lost: 1, TargetReply: true},
-			{Index: 2, IP: "192.0.2.10", RTTs: []time.Duration{3 * time.Millisecond}, Sent: 1, TargetReply: true},
-			{Index: 5, IP: "", Sent: 1, Lost: 1},
-		}, roundStats{attempted: 3, reached: 2}, nil
+	directErr := errors.New("direct echo failed")
+	wantHops := []Hop{
+		{Index: 1, IP: "10.0.0.1", Sent: 3},
+		{Index: 2, IP: "192.0.2.9", Sent: 3, TargetReply: true},
 	}
-	res, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
-	if err != nil {
-		t.Fatal(err)
+	var echoFinished atomic.Bool
+	var traceFinished atomic.Bool
+	m.echo = func(context.Context, Target, int) (*Result, error) {
+		echoFinished.Store(true)
+		return &Result{Sent: 1, LossCount: 1}, directErr
 	}
-	if res.Sent != 3 || res.LossCount != 1 || len(res.RTTs) != 2 {
-		t.Fatalf("mirror did not aggregate marked rows: Sent=%d Lost=%d RTTs=%d",
-			res.Sent, res.LossCount, len(res.RTTs))
+	m.trace = func(context.Context, string, string, int, int, time.Duration, time.Duration) ([]Hop, roundStats, error) {
+		traceFinished.Store(true)
+		return wantHops, roundStats{attempted: 3, reached: 3}, nil
 	}
-	if res.RTTs[0] != 2*time.Millisecond || res.RTTs[1] != 3*time.Millisecond {
-		t.Fatalf("mirror lost a sibling's samples: %v", res.RTTs)
-	}
-}
 
-// A route that lengthens across rounds marks the target at three TTLs, and
-// each of those rows carries the losses of the rounds that walked past it.
-// Summing the rows therefore counts one round several times: three rounds that
-// all reached the target read as six sent and three lost, and 50% loss pages
-// an operator for an outage that never happened.
-// The mirror must carry the target's echo latencies only — the fixture is
-// produced by the real walkRounds over mixedTerminalScript, not hand-written.
-func TestMTRMirrorExcludesUnreachableRTTs(t *testing.T) {
-	m := NewMTR("mtr", time.Second)
-	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
-		hops, stats := walkRounds(ctx, rounds, maxTTL, spacing, mixedTerminalScript(5*time.Millisecond, 900*time.Millisecond).step)
-		return hops, stats, nil
+	result, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
+	if !errors.Is(err, directErr) {
+		t.Fatalf("err=%v, want wrapped direct error", err)
 	}
-	res, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(err.Error(), "mtr direct echo") {
+		t.Fatalf("err=%q, want direct-echo context", err)
 	}
-	if res.Sent != 3 || res.LossCount != 2 {
-		t.Fatalf("Sent=%d Lost=%d, want 3/2 — one echo in three rounds", res.Sent, res.LossCount)
+	if result.Sent != 1 || result.LossCount != 1 || len(result.RTTs) != 0 {
+		t.Fatalf("partial direct result not preserved: %+v", result)
 	}
-	if len(res.RTTs) != res.Sent-res.LossCount {
-		t.Fatalf("len(RTTs)=%d disagrees with Sent-LossCount=%d: %v", len(res.RTTs), res.Sent-res.LossCount, res.RTTs)
+	if !reflect.DeepEqual(result.Hops, wantHops) {
+		t.Fatalf("trace hops not preserved: %v", result.Hops)
 	}
-	if res.RTTs[0] != 5*time.Millisecond {
-		t.Fatalf("mirror carried the unreachable's RTT: %v", res.RTTs)
-	}
-}
-
-func TestMTRSentCountsRoundsNotHopRows(t *testing.T) {
-	m := NewMTR("mtr", time.Second)
-	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
-		return []Hop{
-			{Index: 1, IP: "10.0.0.1", RTTs: []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}, Sent: 3},
-			{Index: 2, IP: "192.0.2.9", RTTs: []time.Duration{2 * time.Millisecond}, Sent: 3, Lost: 2, TargetReply: true},
-			{Index: 3, IP: "192.0.2.9", RTTs: []time.Duration{3 * time.Millisecond}, Sent: 2, Lost: 1, TargetReply: true},
-			{Index: 4, IP: "192.0.2.9", RTTs: []time.Duration{4 * time.Millisecond}, Sent: 1, TargetReply: true},
-		}, roundStats{attempted: 3, reached: 3}, nil
-	}
-	res, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Sent != 3 || res.LossCount != 0 {
-		t.Fatalf("Sent=%d Lost=%d, want 3 rounds sent and none lost", res.Sent, res.LossCount)
-	}
-	if len(res.RTTs) != 3 {
-		t.Fatalf("mirror dropped a round's RTT: %v", res.RTTs)
-	}
-}
-
-// A walk the cycle deadline cut short must report the rounds that ran: a Sent
-// preset from the requested count reports loss for rounds never sent.
-func TestMTRSentTracksTruncatedWalk(t *testing.T) {
-	m := NewMTR("mtr", time.Second)
-	m.trace = func(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
-		return []Hop{{Index: 1, IP: "10.0.0.1", RTTs: []time.Duration{time.Millisecond}, Sent: 1}}, roundStats{attempted: 1}, nil
-	}
-	res, err := m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Sent != 1 || res.LossCount != 1 {
-		t.Fatalf("Sent=%d Lost=%d, want the single round that ran", res.Sent, res.LossCount)
+	if !echoFinished.Load() || !traceFinished.Load() {
+		t.Fatalf("Probe returned before both operations finished: echo=%v trace=%v", echoFinished.Load(), traceFinished.Load())
 	}
 }

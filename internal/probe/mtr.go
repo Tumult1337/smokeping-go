@@ -3,10 +3,13 @@ package probe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/tumult/gosmokeping/internal/config"
 )
+
+type echoFunc func(ctx context.Context, target Target, count int) (*Result, error)
 
 // MTR discovers the path to a target by sending ICMP echoes with increasing
 // TTL and collecting intermediate routers' TimeExceeded replies. Each cycle
@@ -22,6 +25,9 @@ type MTR struct {
 	timeout time.Duration
 	maxTTL  int
 	spacing time.Duration
+	// echo is the direct target measurement. It deliberately disables ICMP's
+	// own opportunistic trace because MTR's walk below is the sole hop source.
+	echo echoFunc
 	// trace is the injectable seam over traceHops, mirroring ICMP's.
 	trace traceFunc
 }
@@ -30,10 +36,30 @@ func NewMTR(name string, timeout time.Duration) *MTR {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
-	return &MTR{name: name, timeout: timeout, maxTTL: maxTTL, spacing: 50 * time.Millisecond, trace: traceHops}
+	echo := NewICMP(name, timeout, true)
+	return &MTR{name: name, timeout: timeout, maxTTL: maxTTL, spacing: 50 * time.Millisecond, echo: echo.Probe, trace: traceHops}
 }
 
 func (m *MTR) Name() string { return m.name }
+
+type mtrTraceResult struct {
+	hops []Hop
+	err  error
+}
+
+func (m *MTR) startTrace(ctx context.Context, t Target, count int) <-chan mtrTraceResult {
+	ch := make(chan mtrTraceResult, 1)
+	go func() {
+		defer func() {
+			if v := recover(); v != nil {
+				ch <- mtrTraceResult{err: fmt.Errorf("%w: %v", errTracePanic, v)}
+			}
+		}()
+		hops, _, err := m.trace(ctx, t.Host, t.Family, count, m.maxTTL, m.timeout, m.spacing)
+		ch <- mtrTraceResult{hops: hops, err: err}
+	}()
+	return ch
+}
 
 // maxRounds caps `count` for MTR cycles. Each round walks up to maxTTL hops;
 // with cfg.Pings=20 and an unresponsive path that's 20 × 30 × timeout, which
@@ -65,32 +91,27 @@ func (m *MTR) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	if count > maxRounds {
 		count = maxRounds
 	}
-	hops, stats, err := m.trace(ctx, t.Host, t.Family, count, m.maxTTL, m.timeout, m.spacing)
-	if err != nil {
-		// A missing CAP_NET_RAW is a measurement never taken, not a target that
-		// did not answer: returning nil lets the scheduler stamp Sent = pings,
-		// which writes a fabricated full-loss cycle every interval and pages
-		// every mtr target. &Result{} leaves the gap instead, and the hint is
-		// the one the icmp probe already prints for the same condition.
-		if errors.Is(err, errRawUnavailable) {
-			logRawUnavailableMTROnce(err)
-			return &Result{}, err
-		}
-		return nil, err
+
+	traced := m.startTrace(ctx, t, count)
+	directResult, directErr := m.echo(ctx, t, count)
+	traceResult := <-traced
+
+	if errors.Is(traceResult.err, errRawUnavailable) {
+		logRawUnavailableMTROnce(traceResult.err)
 	}
 
-	// Sent and lost are counted in rounds, not in hop rows: a round that walks
-	// past the target's old TTL folds its loss onto the marked row there, so
-	// summing marked rows counts one round once per TTL the target ever
-	// answered at — a lengthening route then reads as loss it never suffered.
-	result := &Result{Sent: stats.attempted, LossCount: stats.attempted - stats.reached, Hops: hops}
-	// The RTTs still come from the rows the target itself answered, never the
-	// deepest row: a per-round walk can leave a silent intermediate below the
-	// target's echo, whose latency says nothing about the target.
-	for _, h := range hops {
-		if h.TargetReply {
-			result.RTTs = append(result.RTTs, h.RTTs...)
-		}
+	result := &Result{Hops: traceResult.hops}
+	if directResult != nil {
+		result.RTTs = directResult.RTTs
+		result.Sent = directResult.Sent
+		result.LossCount = directResult.LossCount
 	}
-	return result, nil
+
+	if directErr != nil {
+		directErr = fmt.Errorf("mtr direct echo: %w", directErr)
+	}
+	if traceResult.err != nil {
+		traceResult.err = fmt.Errorf("mtr trace: %w", traceResult.err)
+	}
+	return result, errors.Join(directErr, traceResult.err)
 }
