@@ -324,6 +324,101 @@ func TestReaderQueryCyclesBucketed(t *testing.T) {
 	}
 }
 
+func TestReaderNormalizesSamplelessCycleSuccesses(t *testing.T) {
+	cfg, cleanup := testDSN(t)
+	defer cleanup()
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if err := Bootstrap(ctx, log, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	validAt := start.Add(5 * time.Minute)
+	legacyAt := start.Add(10 * time.Minute)
+	ref := config.TargetRef{Target: config.Target{Name: "sampleless"}, Group: "g"}
+	rtts := []time.Duration{100 * time.Millisecond, 100 * time.Millisecond, 100 * time.Millisecond}
+
+	w, err := NewWriter(ctx, log, cfg, 4)
+	if err != nil {
+		t.Fatalf("writer: %v", err)
+	}
+	w.OnCycle(ctx, scheduler.Cycle{
+		Time:      validAt,
+		Target:    ref,
+		ProbeName: "icmp",
+		Source:    "master",
+		Sent:      4,
+		LossCount: 1,
+		Summary:   stats.Compute(rtts),
+	})
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{cfg.Addr},
+		Auth: clickhouse.Auth{Database: cfg.Database, Username: cfg.Username, Password: cfg.Password},
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.Exec(ctx, `
+INSERT INTO probe_cycle
+  (timestamp, target_id, target_group, source, probe_type, sent, lost, loss_pct)
+VALUES (?, ?, ?, 'master', 'icmp', 2, 1, 50)`, legacyAt, ref.Target.Name, ref.Group); err != nil {
+		t.Fatalf("seed legacy cycle: %v", err)
+	}
+
+	r, err := NewReader(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	defer r.Close()
+
+	raw, err := r.QueryCycles(ctx, ref, start, start.Add(time.Hour), storage.QueryFilter{})
+	if err != nil {
+		t.Fatalf("raw query: %v", err)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("raw query returned %d points, want 2: %+v", len(raw), raw)
+	}
+	legacy := raw[1]
+	if !legacy.Time.Equal(legacyAt) {
+		t.Fatalf("second raw point is at %s, want legacy row at %s", legacy.Time, legacyAt)
+	}
+	if legacy.Sent != 1 || legacy.LossCount != 1 || legacy.LossPct != 100 {
+		t.Errorf("legacy counters = sent %d, lost %d, loss %.2f%%; want 1, 1, 100%%",
+			legacy.Sent, legacy.LossCount, legacy.LossPct)
+	}
+	if legacy.Min != 0 || legacy.Max != 0 || legacy.Mean != 0 || legacy.Median != 0 || legacy.P95 != 0 {
+		t.Errorf("legacy latency = min %g, max %g, mean %g, median %g, p95 %g; want all zero",
+			legacy.Min, legacy.Max, legacy.Mean, legacy.Median, legacy.P95)
+	}
+
+	bucketed, err := r.QueryCycles(ctx, ref, start, start.Add(time.Hour), storage.QueryFilter{Step: time.Hour})
+	if err != nil {
+		t.Fatalf("bucketed query: %v", err)
+	}
+	if len(bucketed) != 1 {
+		t.Fatalf("bucketed query returned %d points, want 1: %+v", len(bucketed), bucketed)
+	}
+	bucket := bucketed[0]
+	if bucket.Sent != 5 || bucket.LossCount != 2 || bucket.LossPct != 40 {
+		t.Errorf("bucket counters = sent %d, lost %d, loss %.2f%%; want 5, 2, 40%%",
+			bucket.Sent, bucket.LossCount, bucket.LossPct)
+	}
+	for name, got := range map[string]float64{
+		"min": bucket.Min, "max": bucket.Max, "mean": bucket.Mean,
+		"median": bucket.Median, "p5": bucket.P5, "p95": bucket.P95,
+	} {
+		if got != 100 {
+			t.Errorf("bucket %s = %gms, want 100ms from the valid cycle only", name, got)
+		}
+	}
+}
+
 // TestReaderBucketedPercentilesMonotone seeds cycles with a fixed per-cycle
 // percentile distribution and verifies the bucketed aggregation keeps the
 // canonical p5 ≤ p25 ≤ median ≤ p75 ≤ p95 ordering. Regression for the

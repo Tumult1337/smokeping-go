@@ -115,6 +115,55 @@ func TestReaderQueryPlaceholdersMatchArgs(t *testing.T) {
 	}
 }
 
+// Legacy interrupted ICMP attempts can have sent > lost without an RTT
+// sample. The cycle readers must treat those sample-less successes as
+// unfinished: retain lost, reduce sent to lost, and give the row no latency
+// weight. This query-contract test catches either read path reverting to the
+// stored counters without requiring a live ClickHouse server.
+func TestCycleQueriesExcludeSamplelessSuccesses(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+
+	queries := make(map[string]string, 2)
+	for name, filter := range map[string]storage.QueryFilter{
+		"raw":      {},
+		"bucketed": {Step: time.Hour},
+	} {
+		conn := &recordConn{}
+		if _, err := (&Reader{conn: conn}).QueryCycles(context.Background(), ref, from, to, filter); err != nil {
+			t.Fatalf("%s query: %v", name, err)
+		}
+		queries[name] = strings.Join(strings.Fields(conn.query), " ")
+	}
+
+	const effectiveSent = "if(rtt_max_us = 0, lost, sent) AS effective_sent"
+	for name, query := range queries {
+		if !strings.Contains(query, effectiveSent) {
+			t.Errorf("%s query does not derive effective sent from RTT presence:\n%s", name, query)
+		}
+		if !strings.Contains(query, "100.0 * sum(lost) / sum(effective_sent)") &&
+			!strings.Contains(query, "100.0 * lost / effective_sent") {
+			t.Errorf("%s query does not derive loss from effective sent:\n%s", name, query)
+		}
+	}
+	raw := queries["raw"]
+	if !strings.Contains(raw, "lost, effective_sent FROM probe_cycle") {
+		t.Errorf("raw query does not return effective sent with retained lost:\n%s", raw)
+	}
+
+	bucketed := queries["bucketed"]
+	if !strings.Contains(bucketed, "toUInt64(effective_sent - lost) AS latency_weight") {
+		t.Errorf("bucketed query does not zero latency weight for sample-less rows:\n%s", bucketed)
+	}
+	if strings.Contains(bucketed, "toUInt64(sent - lost)") {
+		t.Errorf("bucketed query still weights latency by stored successes:\n%s", bucketed)
+	}
+	if !strings.Contains(bucketed, "sum(lost), sum(effective_sent)") {
+		t.Errorf("bucketed query does not retain lost while summing effective sent:\n%s", bucketed)
+	}
+}
+
 // orderByLead returns the first column of the query's last ORDER BY clause.
 func orderByLead(query string) string {
 	i := strings.LastIndex(query, "ORDER BY ")

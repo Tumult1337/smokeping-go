@@ -94,13 +94,15 @@ func sourceFilter(source string) (clause string, args []any) {
 func (r *Reader) queryCyclesRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.CyclePoint, error) {
 	srcClause, srcArgs := sourceFilter(source)
 	q := `
+WITH if(rtt_max_us = 0, lost, sent) AS effective_sent
 SELECT timestamp, source,
        rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0, rtt_stddev_us / 1000.0,
        p5_us / 1000.0, p10_us / 1000.0, p15_us / 1000.0, p20_us / 1000.0, p25_us / 1000.0,
        p30_us / 1000.0, p35_us / 1000.0, p40_us / 1000.0, p45_us / 1000.0, p55_us / 1000.0,
        p60_us / 1000.0, p65_us / 1000.0, p70_us / 1000.0, p75_us / 1000.0, p80_us / 1000.0,
        p85_us / 1000.0, p90_us / 1000.0, p95_us / 1000.0,
-       loss_pct, lost, sent
+       if(effective_sent = 0, 0, 100.0 * lost / effective_sent) AS loss_pct,
+       lost, effective_sent
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
@@ -116,7 +118,7 @@ ORDER BY timestamp`
 	var out []storage.CyclePoint
 	for rows.Next() {
 		var p storage.CyclePoint
-		var lossPct float32
+		var lossPct float64
 		var lost, sent uint16
 		var min, max, mean, median, stddev float64
 		var p5, p10, p15, p20, p25, p30, p35, p40, p45 float64
@@ -155,7 +157,7 @@ ORDER BY timestamp`
 		p.P85 = p85
 		p.P90 = p90
 		p.P95 = p95
-		p.LossPct = float64(lossPct)
+		p.LossPct = lossPct
 		p.LossCount = int64(lost)
 		p.Sent = int64(sent)
 		out = append(out, p)
@@ -169,41 +171,45 @@ func (r *Reader) queryCyclesBucketed(ctx context.Context, ref config.TargetRef, 
 	// an empty RTT slice). Weighting the quantile rollup by `sent` folds those
 	// zeros into the distribution, collapsing the bucket's low percentiles to
 	// 0 — in log-scale bars that paints a full-height band down to the floor.
-	// Weight by received pings (`sent - lost`) instead: a 100%-loss sub-cycle
-	// gets weight 0 and drops out, so only cycles that actually measured an RTT
-	// shape the percentile band. Loss is reported separately and is unaffected.
+	// Weight by received pings instead: a 100%-loss sub-cycle gets weight 0 and
+	// drops out, so only cycles that actually measured an RTT shape the
+	// percentile band. Legacy rows with no samples but sent > lost get the same
+	// treatment: their unfinished successes are removed from the effective sent
+	// count while their completed losses remain.
 	// quantilesExactWeighted needs an unsigned weight (UInt16-UInt16 promotes to
 	// Int32), hence toUInt64. min/mean/stddev get the same treatment; a bucket
 	// where every sub-cycle was 100% loss has zero total received, so the
 	// avgWeighted (mean/stddev) is NaN-guarded — NaN would break JSON encoding,
 	// and the value is moot anyway (the UI skips 100%-loss buckets).
 	q := fmt.Sprintf(`
+WITH if(rtt_max_us = 0, lost, sent) AS effective_sent,
+     toUInt64(effective_sent - lost) AS latency_weight
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
        source                                              AS src,
-       minIf(rtt_min_us, sent > lost) / 1000.0, max(rtt_max_us) / 1000.0,
-       if(sum(sent) = sum(lost), 0, avgWeighted(rtt_mean_us, toUInt64(sent - lost)) / 1000.0),
-       quantilesExactWeighted(0.50)(rtt_median_us, toUInt64(sent - lost))[1] / 1000.0 AS rtt_median_ms,
-       if(sum(sent) = sum(lost), 0, sqrt(avgWeighted(pow(rtt_stddev_us, 2), toUInt64(sent - lost))) / 1000.0) AS rtt_stddev_ms,
-       quantilesExactWeighted(0.05)(p5_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.10)(p10_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.15)(p15_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.20)(p20_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.25)(p25_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.30)(p30_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.35)(p35_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.40)(p40_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.45)(p45_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.55)(p55_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.60)(p60_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.65)(p65_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.70)(p70_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.75)(p75_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.80)(p80_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.85)(p85_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.90)(p90_us, toUInt64(sent - lost))[1] / 1000.0,
-       quantilesExactWeighted(0.95)(p95_us, toUInt64(sent - lost))[1] / 1000.0,
-       if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)) AS loss_pct,
-       sum(lost), sum(sent)
+       minIf(rtt_min_us, latency_weight > 0) / 1000.0, max(rtt_max_us) / 1000.0,
+       if(sum(effective_sent) = sum(lost), 0, avgWeighted(rtt_mean_us, latency_weight) / 1000.0),
+       quantilesExactWeighted(0.50)(rtt_median_us, latency_weight)[1] / 1000.0 AS rtt_median_ms,
+       if(sum(effective_sent) = sum(lost), 0, sqrt(avgWeighted(pow(rtt_stddev_us, 2), latency_weight)) / 1000.0) AS rtt_stddev_ms,
+       quantilesExactWeighted(0.05)(p5_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.10)(p10_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.15)(p15_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.20)(p20_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.25)(p25_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.30)(p30_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.35)(p35_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.40)(p40_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.45)(p45_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.55)(p55_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.60)(p60_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.65)(p65_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.70)(p70_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.75)(p75_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.80)(p80_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.85)(p85_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.90)(p90_us, latency_weight)[1] / 1000.0,
+       quantilesExactWeighted(0.95)(p95_us, latency_weight)[1] / 1000.0,
+       if(sum(effective_sent) = 0, 0, 100.0 * sum(lost) / sum(effective_sent)) AS loss_pct,
+       sum(lost), sum(effective_sent)
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
