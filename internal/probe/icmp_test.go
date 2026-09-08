@@ -581,22 +581,45 @@ func TestICMPProbePassesDerivedTimeoutToSend(t *testing.T) {
 // the probe's configured observation window to finish.
 func TestICMPProbeDoesNotCountCycleCancellationAsLoss(t *testing.T) {
 	requireICMPSocket(t)
-	t.Run("only attempt is interrupted", func(t *testing.T) {
+	t.Run("completed failure wins before cancellation is inspected", func(t *testing.T) {
 		p := NewICMP("icmp", time.Second, true)
 		p.spacing = 0
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		p.send = func(context.Context, *icmp.PacketConn, *net.IPAddr, bool, int, int, time.Duration) (time.Duration, error) {
 			cancel()
-			return 0, context.DeadlineExceeded
+			return 0, errors.New("simulated loss")
 		}
 
 		res, err := p.Probe(ctx, Target{Host: "127.0.0.1"}, 1)
 		if res == nil {
 			t.Fatalf("Probe returned no result: %v", err)
 		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Probe error = %v, want context cancellation", err)
+		}
+		if res.Sent != 1 || res.LossCount != 1 || len(res.RTTs) != 0 {
+			t.Fatalf("Sent=%d LossCount=%d RTTs=%d, want 1/1/0 for the completed failure",
+				res.Sent, res.LossCount, len(res.RTTs))
+		}
+	})
+
+	t.Run("context deadline outcome wins before context publication", func(t *testing.T) {
+		p := NewICMP("icmp", time.Second, true)
+		p.spacing = 0
+		p.send = func(context.Context, *icmp.PacketConn, *net.IPAddr, bool, int, int, time.Duration) (time.Duration, error) {
+			return 0, context.DeadlineExceeded
+		}
+
+		res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 1)
+		if res == nil {
+			t.Fatalf("Probe returned no result: %v", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Probe error = %v, want context deadline", err)
+		}
 		if res.Sent != 0 || res.LossCount != 0 || len(res.RTTs) != 0 {
-			t.Fatalf("Sent=%d LossCount=%d RTTs=%d, want 0/0/0 for an interrupted cycle",
+			t.Fatalf("Sent=%d LossCount=%d RTTs=%d, want 0/0/0 for the interrupted attempt",
 				res.Sent, res.LossCount, len(res.RTTs))
 		}
 	})
@@ -604,21 +627,21 @@ func TestICMPProbeDoesNotCountCycleCancellationAsLoss(t *testing.T) {
 	t.Run("completed failure precedes interruption", func(t *testing.T) {
 		p := NewICMP("icmp", time.Second, true)
 		p.spacing = 0
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 		attempt := 0
 		p.send = func(context.Context, *icmp.PacketConn, *net.IPAddr, bool, int, int, time.Duration) (time.Duration, error) {
 			attempt++
 			if attempt == 1 {
 				return 0, errors.New("simulated loss")
 			}
-			cancel()
 			return 0, context.DeadlineExceeded
 		}
 
-		res, err := p.Probe(ctx, Target{Host: "127.0.0.1"}, 2)
+		res, err := p.Probe(context.Background(), Target{Host: "127.0.0.1"}, 2)
 		if res == nil {
 			t.Fatalf("Probe returned no result: %v", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Probe error = %v, want context deadline", err)
 		}
 		if res.Sent != 1 || res.LossCount != 1 || len(res.RTTs) != 0 {
 			t.Fatalf("Sent=%d LossCount=%d RTTs=%d, want 1/1/0 after one completed failure",

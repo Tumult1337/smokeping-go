@@ -253,11 +253,14 @@ func (i *ICMP) Probe(ctx context.Context, t Target, count int) (*Result, error) 
 		result.Sent++
 		rtt, err := i.send(ctx, conn, ip, isV6, id, seq, timeout)
 		if err != nil {
-			if ctx.Err() != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				result.Sent--
-				return result, ctx.Err()
+				return result, err
 			}
 			result.LossCount++
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
 		} else {
 			result.RTTs = append(result.RTTs, rtt)
 		}
@@ -362,6 +365,9 @@ func listen(isV6 bool) (*icmp.PacketConn, error) {
 }
 
 func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 bool, id, seq int, timeout time.Duration) (time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	var msg icmp.Message
 	if isV6 {
 		msg = icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Body: &icmp.Echo{ID: id, Seq: seq, Data: icmpPayload}}
@@ -376,16 +382,44 @@ func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 	_, isUDP := asUDPAddr(conn)
 	addr := echoDestination(isUDP, dst)
 
-	deadline, ok := ctx.Deadline()
-	if !ok || time.Until(deadline) > timeout {
-		deadline = time.Now().Add(timeout)
+	configuredDeadline := time.Now().Add(timeout)
+	deadline := configuredDeadline
+	deadlineFromContext := false
+	if contextDeadline, ok := ctx.Deadline(); ok && !contextDeadline.After(configuredDeadline) {
+		deadline = contextDeadline
+		deadlineFromContext = true
 	}
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		return 0, err
 	}
 
+	// A context without the earliest deadline still has to interrupt a blocked
+	// read on shutdown or reload. The callback records when it changed the
+	// socket deadline, allowing a configured timeout that completed first to
+	// remain loss even if cancellation is published before Probe sees it.
+	interruptDone := make(chan time.Time, 1)
+	stopInterrupt := context.AfterFunc(ctx, func() {
+		interruptedAt := time.Now()
+		_ = conn.SetReadDeadline(interruptedAt)
+		interruptDone <- interruptedAt
+	})
+	interruptWatchFinished := false
+	finishInterruptWatch := func() (time.Time, bool) {
+		interruptWatchFinished = true
+		if stopInterrupt() {
+			return time.Time{}, false
+		}
+		return <-interruptDone, true
+	}
+	defer func() {
+		if !interruptWatchFinished {
+			_, _ = finishInterruptWatch()
+		}
+	}()
+
 	start := time.Now()
 	if _, err := conn.WriteTo(wire, addr); err != nil {
+		_, _ = finishInterruptWatch()
 		return 0, err
 	}
 
@@ -400,12 +434,19 @@ func sendOne(ctx context.Context, conn *icmp.PacketConn, dst *net.IPAddr, isV6 b
 	for {
 		n, peer, err := conn.ReadFrom(buf)
 		if err != nil {
+			interruptedAt, contextInterrupted := finishInterruptWatch()
 			if errors.Is(err, os.ErrDeadlineExceeded) || isTimeout(err) {
-				return 0, err
+				if deadlineFromContext || (contextInterrupted && interruptedAt.Before(configuredDeadline)) {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return 0, ctxErr
+					}
+					return 0, context.DeadlineExceeded
+				}
 			}
 			return 0, err
 		}
 		if matchEchoReply(buf[:n], proto, peer, isUDP, id, seq, want) {
+			_, _ = finishInterruptWatch()
 			return time.Since(start), nil
 		}
 	}
