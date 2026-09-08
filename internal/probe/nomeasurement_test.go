@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +35,7 @@ func TestLocalSocketFailuresDoNotFabricateFullLoss(t *testing.T) {
 	})
 
 	t.Run("mtr trace has no raw socket", func(t *testing.T) {
+		logs := captureLogs(t)
 		p := NewMTR("mtr", time.Second)
 		p.echo = func(context.Context, Target, int) (*Result, error) {
 			return &Result{RTTs: []time.Duration{time.Millisecond, 2 * time.Millisecond}, Sent: 3, LossCount: 1}, nil
@@ -52,6 +55,15 @@ func TestLocalSocketFailuresDoNotFabricateFullLoss(t *testing.T) {
 		}
 		if len(res.Hops) != 0 {
 			t.Errorf("Hops = %v, want none: the walk never ran", res.Hops)
+		}
+		errorRecords := logs.at(slog.LevelError)
+		if len(errorRecords) != 1 {
+			t.Fatalf("got %d error records, want 1: %q", len(errorRecords), errorRecords)
+		}
+		for _, want := range []string{"mtr hops unavailable", "direct target measurement can continue"} {
+			if !strings.Contains(errorRecords[0], want) {
+				t.Fatalf("raw-socket diagnostic %q does not state %q", errorRecords[0], want)
+			}
 		}
 	})
 }

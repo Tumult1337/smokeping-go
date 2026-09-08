@@ -120,3 +120,58 @@ func TestMTRPreservesHopsOnDirectError(t *testing.T) {
 		t.Fatalf("Probe returned before both operations finished: echo=%v trace=%v", echoFinished.Load(), traceFinished.Load())
 	}
 }
+
+// A direct-echo panic is recovered by the scheduler, but only after MTR has
+// joined the trace it started. Otherwise the raw socket and goroutine can
+// outlive the cycle whose stack is unwinding.
+func TestMTRJoinsTraceBeforePropagatingDirectPanic(t *testing.T) {
+	m := NewMTR("mtr", time.Second)
+	traceStarted := make(chan struct{})
+	releaseTrace := make(chan struct{})
+	traceFinished := make(chan struct{})
+	m.trace = func(context.Context, string, string, int, int, time.Duration, time.Duration) ([]Hop, roundStats, error) {
+		close(traceStarted)
+		<-releaseTrace
+		close(traceFinished)
+		return nil, roundStats{}, nil
+	}
+
+	echoStarted := make(chan struct{})
+	panicValue := &struct{ name string }{name: "direct echo panic"}
+	m.echo = func(context.Context, Target, int) (*Result, error) {
+		<-traceStarted
+		close(echoStarted)
+		panic(panicValue)
+	}
+
+	propagated := make(chan any, 1)
+	go func() {
+		defer func() { propagated <- recover() }()
+		_, _ = m.Probe(context.Background(), Target{Host: "example.invalid"}, 3)
+	}()
+
+	<-echoStarted
+	select {
+	case got := <-propagated:
+		close(releaseTrace)
+		<-traceFinished
+		t.Fatalf("panic %v propagated before the trace operation was released and joined", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseTrace)
+	select {
+	case got := <-propagated:
+		if got != panicValue {
+			t.Fatalf("propagated panic = %v, want original panic %v", got, panicValue)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct-echo panic did not propagate after the trace finished")
+	}
+
+	select {
+	case <-traceFinished:
+	default:
+		t.Fatal("direct-echo panic propagated before the trace operation finished")
+	}
+}

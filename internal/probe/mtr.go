@@ -93,8 +93,15 @@ func (m *MTR) Probe(ctx context.Context, t Target, count int) (*Result, error) {
 	}
 
 	traced := m.startTrace(ctx, t, count)
+	traceJoined := false
+	defer func() {
+		if !traceJoined {
+			<-traced
+		}
+	}()
 	directResult, directErr := m.echo(ctx, t, count)
 	traceResult := <-traced
+	traceJoined = true
 
 	if errors.Is(traceResult.err, errRawUnavailable) {
 		logRawUnavailableMTROnce(traceResult.err)
