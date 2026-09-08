@@ -16,11 +16,11 @@ count × the 256 values a `UInt8` ttl column holds. The raw tier had no bucket
 count, so it was justified separately: the trace walks one TTL per 50ms, so 2h
 could hold at most 144,000 rows. That spacing does not bound the cycle rate. A
 round ends at the target's own reply *before* it pays the spacing, and
-`config.Validate` requires only a positive interval, so a one-hop MTR target at
-a 30ms interval writes 240,000 `(timestamp, ttl)` rows in 2h — a legitimate
-history the endpoint answered `400` for. Bucketing removes the producer's cycle
-rate from the row count entirely, which is what makes the cap an assertion
-about the schema rather than a bet on how fast an operator probes.
+older validation allowed a one-hop MTR target at a 30ms interval to write
+240,000 `(timestamp, ttl)` rows in 2h — a legitimate history the endpoint
+answered `400` for. Bucketing removes the producer's cycle rate from the row
+count entirely, which is what makes the cap an assertion about the schema
+rather than a bet on how fast an operator probes.
 
 `11s` is `ceil(2h / (MaxHopGridSlots - 1))` rounded up to a whole second: the
 7d window at the coarsest 15m step is 673 slots, and no tier may need more than
@@ -39,10 +39,10 @@ above the step, but the step is a whole second and the schedule is not, and
 cycles are not aligned to the grid, so a column holding two and a neighbour
 holding none is normal rather than a fault.
 
-**No config is refused.** Enforcing a minimum probe interval for hop-producing
-probes was the alternative, and it was rejected: the only value that keeps the
-current cap is ~11s, which would refuse working sub-11s schedules, and no
-producer limit derives it — a one-hop trace has no floor on how fast it can run.
+**No config is refused for the hop-grid cap.** The grid does not impose the
+~11s minimum that would be required to bound raw hop rows. MTR schedules are
+still validated against the concurrent direct echo batch: the interval must
+fit `min(pings, 10)` attempts and their spacing.
 
 **If you consume the JSON directly**, drop any branch keyed on `step_sec == 0`.
 Sizing a column from `step_sec` is correct on every tier now.

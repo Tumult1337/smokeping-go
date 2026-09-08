@@ -447,7 +447,7 @@ WITH pinned AS (
 
 // pinnedHopRows is the tail both pinned reads share: the hop rows at exactly
 // the (source, ts) pairs the caller's `pinned` CTE selected, paired with those
-// cycles' own round counters.
+// cycles' own target-attempt counters.
 func (r *Reader) pinnedHopRows(ctx context.Context, ref config.TargetRef, what, cte, srcClause string, args []any) (storage.HopsResult, error) {
 	q := cte + `
 SELECT timestamp, source, ttl, hop_addr, unreach, target_reply,

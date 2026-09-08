@@ -334,12 +334,11 @@ Key points a reader can't derive from a single file:
 - **Path discovery (MTR + opportunistic trace):** `probe.traceHops` is the
   shared TTL-walk helper in `internal/probe/trace.go`; the round loop itself
   is `walkRounds`, driven through an injected `step` so tests exercise the
-  production loop rather than a copy. It returns `roundStats` — the rounds that
-  actually sent a probe and the subset the target echoed in — and `MTR` reports
-  `Sent`/`LossCount` straight from those two counters, never from the hop rows:
-  a round that walks past the target's old TTL folds its loss onto the marked
-  row there, so summing marked rows counts one round once per TTL the target
-  ever answered at, and a lengthening route reads as loss it never suffered.
+  production loop rather than a copy. It returns `roundStats` for trace
+  bookkeeping, but `MTR` reports `Sent`/`LossCount` and target RTTs from a
+  concurrent direct ICMP echo batch, never from the hop rows. A route change
+  can produce multiple target-marked rows, so those rows cannot represent one
+  unambiguous target-attempt count.
   The `ICMP` probe calls the walk concurrently with its echo batch so every
   icmp target also gets a hops view for free, and discards the counters.
   Trace needs `CAP_NET_RAW` — callers distinguish the *permission* error with
@@ -355,26 +354,26 @@ Key points a reader can't derive from a single file:
   last hop, annotated with a closed-set `Unreach` label (`unreachLabel`,
   RFC 792 / RFC 4443 codes normalized across families); walking past it
   re-elicited that same gateway at every deeper TTL and fabricated a clean
-  30-hop path at zero loss out of one router. An unreachable never counts a
-  round as reached, so MTR still reports full target loss.
+  30-hop path out of one router. An unreachable terminates that trace round;
+  target loss remains determined independently by the direct echo batch.
 
   Rows are per `(ttl, responder address, echo-vs-error)` in first-seen
   order, so ECMP siblings each carry their own samples and a responder
   that both echoes and rejects — a rate-limiting firewall answering
   admin-prohibited from the target's own address — yields two rows;
-  mixed onto one, the unreachable's error-generation time rode the
-  `TargetReply` marker into MTR's RTT mirror and became the target's
-  percentiles, with `len(RTTs)` exceeding `Sent−LossCount`. One
+  mixed onto one, the unreachable's error-generation time would otherwise be
+  ambiguous as a target RTT. MTR target percentiles now come only from its
+  direct echo batch. One
   responder per round per TTL still holds, so `MaxHopRowsPerCycle`'s
   rounds × TTLs derivation is unchanged; a TTL's losses have no responder to
   blame and fold onto its first-seen row, which keeps single-responder
   numbers identical to the pre-split shape, and a TTL nothing answered emits
   one `IP: ""` row. Rows the target itself answered carry `TargetReply` —
   the target's row is no longer guaranteed to be the deepest, so `/hops`
-  redaction and MTR's RTT mirror key on that marker instead of on position.
-  End-to-end loss does **not**: it comes from the cycle's own round
-  counters, served as `target_loss` alongside `hops`, because summing
-  marked rows counts one round once per TTL the target ever answered at.
+  redaction keys on that marker instead of on position. End-to-end loss does
+  **not**: it comes from the cycle's own direct target-attempt counters, served
+  as `target_loss` alongside `hops`, because target-marked trace rows can be
+  duplicated by path changes.
 
 - **`/hops` target loss:** `QueryLatestHops` and `QueryHopsAt` return
   `storage.HopsResult{Hops, Cycles}` — the `probe_cycle` counters read at

@@ -124,8 +124,8 @@ func fieldGetter(f string) (func(scheduler.Cycle) float64, bool) {
 	case "loss_pct":
 		// loss_pct is target-only loss across all probe types: ICMP/TCP/HTTP/DNS
 		// each populate Sent/LossCount from attempts to the target itself, and
-		// MTR from the rounds it attempted against the rounds the target
-		// echoed in. Intermediate-hop drops never feed this metric — those are
+		// MTR from its concurrent direct echo attempts. Intermediate-hop drops
+		// never feed this metric — those are
 		// visible in the per-hop stats but ignored by the alert evaluator.
 		return func(c scheduler.Cycle) float64 {
 			// Unreachable: Evaluator.OnCycle drops a no-measurement cycle

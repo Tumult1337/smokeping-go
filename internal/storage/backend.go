@@ -214,8 +214,8 @@ type HTTPPoint struct {
 // the newest history and reads as a probe that stopped.
 var ErrHopsTruncated = errors.New("storage: hop result exceeds the row cap")
 
-// HopsResult is one hop read: the path rows, and the round counters of the
-// cycles those rows came from.
+// HopsResult is one hop read: the path rows, and the target-attempt counters
+// of the cycles those rows came from.
 type HopsResult struct {
 	Hops []HopPoint
 	// Cycles carries one entry per (source, cycle) present in Hops, missing
@@ -228,10 +228,9 @@ type HopsResult struct {
 	TimelineLoss []HopTimelineLoss
 }
 
-// CycleCounters is one cycle's own round accounting for one source. Loss at
-// the target is a property of the cycle and cannot be recovered from hop
-// rows: a per-round walk marks the target at every TTL it ever answered at,
-// so summing those rows counts one round once per marked TTL.
+// CycleCounters is one cycle's own target-attempt accounting for one source.
+// Loss at the target is a property of the cycle and cannot be recovered from
+// hop rows: path changes can produce multiple target-marked rows in one trace.
 type CycleCounters struct {
 	Source    string
 	Time      time.Time

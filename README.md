@@ -185,7 +185,7 @@ AND/OR — to combine criteria, attach multiple alerts to the target.
 
 | Field | Unit | Notes |
 |-------|------|-------|
-| `loss_pct` | percent | Target-level loss. For MTR this is the share of trace rounds that never reached the target, so an unreachable target is full loss; intermediate hop drops are ignored. |
+| `loss_pct` | percent | Target-level loss. For MTR this comes from the concurrent direct ICMP echo batch; intermediate-hop drops in the trace are ignored. |
 | `rtt_min`, `rtt_max`, `rtt_mean`, `rtt_median`, `rtt_stddev` | ms | Per-cycle summary across the cycle's RTT samples. |
 | `rtt_p5`, `rtt_p95` | ms | Other percentiles (`p10`..`p90`) are computed and stored, but not currently accepted as alert fields. |
 

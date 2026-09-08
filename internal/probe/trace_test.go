@@ -215,11 +215,11 @@ func TestWalkRoundsStopsEachRoundAtEcho(t *testing.T) {
 	}
 }
 
-// The composed shape behind the redaction and mirror designs: the target
+// The composed shape behind the redaction design: the target
 // echoes at ttl 2 in round 0, later rounds stay silent through maxTTL. The
 // echo row must carry TargetReply, deeper silent rows must not, and reached
-// stays true — TestRedactTerminalHopKeysOnTargetReply (internal/api) and
-// TestMTRMirrorsTargetRows both fix their fixtures to this exact output.
+// stays true — TestRedactTerminalHopKeysOnTargetReply (internal/api) fixes its
+// fixture to this exact output.
 func TestWalkRoundsMarksEarlyEchoRow(t *testing.T) {
 	s := &scriptStep{replies: map[[2]int]ttlReply{
 		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
