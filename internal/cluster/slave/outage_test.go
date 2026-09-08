@@ -72,6 +72,9 @@ func TestSlaveSurvivesAMasterOutageWithItsMeasurements(t *testing.T) {
 		c.Time = time.Now().Add(-time.Duration(outageCycles-i) * time.Second)
 		c.Sent = 20
 		c.LossCount = i % 21
+		if successful := c.Sent - c.LossCount; len(c.RTTs) > successful {
+			c.RTTs = c.RTTs[:successful]
+		}
 		sent = append(sent, c.Target.Target.Name)
 		r.sink.OnCycle(ctx, c)
 

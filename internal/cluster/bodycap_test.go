@@ -64,7 +64,7 @@ func widestCycle(pings int) cluster.CyclePayload {
 	sum.Min, sum.Max, sum.Mean, sum.Median, sum.StdDev = rtt, rtt, rtt, rtt, rtt
 	return cluster.CyclePayload{
 		Time: time.Now(), Group: label, Name: label, ProbeName: label, Source: label,
-		RTTs: rtts, Sent: 65535, LossCount: 65535, Summary: sum, Hops: hops, HTTPSamples: samples,
+		RTTs: rtts, Sent: 65535, LossCount: 65535 - len(rtts), Summary: sum, Hops: hops, HTTPSamples: samples,
 	}
 }
 

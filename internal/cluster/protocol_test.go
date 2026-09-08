@@ -30,14 +30,13 @@ func TestCycleRoundTrip(t *testing.T) {
 	}
 
 	summary := stats.Summary{
-		Min:    1 * time.Microsecond,
-		Max:    2 * time.Microsecond,
-		Mean:   3 * time.Microsecond,
-		Median: 4 * time.Microsecond,
-		StdDev: 5 * time.Microsecond,
+		Min:    time.Millisecond,
+		Max:    time.Millisecond,
+		Mean:   time.Millisecond,
+		Median: time.Millisecond,
 	}
-	for i, spec := range stats.PercentileSet {
-		spec.Set(&summary, time.Duration(100+i)*time.Microsecond)
+	for _, spec := range stats.PercentileSet {
+		spec.Set(&summary, time.Millisecond)
 	}
 
 	original := scheduler.Cycle{
@@ -45,7 +44,7 @@ func TestCycleRoundTrip(t *testing.T) {
 		Target:    config.TargetRef{Group: "prod", Target: target},
 		ProbeName: "icmp",
 		Source:    "slave-a",
-		RTTs:      []time.Duration{1 * time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond},
+		RTTs:      []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
 		Sent:      5,
 		LossCount: 2,
 		Summary:   summary,
@@ -102,11 +101,59 @@ func TestCycleRoundTrip(t *testing.T) {
 
 	// Sanity: every percentile landed where expected so the reflect.DeepEqual
 	// above is actually exercising them, not silently accepting zero==zero.
-	for i, spec := range stats.PercentileSet {
-		want := time.Duration(100+i) * time.Microsecond
+	for _, spec := range stats.PercentileSet {
+		want := time.Millisecond
 		if gotVal := spec.Get(got.Summary); gotVal != want {
 			t.Errorf("percentile %s: got %v, want %v", spec.Name, gotVal, want)
 		}
+	}
+}
+
+// Older slaves can report counters for an attempt whose RTT never reached the
+// payload. Ingest keeps completed loss but removes that unfinished success and
+// derives the summary only from samples the master actually received.
+func TestCyclePayloadNormalizesMissingSamples(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	payload := cluster.CyclePayload{
+		Time:      now,
+		Sent:      10,
+		LossCount: 9,
+		Summary:   stats.Summary{Min: time.Second},
+	}
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded cluster.CyclePayload
+	if err := json.Unmarshal(buf, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := (cluster.CycleBatch{Source: "old-slave", Cycles: []cluster.CyclePayload{decoded}}).Validate(now); err != nil {
+		t.Fatalf("missing sample from an older slave was rejected: %v", err)
+	}
+
+	got := decoded.ToCycle(config.TargetRef{Target: config.Target{Name: "gw"}})
+	if got.Sent != 9 || got.LossCount != 9 {
+		t.Errorf("Sent=%d LossCount=%d, want 9/9", got.Sent, got.LossCount)
+	}
+	if got.Summary != (stats.Summary{}) {
+		t.Errorf("Summary=%+v, want all-zero summary recomputed from no RTTs", got.Summary)
+	}
+}
+
+// RTT samples prove successful attempts. A payload claiming no successful
+// attempts cannot carry one without contradicting its own bounded counters.
+func TestCyclePayloadRejectsExcessSamples(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	payload := cluster.CyclePayload{
+		Time:      now,
+		Sent:      1,
+		LossCount: 1,
+		RTTs:      []time.Duration{time.Millisecond},
+	}
+	batch := cluster.CycleBatch{Source: "hostile-slave", Cycles: []cluster.CyclePayload{payload}}
+	if err := batch.Validate(now); err == nil {
+		t.Fatal("payload carrying more RTTs than successful attempts was accepted")
 	}
 }
 
@@ -265,7 +312,7 @@ func TestCycleBatchRejectsOversizedShapes(t *testing.T) {
 	for range 100 {
 		c := base
 		c.Sent, c.LossCount = 20, 1
-		c.RTTs = make([]time.Duration, 20)
+		c.RTTs = make([]time.Duration, 19)
 		for ttl := 1; ttl <= 30; ttl++ {
 			c.Hops = append(c.Hops, cluster.HopDTO{Index: ttl, Sent: 10, Lost: 0,
 				RTTs: make([]time.Duration, 10)})
@@ -396,7 +443,7 @@ func TestCycleBatchAcceptsLegitimateLeafValues(t *testing.T) {
 		ProbeName: "icmp",
 		Source:    "edge-1",
 		Sent:      20,
-		LossCount: 20,
+		LossCount: 18,
 		RTTs:      []time.Duration{12 * time.Millisecond, 0},
 		Summary:   stats.Summary{Min: time.Millisecond, Max: 40 * time.Millisecond},
 		Hops: []cluster.HopDTO{

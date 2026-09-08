@@ -207,6 +207,9 @@ func (p CyclePayload) validate(oldest, newest time.Time) error {
 	if err := boundRTTs("cycle", p.RTTs); err != nil {
 		return err
 	}
+	if successful := p.Sent - p.LossCount; len(p.RTTs) > successful {
+		return fmt.Errorf("%d rtts exceed %d successful cycle attempts", len(p.RTTs), successful)
+	}
 	if err := boundSummary(p.Summary); err != nil {
 		return err
 	}
@@ -353,6 +356,8 @@ type HTTPSampleDTO struct {
 // spelling wrote target_group/target_id under a pair present in no config, which
 // resolveTarget can never address and which mints a permanent LowCardinality
 // entry. Source and ProbeName are overridden by ingestBatch for the same reason.
+// Counters and summary are rebuilt from accepted RTTs so an older or hostile
+// slave cannot hand the scheduler mutually contradictory cycle fields.
 func (p CyclePayload) ToCycle(ref config.TargetRef) scheduler.Cycle {
 	hops := make([]probe.Hop, len(p.Hops))
 	for i, h := range p.Hops {
@@ -382,9 +387,9 @@ func (p CyclePayload) ToCycle(ref config.TargetRef) scheduler.Cycle {
 		ProbeName:   p.ProbeName,
 		Source:      p.Source,
 		RTTs:        p.RTTs,
-		Sent:        p.Sent,
+		Sent:        p.LossCount + len(p.RTTs),
 		LossCount:   p.LossCount,
-		Summary:     p.Summary,
+		Summary:     stats.Compute(p.RTTs),
 		Hops:        hops,
 		HTTPSamples: samples,
 	}
