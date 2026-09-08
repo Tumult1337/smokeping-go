@@ -1813,6 +1813,22 @@ func TestGetHopsOmitsTargetLossWithoutAMeasurement(t *testing.T) {
 	}
 }
 
+func TestGetHopsTimelineCarriesReplyCount(t *testing.T) {
+	bucket := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	r := &stubReader{
+		hops: []storage.HopPoint{{Source: "master", Time: bucket, Index: 1, IP: "10.0.0.1", ReplyCount: 7}},
+	}
+	srv := newTestServer(t, withReader(r))
+
+	var body struct {
+		Hops []hopTimelineDTO `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/core/gw/hops/timeline?source=master&from=-24h", &body)
+	if len(body.Hops) != 1 || body.Hops[0].ReplyCount != 7 {
+		t.Fatalf("hops = %+v, want one entry with ReplyCount=7", body.Hops)
+	}
+}
+
 func TestGetHopsTimelineCarriesTargetLoss(t *testing.T) {
 	bucket := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	r := &stubReader{

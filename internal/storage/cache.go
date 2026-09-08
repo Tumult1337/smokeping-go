@@ -570,11 +570,13 @@ func recoverToError[T any](log *slog.Logger, run func(context.Context) (T, error
 // caller by reference.
 func cloneHopsResult(res HopsResult) HopsResult {
 	out := HopsResult{
-		Hops:   make([]HopPoint, len(res.Hops)),
-		Cycles: make([]CycleCounters, len(res.Cycles)),
+		Hops:         make([]HopPoint, len(res.Hops)),
+		Cycles:       make([]CycleCounters, len(res.Cycles)),
+		TimelineLoss: make([]HopTimelineLoss, len(res.TimelineLoss)),
 	}
 	copy(out.Hops, res.Hops)
 	copy(out.Cycles, res.Cycles)
+	copy(out.TimelineLoss, res.TimelineLoss)
 	return out
 }
 

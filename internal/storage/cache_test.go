@@ -21,6 +21,7 @@ type fakeReader struct {
 	out          []CyclePoint
 	hops         []HopPoint
 	cycleLoss    []CycleCounters
+	timelineLoss []HopTimelineLoss
 	err          error
 }
 
@@ -56,7 +57,7 @@ func (f *fakeReader) QueryHopsTimeline(context.Context, config.TargetRef, time.T
 	if f.err != nil {
 		return HopsResult{}, f.err
 	}
-	return HopsResult{Hops: f.hops}, nil
+	return HopsResult{Hops: f.hops, TimelineLoss: f.timelineLoss}, nil
 }
 func (f *fakeReader) QueryOverview(context.Context, time.Time, time.Time, []config.TargetRef) ([]OverviewSourceRow, error) {
 	return nil, nil
@@ -745,6 +746,37 @@ func TestCachingReader_Cycles_NoRedundantLeaderAfterRace(t *testing.T) {
 	}
 	if len(pts) != 1 || pts[0].Median != 42 {
 		t.Fatalf("expected entry stored mid-flight, got %+v", pts)
+	}
+}
+
+func TestCachingReader_HopsTimeline_ClonesTimelineLoss(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	inner := &fakeReader{
+		hops: []HopPoint{{Time: now, Index: 1}},
+		timelineLoss: []HopTimelineLoss{{
+			Time: now, Source: "master", Sent: 10, LossCount: 2, LossPct: 20,
+		}},
+	}
+	c := NewCachingReader(inner, 8, 8)
+	c.nowFn = func() time.Time { return now }
+
+	ref := newRef("g", "t")
+	from := now.Add(-7 * 24 * time.Hour)
+	first, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.TimelineLoss) != 1 {
+		t.Fatalf("first timeline loss = %+v, want one entry", first.TimelineLoss)
+	}
+	first.TimelineLoss[0].LossCount = 99
+
+	second, err := c.QueryHopsTimeline(context.Background(), ref, from, now, QueryFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.TimelineLoss) != 1 || second.TimelineLoss[0].LossCount != 2 {
+		t.Fatalf("cached timeline loss = %+v, want original LossCount=2", second.TimelineLoss)
 	}
 }
 

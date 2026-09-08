@@ -627,6 +627,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 			MaxLossPct: h.MaxLossPct,
 			LossCount:  h.LossCount,
 			Sent:       h.Sent,
+			ReplyCount: h.ReplyCount,
 			WorstTime:  h.WorstTime,
 		}
 	}
