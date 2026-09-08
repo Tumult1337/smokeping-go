@@ -25,6 +25,13 @@ Two independent handoff omissions also make the MTR history misleading:
   `cloneHopsResult` copies only `Hops` and `Cycles`, so the caching reader
   always drops timeline target loss before it reaches the API.
 
+Yesterday's partial-round fix also introduced a separate regression in the
+shared ICMP probe used by slave health. The probe increments `Sent` before
+waiting for a reply, then returns on cycle cancellation without recording
+either a loss or an RTT. That produces an impossible cycle such as
+`Sent=10, LossCount=9, RTTs=[]`: downstream code infers one success, while its
+latency summary is all zero. These rows render as 0 ms lines on a log chart.
+
 ## Chosen approach
 
 MTR will run two measurements concurrently under the existing cycle context:
@@ -73,8 +80,28 @@ and can be stored, while the returned error keeps the missing path visible in
 logs. Context cancellation is honored by both operations.
 
 No schema or wire-format migration is required. Existing ICMP and MTR history
-is not rewritten. New MTR `probe_cycle` rows use direct packet-loss semantics;
-existing rows retain their historical meaning.
+is not rewritten. New MTR `probe_cycle` rows use direct packet-loss semantics.
+
+## ICMP cancellation invariant
+
+An echo attempt interrupted by the cycle context has not completed its
+observation window. The ICMP probe will remove that attempt from `Sent` before
+returning its partial result. Every emitted result therefore preserves
+`len(RTTs) == Sent - LossCount`: completed failures count as loss, completed
+replies carry an RTT, and an unfinished attempt counts as neither.
+
+For rolling upgrades, master ingest will normalize a payload whose successful
+count exceeds its RTT sample count. It will remove only those sample-less
+successes from `Sent` and recompute the latency summary from the received RTTs.
+This accepts old-slave data without manufacturing zero-latency replies or
+rejecting the rest of its batch. Payloads where counters claim fewer successes
+than samples remain invalid rather than silently discarding real samples.
+
+Existing malformed rows cannot be repaired in storage without guessing at
+events that were never measured. Cycle reads will apply the same conservative
+normalization: sample-less successes are removed from the aggregate sent
+denominator and zero summaries carry no latency weight. This repairs current
+history views while preserving every completed loss and every real RTT.
 
 ## History handoff fixes
 
@@ -110,6 +137,11 @@ Regression tests will prove:
   measurements actually taken, without leaking a goroutine;
 - timeline JSON publishes a non-zero `ReplyCount` supplied by storage;
 - the caching reader preserves and isolates `TimelineLoss` on misses and hits.
+- cancellation after an ICMP send does not leave a sample-less success;
+- master ingest normalizes an old-slave sample-less success but rejects a
+  payload carrying more RTTs than its counters permit;
+- raw and bucketed cycle reads exclude existing sample-less successes and do
+  not emit a zero-latency percentile for them.
 
 Tests will be written and observed failing before production edits. After the
 focused tests pass, changed Go files will be formatted and the repository will
@@ -121,5 +153,5 @@ the embedded frontend artifact.
 ## Rollback
 
 Reverting the implementation commit restores reachability-based MTR target
-loss and the two history omissions without requiring a schema rollback.
-Stored rows remain readable in either version.
+loss, the two history omissions, and the ICMP cancellation regression without
+requiring a schema rollback. Stored rows remain readable in either version.
