@@ -75,6 +75,12 @@ func Bootstrap(ctx context.Context, log *slog.Logger, cfg config.ClickHouse) err
 		}
 	}
 
+	for _, stmt := range modifyCodecStatements(cfg.Cluster) {
+		if err := conn.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("modify codec: %w (stmt: %s)", err, stmt)
+		}
+	}
+
 	// Apply TTLs even on re-bootstrap so config changes take effect.
 	for _, t := range retentionTTLs(cfg) {
 		stmt := fmt.Sprintf("ALTER TABLE %s MODIFY TTL toDateTime(timestamp) + INTERVAL %d DAY",
@@ -154,6 +160,26 @@ func addColumnStatements(cluster string) []string {
 		}
 		out = append(out, fmt.Sprintf("ALTER TABLE %s%s ADD COLUMN IF NOT EXISTS %s %s AFTER %s",
 			c.table, on, c.column, c.typ, c.after))
+	}
+	return out
+}
+
+// modifyCodecStatements reconciles existing detail tables with the codecs in
+// their CREATE TABLE definitions. Changing the metadata is idempotent; old
+// parts adopt the codec through normal merges unless an operator explicitly
+// rewrites them.
+func modifyCodecStatements(cluster string) []string {
+	tables := [...]string{"probe_rtt", "probe_http"}
+	out := make([]string, 0, len(tables))
+	for _, table := range tables {
+		onCluster := ""
+		if cluster != "" {
+			onCluster = " ON CLUSTER " + cluster
+		}
+		out = append(out, fmt.Sprintf(
+			"ALTER TABLE %s%s MODIFY COLUMN rtt_ms Float64 CODEC(ZSTD(6))",
+			table, onCluster,
+		))
 	}
 	return out
 }

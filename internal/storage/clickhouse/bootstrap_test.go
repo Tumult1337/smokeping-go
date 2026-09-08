@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -71,5 +72,25 @@ func TestAddColumnStatementsOnCluster(t *testing.T) {
 		if !strings.Contains(s, "ON CLUSTER ch1") {
 			t.Fatalf("cluster mode statement missing ON CLUSTER: %q", s)
 		}
+	}
+}
+
+func TestModifyCodecStatements(t *testing.T) {
+	want := []string{
+		"ALTER TABLE probe_rtt MODIFY COLUMN rtt_ms Float64 CODEC(ZSTD(6))",
+		"ALTER TABLE probe_http MODIFY COLUMN rtt_ms Float64 CODEC(ZSTD(6))",
+	}
+	if got := modifyCodecStatements(""); !slices.Equal(got, want) {
+		t.Fatalf("statements:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func TestModifyCodecStatementsOnCluster(t *testing.T) {
+	want := []string{
+		"ALTER TABLE probe_rtt ON CLUSTER ch1 MODIFY COLUMN rtt_ms Float64 CODEC(ZSTD(6))",
+		"ALTER TABLE probe_http ON CLUSTER ch1 MODIFY COLUMN rtt_ms Float64 CODEC(ZSTD(6))",
+	}
+	if got := modifyCodecStatements("ch1"); !slices.Equal(got, want) {
+		t.Fatalf("statements:\ngot  %q\nwant %q", got, want)
 	}
 }

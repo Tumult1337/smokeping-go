@@ -82,8 +82,9 @@ Key points a reader can't derive from a single file:
 
 - **Storage backend:** single ClickHouse backend in `internal/storage/clickhouse/`.
   Four `MergeTree` tables (`probe_cycle`, `probe_rtt`, `probe_hop`, `probe_http`)
-  with codec-stacked columns (Gorilla for floats, T64 for small ints,
-  DoubleDelta for timestamps, ZSTD as second pass). The reader buckets at
+  with typed codecs (Gorilla for aggregate loss percentages, T64 for small
+  ints, DoubleDelta for timestamps, and ZSTD(6) directly for detail RTT
+  floats). The reader buckets at
   query time via `toStartOfInterval` — no materialised views, no rollup
   tasks. `QueryFilter.Step` carries the bucket width; `storage.PickCycleStep`
   and `storage.PickHopStep` (in `internal/storage/backend.go`) are the

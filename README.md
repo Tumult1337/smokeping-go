@@ -48,8 +48,9 @@ the "all" view overlays every source with its own palette colour.
 - **Probes:** ICMP (unprivileged UDP ping sockets, raw fallback), TCP connect,
   HTTP(S) TTFB, DNS lookup, MTR-style path discovery.
 - **Storage:** ClickHouse. Four `MergeTree` tables (`probe_cycle`, `probe_rtt`,
-  `probe_hop`, `probe_http`) with codec-stacked columns (Gorilla for floats,
-  T64 for small ints, DoubleDelta for timestamps, ZSTD second pass). Tier-ladder
+  `probe_hop`, `probe_http`) with typed codecs (Gorilla for aggregate loss
+  percentages, T64 for small ints, DoubleDelta for timestamps, and ZSTD(6)
+  directly for detail RTT floats). Tier-ladder
   bucketing at query time via `toStartOfInterval` — no materialised views, no
   rollup tasks. Bootstrap creates the database, tables, and per-table TTLs on
   every start (idempotent). Cluster mode rewrites to `ReplicatedMergeTree`

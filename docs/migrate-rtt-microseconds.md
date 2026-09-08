@@ -9,8 +9,10 @@ real dataset this shrank the two tables from ~23 GiB to ~5 GiB.
 The `storage.Reader` contract is unchanged — the reader divides µs→ms in SQL, so
 the API and UI still see milliseconds. Only the on-disk schema changed.
 
-`probe_rtt` and `probe_http` are **not** touched (already compress well and carry
-a NaN "no-response" guard that doesn't map to an unsigned int).
+`probe_rtt` and `probe_http` keep their Float64 types because they carry a NaN
+"no-response" guard that doesn't map to an unsigned int. Their detail RTT
+values use `CODEC(ZSTD(6))` directly: production data showed that Gorilla's XOR
+transform did not improve these noisy mantissas.
 
 ## Why this needs a manual backfill
 

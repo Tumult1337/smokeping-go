@@ -28,6 +28,22 @@ func TestSchemaPercentileColumns(t *testing.T) {
 	}
 }
 
+// Production RTT mantissas defeat Gorilla's XOR transform, so the detail
+// tables use ZSTD directly. Both declarations must stay aligned because they
+// store the same measurement shape.
+func TestSchemaRTTCodecs(t *testing.T) {
+	decl := regexp.MustCompile(`(?m)^\s*rtt_ms\s+Float64\s+CODEC\((.+)\)\s*,?$`)
+	found := decl.FindAllStringSubmatch(SchemaDDL(""), -1)
+	if len(found) != 2 {
+		t.Fatalf("found %d rtt_ms declarations, want one per detail table", len(found))
+	}
+	for _, match := range found {
+		if match[1] != "ZSTD(6)" {
+			t.Errorf("rtt_ms codec = %q, want ZSTD(6)", match[1])
+		}
+	}
+}
+
 func TestSchemaOnClusterRewrite(t *testing.T) {
 	ddl := SchemaDDL("ch_cluster_a")
 	if !strings.Contains(ddl, "ON CLUSTER ch_cluster_a") {

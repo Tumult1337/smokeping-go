@@ -101,7 +101,7 @@ const ddlProbeRTT = `CREATE TABLE IF NOT EXISTS probe_rtt (
   target_group  LowCardinality(String),
   source      LowCardinality(String),
   seq         UInt16,
-  rtt_ms      Float64                CODEC(Gorilla, ZSTD(1))
+  rtt_ms      Float64                CODEC(ZSTD(6))
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(timestamp)
@@ -136,7 +136,7 @@ const ddlProbeHTTP = `CREATE TABLE IF NOT EXISTS probe_http (
   target_group  LowCardinality(String),
   source      LowCardinality(String),
   seq         UInt16,
-  rtt_ms      Float64                CODEC(Gorilla, ZSTD(1)),
+  rtt_ms      Float64                CODEC(ZSTD(6)),
   status      UInt16                 CODEC(T64, ZSTD(1)),
   error       String
 )
