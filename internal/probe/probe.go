@@ -13,9 +13,8 @@ import (
 )
 
 // Result is a per-cycle outcome: every RTT collected plus counters. For MTR
-// cycles, Hops contains per-hop stats; the top-level RTTs come from the rows
-// the target itself answered and Sent/LossCount count trace rounds, so the
-// standard cycle pipeline still sees target stats.
+// cycles, Hops contains TTL-walk stats; RTTs, Sent and LossCount come from
+// the independent direct target echo batch.
 type Result struct {
 	RTTs      []time.Duration
 	Sent      int
@@ -43,8 +42,8 @@ type Hop struct {
 	IP    string
 	// TargetReply marks a row whose responder answered as the target itself
 	// (an echo reply): under a per-round walk the target's row is not
-	// guaranteed to be the deepest, so redaction and the MTR RTT mirror key
-	// on this rather than on position.
+	// guaranteed to be the deepest, so redaction keys on this marker.
+	// Target-level RTT and loss are measured independently by direct echoes.
 	TargetReply bool
 	// Unreach carries the label of the ICMP unreachable that ended the walk
 	// at this hop, from the closed set in unreachLabels; empty for ordinary
@@ -115,6 +114,11 @@ func Build(probes map[string]config.Probe, interval time.Duration, pings int) (*
 		var err error
 		if budget, err = config.ICMPPingBudget(interval, pings); err != nil {
 			return nil, fmt.Errorf("icmp schedule: %w", err)
+		}
+	}
+	if config.HasMTRProbe(probes) {
+		if _, err := config.ICMPPingBudget(interval, min(pings, maxRounds)); err != nil {
+			return nil, fmt.Errorf("mtr direct echo schedule: %w", err)
 		}
 	}
 	r := NewRegistry()

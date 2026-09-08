@@ -79,6 +79,13 @@ func (r *Reader) QueryCycles(ctx context.Context, ref config.TargetRef, from, to
 // second in whichever direction admits the wrong rows.
 const dtMilli = "fromUnixTimestamp64Milli(?, 'UTC')"
 
+// Historical interrupted attempts can claim successes without any RTT. Keep
+// completed losses, but remove those phantom successes from every consumer.
+const effectiveCycleMeasurements = `WITH if(rtt_max_us = 0, lost, sent) AS effective_sent,
+     if(effective_sent = 0, 0, 100.0 * lost / effective_sent) AS effective_loss_pct,
+     toUInt64(effective_sent - lost) AS latency_weight
+`
+
 // sourceFilter builds the optional source-predicate clause and its bound
 // argument. Returns ("", nil) when no filter is wanted — the caller's
 // WHERE clause then has a static shape so CH can use the ORDER BY's
@@ -93,19 +100,19 @@ func sourceFilter(source string) (clause string, args []any) {
 
 func (r *Reader) queryCyclesRaw(ctx context.Context, ref config.TargetRef, from, to time.Time, source string) ([]storage.CyclePoint, error) {
 	srcClause, srcArgs := sourceFilter(source)
-	q := `
-WITH if(rtt_max_us = 0, lost, sent) AS effective_sent
+	q := effectiveCycleMeasurements + `
 SELECT timestamp, source,
        rtt_min_us / 1000.0, rtt_max_us / 1000.0, rtt_mean_us / 1000.0, rtt_median_us / 1000.0, rtt_stddev_us / 1000.0,
        p5_us / 1000.0, p10_us / 1000.0, p15_us / 1000.0, p20_us / 1000.0, p25_us / 1000.0,
        p30_us / 1000.0, p35_us / 1000.0, p40_us / 1000.0, p45_us / 1000.0, p55_us / 1000.0,
        p60_us / 1000.0, p65_us / 1000.0, p70_us / 1000.0, p75_us / 1000.0, p80_us / 1000.0,
        p85_us / 1000.0, p90_us / 1000.0, p95_us / 1000.0,
-       if(effective_sent = 0, 0, 100.0 * lost / effective_sent) AS loss_pct,
+       effective_loss_pct,
        lost, effective_sent
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
+  AND effective_sent > 0
   AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + srcClause + `
 ORDER BY timestamp`
 	args := append([]any{ref.Target.Name, ref.Group, from.UnixMilli(), to.UnixMilli()}, srcArgs...)
@@ -181,9 +188,7 @@ func (r *Reader) queryCyclesBucketed(ctx context.Context, ref config.TargetRef, 
 	// where every sub-cycle was 100% loss has zero total received, so the
 	// avgWeighted (mean/stddev) is NaN-guarded — NaN would break JSON encoding,
 	// and the value is moot anyway (the UI skips 100%-loss buckets).
-	q := fmt.Sprintf(`
-WITH if(rtt_max_us = 0, lost, sent) AS effective_sent,
-     toUInt64(effective_sent - lost) AS latency_weight
+	q := fmt.Sprintf(effectiveCycleMeasurements+`
 SELECT toStartOfInterval(timestamp, INTERVAL %d SECOND)   AS bucket_ts,
        source                                              AS src,
        minIf(rtt_min_us, latency_weight > 0) / 1000.0, max(rtt_max_us) / 1000.0,
@@ -215,6 +220,7 @@ WHERE target_id = ?
   AND target_group = ?
   AND timestamp >= `+dtMilli+` AND timestamp < `+dtMilli+`%s
 GROUP BY bucket_ts, source
+HAVING sum(effective_sent) > 0
 ORDER BY bucket_ts, source`, int(step.Seconds()), srcClause)
 	args := append([]any{ref.Target.Name, ref.Group, from.UnixMilli(), to.UnixMilli()}, srcArgs...)
 	rows, err := r.conn.Query(ctx, q, args...)
@@ -509,7 +515,7 @@ WITH pinned AS (
 // loss on the oldest cycles, never the read.
 const maxCycleCounterKeys = 2 * maxHopSources
 
-// withCycleCounters pairs a pinned hop read with the round counters of the
+// withCycleCounters pairs a pinned hop read with the direct target counters of the
 // cycles it selected. Target loss is per cycle and cannot be recovered from
 // hop rows, so the two travel together rather than leaving a caller to derive
 // one from the other.
@@ -566,11 +572,12 @@ func (r *Reader) queryCycleCounters(ctx context.Context, ref config.TargetRef, h
 	// GROUP BY, not raw rows: ingestion is at-least-once and probe_cycle is an
 	// ordinary MergeTree, so a requeued push leaves the same cycle twice and a
 	// LIMIT sized by the key count would spend it on one source's duplicates.
-	q := `
-SELECT source, timestamp, any(sent), any(lost), any(loss_pct)
+	q := effectiveCycleMeasurements + `
+SELECT source, timestamp, any(effective_sent), any(lost), any(effective_loss_pct)
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
+  AND effective_sent > 0
   AND timestamp >= ` + dtMilli + `
   AND timestamp <= ` + dtMilli + `
   AND (source, timestamp) IN (` + strings.Join(pairs, ", ") + `)
@@ -585,13 +592,13 @@ LIMIT ` + strconv.Itoa(len(keys))
 	for rows.Next() {
 		var c storage.CycleCounters
 		var sent, lost uint16
-		var lossPct float32
+		var lossPct float64
 		if err := rows.Scan(&c.Source, &c.Time, &sent, &lost, &lossPct); err != nil {
 			return nil, err
 		}
 		c.Sent = int64(sent)
 		c.LossCount = int64(lost)
-		c.LossPct = float64(lossPct)
+		c.LossPct = lossPct
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -667,24 +674,25 @@ func (r *Reader) QueryHopsTimeline(ctx context.Context, ref config.TargetRef, fr
 }
 
 // queryHopTimelineLoss aggregates probe_cycle independently of probe_hop.
-// Target loss is one count per cycle; joining or summing hop rows would count
-// the same MTR round once for every TTL at which the target replied.
+// Target loss comes from direct attempts; joining or summing hop rows would
+// conflate those measurements with the independent TTL walk.
 func (r *Reader) queryHopTimelineLoss(ctx context.Context, ref config.TargetRef, from, to time.Time, source string, step time.Duration) ([]storage.HopTimelineLoss, error) {
 	if step <= 0 {
 		return nil, fmt.Errorf("query hop timeline loss: step %s is not a grid", step)
 	}
 	slot := fmt.Sprintf("toStartOfInterval(timestamp, INTERVAL %d SECOND)", int(step.Seconds()))
-	q := `
+	q := effectiveCycleMeasurements + `
 SELECT ` + slot + ` AS bucket_ts,
        source,
-       sum(sent),
+       sum(effective_sent),
        sum(lost),
-       if(sum(sent) = 0, 0, 100.0 * sum(lost) / sum(sent)),
-       argMax(timestamp, loss_pct)
+       if(sum(effective_sent) = 0, 0, 100.0 * sum(lost) / sum(effective_sent)),
+       argMax(timestamp, effective_loss_pct)
 FROM probe_cycle
 WHERE target_id = ?
   AND target_group = ?
   AND source = ?
+  AND effective_sent > 0
   AND timestamp >= ` + dtMilli + ` AND timestamp < ` + dtMilli + `
 GROUP BY bucket_ts, source
 ORDER BY bucket_ts` + hopRowLimit(hopTimelineRowCap)

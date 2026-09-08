@@ -17,9 +17,9 @@ type echoFunc func(ctx context.Context, target Target, count int) (*Result, erro
 // own terminal, so a route that changes mid-cycle is followed instead of being
 // clamped to the shortest path an earlier round saw.
 //
-// MTR requires raw ICMP sockets (CAP_NET_RAW). Unprivileged UDP ping sockets
-// don't reliably surface ICMP errors from intermediate hops on Linux, so we
-// deliberately don't fall back to them here.
+// Path discovery requires raw ICMP sockets (CAP_NET_RAW); UDP ping sockets
+// don't reliably surface intermediate ICMP errors on Linux. The concurrent
+// direct target batch can use UDP ping sockets even when the walk cannot run.
 type MTR struct {
 	name    string
 	timeout time.Duration
@@ -36,8 +36,17 @@ func NewMTR(name string, timeout time.Duration) *MTR {
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
-	echo := NewICMP(name, timeout, true)
+	echo := newMTRDirectICMP(name, timeout)
 	return &MTR{name: name, timeout: timeout, maxTTL: maxTTL, spacing: 50 * time.Millisecond, echo: echo.Probe, trace: traceHops}
+}
+
+func newMTRDirectICMP(name string, timeout time.Duration) *ICMP {
+	echo := NewICMP(name, timeout, true)
+	// NoTrace disables its own walk, but sequence allocation must still
+	// leave room for MTR's concurrent full walk if raw identifiers collide.
+	echo.traceRounds = maxRounds
+	echo.traceMaxTTL = maxTTL
+	return echo
 }
 
 func (m *MTR) Name() string { return m.name }
@@ -61,10 +70,8 @@ func (m *MTR) startTrace(ctx context.Context, t Target, count int) <-chan mtrTra
 	return ch
 }
 
-// maxRounds caps `count` for MTR cycles. Each round walks up to maxTTL hops;
-// with cfg.Pings=20 and an unresponsive path that's 20 × 30 × timeout, which
-// can blow past the cycle interval. 10 rounds is plenty for loss/latency
-// estimates and stays well under a 5m interval in the worst case.
+// maxRounds caps both MTR's direct echo count and its trace rounds. Each round
+// walks up to maxTTL hops; the shared cycle deadline also bounds duration.
 const maxRounds = 10
 
 // maxTTL is the deepest TTL one round walks. A const rather than the literal it
@@ -79,6 +86,7 @@ const maxTTL = 30
 // is pinned here too.
 const (
 	_ uint = config.MaxTraceRounds - maxRounds
+	_ uint = maxRounds - config.MaxTraceRounds // schedule validation uses this cap
 	_ uint = config.MaxTraceTTL - maxTTL
 	_ uint = config.MaxTraceRounds - defaultTraceRounds
 	_ uint = config.MaxTraceTTL - defaultTraceMaxTTL

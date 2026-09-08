@@ -68,18 +68,20 @@ SELECT
   groupArrayIf(toUInt32(bucket_idx), b_recv_total > 0)       AS spark_idx,
   groupArrayIf(b_median, b_recv_total > 0)                   AS spark_val
 FROM (
+  `+effectiveCycleMeasurements+`
   SELECT
     target_group, target_id, source,
     intDiv(toUInt32(timestamp) - ?, ?)                        AS bucket_idx,
-    avg(loss_pct)                                             AS b_loss_avg,
-    max(loss_pct)                                             AS b_loss_max,
-    quantilesExactWeighted(0.5)(rtt_median_us, toUInt64(sent - lost))[1] / 1000.0  AS b_median,
-    quantilesExactWeighted(0.95)(p95_us, toUInt64(sent - lost))[1] / 1000.0        AS b_p95,
+    avg(effective_loss_pct)                                   AS b_loss_avg,
+    max(effective_loss_pct)                                   AS b_loss_max,
+    quantilesExactWeighted(0.5)(rtt_median_us, latency_weight)[1] / 1000.0  AS b_median,
+    quantilesExactWeighted(0.95)(p95_us, latency_weight)[1] / 1000.0        AS b_p95,
     max(rtt_max_us) / 1000.0                                  AS b_max,
-    sum(toUInt64(sent - lost))                                AS b_recv_total,
+    sum(latency_weight)                                      AS b_recv_total,
     max(timestamp)                                            AS b_last_seen
   FROM probe_cycle
   WHERE timestamp >= `+dtMilli+` AND timestamp < `+dtMilli+`
+    AND effective_sent > 0
     AND (target_group, target_id) IN (%s)
   GROUP BY target_group, target_id, source, bucket_idx
 )

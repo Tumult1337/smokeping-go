@@ -259,10 +259,11 @@ func TestReaderQueryCyclesRaw(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Second)
 	for i := 0; i < 3; i++ {
 		w.OnCycle(ctx, scheduler.Cycle{
-			Time:   at.Add(time.Duration(i) * time.Minute),
-			Target: config.TargetRef{Target: config.Target{Name: "tc"}, Group: "g"},
-			Source: "master",
-			Sent:   20,
+			Time:      at.Add(time.Duration(i) * time.Minute),
+			Target:    config.TargetRef{Target: config.Target{Name: "tc"}, Group: "g"},
+			Source:    "master",
+			Sent:      20,
+			LossCount: 20,
 		})
 	}
 	w.Close()
@@ -298,10 +299,11 @@ func TestReaderQueryCyclesBucketed(t *testing.T) {
 	start := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 	for i := 0; i < 120; i++ { // two hours worth at 1/min
 		w.OnCycle(ctx, scheduler.Cycle{
-			Time:   start.Add(time.Duration(i) * time.Minute),
-			Target: config.TargetRef{Target: config.Target{Name: "tb"}, Group: "g"},
-			Source: "master",
-			Sent:   20,
+			Time:      start.Add(time.Duration(i) * time.Minute),
+			Target:    config.TargetRef{Target: config.Target{Name: "tb"}, Group: "g"},
+			Source:    "master",
+			Sent:      20,
+			LossCount: 20,
 		})
 	}
 	w.Close()
@@ -1571,10 +1573,11 @@ func TestReaderSourceFilter(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Second)
 	for i, source := range []string{"master", "slave-eu", "slave-us"} {
 		w.OnCycle(ctx, scheduler.Cycle{
-			Time:   at.Add(time.Duration(i) * time.Second),
-			Target: config.TargetRef{Target: config.Target{Name: "tsf"}, Group: "g"},
-			Source: source,
-			Sent:   20,
+			Time:      at.Add(time.Duration(i) * time.Second),
+			Target:    config.TargetRef{Target: config.Target{Name: "tsf"}, Group: "g"},
+			Source:    source,
+			Sent:      20,
+			LossCount: 20,
 		})
 	}
 	if err := w.Close(); err != nil {
@@ -1995,7 +1998,7 @@ func TestIntegrationHopReadCarriesCycleCounters(t *testing.T) {
 	w.OnCycle(ctx, scheduler.Cycle{
 		Time: ts, Target: ref, Source: "master",
 		Sent: 3, LossCount: 0,
-		Summary: stats.Summary{Min: 1, Max: 4, Mean: 2, Median: 2},
+		Summary: stats.Summary{Min: time.Millisecond, Max: 4 * time.Millisecond, Mean: 2 * time.Millisecond, Median: 2 * time.Millisecond},
 		Hops: []probe.Hop{
 			{Index: 1, IP: "10.0.0.1", Sent: 3, RTTs: []time.Duration{time.Millisecond}},
 			{Index: 2, IP: "192.0.2.9", Sent: 3, Lost: 2, TargetReply: true, RTTs: []time.Duration{2 * time.Millisecond}},
@@ -2008,7 +2011,7 @@ func TestIntegrationHopReadCarriesCycleCounters(t *testing.T) {
 	w.OnCycle(ctx, scheduler.Cycle{
 		Time: ts.Add(2 * time.Second), Target: ref, Source: "slave-a",
 		Sent: 5, LossCount: 1,
-		Summary: stats.Summary{Min: 1, Max: 2, Mean: 1, Median: 1},
+		Summary: stats.Summary{Min: time.Millisecond, Max: 2 * time.Millisecond, Mean: time.Millisecond, Median: time.Millisecond},
 		Hops:    []probe.Hop{{Index: 1, IP: "192.0.2.9", Sent: 5, Lost: 1, TargetReply: true, RTTs: []time.Duration{time.Millisecond}}},
 	})
 	// A decoy inside that range: master's own cycle one second later, with no
@@ -2107,7 +2110,7 @@ func TestIntegrationCycleCountersSurviveADuplicatePush(t *testing.T) {
 	// duplicates are the rows a raw LIMIT reaches first.
 	retried := scheduler.Cycle{
 		Time: ts, Target: ref, Source: "master", Sent: 4, LossCount: 1,
-		Summary: stats.Summary{Min: 1, Max: 4, Mean: 2, Median: 2},
+		Summary: stats.Summary{Min: time.Millisecond, Max: 4 * time.Millisecond, Mean: 2 * time.Millisecond, Median: 2 * time.Millisecond},
 		Hops: []probe.Hop{
 			{Index: 1, IP: "10.0.0.1", Sent: 4, Lost: 1, TargetReply: true, RTTs: []time.Duration{time.Millisecond}},
 		},
@@ -2115,7 +2118,7 @@ func TestIntegrationCycleCountersSurviveADuplicatePush(t *testing.T) {
 	w.OnCycle(ctx, retried)
 	w.OnCycle(ctx, scheduler.Cycle{
 		Time: ts, Target: ref, Source: "slave-a", Sent: 7, LossCount: 2,
-		Summary: stats.Summary{Min: 1, Max: 2, Mean: 1, Median: 1},
+		Summary: stats.Summary{Min: time.Millisecond, Max: 2 * time.Millisecond, Mean: time.Millisecond, Median: time.Millisecond},
 		Hops: []probe.Hop{
 			{Index: 1, IP: "10.0.0.1", Sent: 7, Lost: 2, TargetReply: true, RTTs: []time.Duration{time.Millisecond}},
 		},
@@ -2201,12 +2204,12 @@ func TestIntegrationCachedHopsAtSeparatesCyclesInOneMinute(t *testing.T) {
 	early, late := minute.Add(5*time.Second), minute.Add(45*time.Second)
 	w.OnCycle(ctx, scheduler.Cycle{
 		Time: early, Target: ref, Source: "master", Sent: 10, LossCount: 0,
-		Summary: stats.Summary{Min: 1, Max: 2, Mean: 1, Median: 1},
+		Summary: stats.Summary{Min: time.Millisecond, Max: 2 * time.Millisecond, Mean: time.Millisecond, Median: time.Millisecond},
 		Hops:    []probe.Hop{{Index: 1, IP: "10.0.0.1", Sent: 10, TargetReply: true, RTTs: []time.Duration{time.Millisecond}}},
 	})
 	w.OnCycle(ctx, scheduler.Cycle{
 		Time: late, Target: ref, Source: "master", Sent: 10, LossCount: 6,
-		Summary: stats.Summary{Min: 1, Max: 2, Mean: 1, Median: 1},
+		Summary: stats.Summary{Min: time.Millisecond, Max: 2 * time.Millisecond, Mean: time.Millisecond, Median: time.Millisecond},
 		Hops: []probe.Hop{
 			{Index: 1, IP: "10.0.0.1", Sent: 10, TargetReply: false, RTTs: []time.Duration{time.Millisecond}},
 			{Index: 2, IP: "10.0.0.2", Sent: 10, Lost: 6, TargetReply: true, RTTs: []time.Duration{2 * time.Millisecond}},

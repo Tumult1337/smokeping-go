@@ -23,10 +23,8 @@ import (
 // permission failures from actual probe errors and skip trace gracefully.
 //
 // The second return value counts the rounds the walk ran and the subset of
-// them the target itself echoed in. Callers that mirror per-hop stats as
-// "target" stats (mtr.go) report loss from those counts: a round is the unit
-// of a trace, and hop rows cannot answer how many rounds reached the target
-// once each round stops at its own terminal.
+// them the target itself echoed in. These describe path discovery only;
+// MTR measures target RTT and loss with an independent direct echo batch.
 func traceHops(ctx context.Context, host, family string, rounds, maxTTL int, timeout, spacing time.Duration) ([]Hop, roundStats, error) {
 	if host == "" {
 		return nil, roundStats{}, errors.New("trace: host required")
@@ -160,7 +158,7 @@ type stepFunc func(ctx context.Context, round, ttl int) ttlReply
 
 // roundStats counts completed trace rounds and the subset of them the target
 // echoed in. A cycle deadline can leave hop rows from a partial round, but that
-// round is excluded from target-level accounting.
+// round is excluded from these path-discovery counters.
 type roundStats struct {
 	attempted int
 	reached   int
@@ -203,9 +201,9 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 				agg[ttl].losses++
 			} else {
 				// An echo and an error from the same address are two rows: the
-				// marked row's RTTs are the target's own echo latencies, which
-				// MTR mirrors as cycle stats, and an unreachable's RTT is the
-				// gateway's error-generation time, not the target answering.
+				// marked row's RTTs measure target echoes at this TTL, while an
+				// unreachable measures gateway error generation. Keeping them
+				// separate also preserves the marker used for address redaction.
 				isEcho := r.kind == replyEcho
 				i := slices.IndexFunc(agg[ttl].rows, func(row respondent) bool {
 					return row.addr == r.addr && row.targetReply == isEcho

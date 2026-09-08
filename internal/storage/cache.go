@@ -566,7 +566,7 @@ func recoverToError[T any](log *slog.Logger, run func(context.Context) (T, error
 	}
 }
 
-// cloneHopsResult copies both slices so a cached entry is never handed to a
+// cloneHopsResult copies all slices so a cached entry is never handed to a
 // caller by reference.
 func cloneHopsResult(res HopsResult) HopsResult {
 	out := HopsResult{

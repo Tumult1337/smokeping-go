@@ -45,9 +45,17 @@ longer changes target-level loss, so a later path-discovery reply cannot erase
 an unanswered direct probe.
 
 The batch and walk both use the MTR count after its existing ten-round cap.
-This keeps the displayed denominator and traffic ceiling unchanged. Running
-them concurrently keeps cycle duration at approximately the slower operation,
-not their sum.
+The maximum is 300 trace requests (10 rounds × 30 TTLs) plus 10 direct requests
+per cycle. Running them concurrently keeps cycle duration at approximately the
+slower operation. The direct batch reserves the full trace sequence window so
+even a colliding raw-socket identifier cannot cross-attribute their replies.
+
+Config validation and registry construction require a direct echo budget of
+at least 50ms per ping after 200ms spacing, using `min(pings, 10)` for MTR.
+Ten direct pings therefore require an interval of at least 2.3s. Ordinary ICMP
+and cluster health probes retain the full configured ping-count budget check.
+Previously accepted MTR-only schedules below this floor are now rejected;
+operators must raise the interval or reduce pings before restart or reload.
 
 ### Alternatives rejected
 
@@ -102,6 +110,12 @@ events that were never measured. Cycle reads will apply the same conservative
 normalization: sample-less successes are removed from the aggregate sent
 denominator and zero summaries carry no latency weight. This repairs current
 history views while preserving every completed loss and every real RTT.
+Raw cycle reads omit rows with zero effective sent, and bucketed reads omit
+buckets without completed attempts. Pinned hop target counters, timeline
+target loss and worst-cycle selection, and overview loss/RTT weighting use the
+same normalization. Independent hop measurements remain visible. Overview
+retains its existing average-of-cycle-loss aggregation; cycle and timeline
+buckets retain packet-weighted loss.
 
 ## History handoff fixes
 

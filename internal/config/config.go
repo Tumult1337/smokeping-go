@@ -724,12 +724,20 @@ const (
 	MaxCycleAge = 7 * 24 * time.Hour
 )
 
-// HasICMPProbe reports whether any probe is subject to the ping schedule
-// below, which is an icmp property — MTR's worst case is unrelated, and every
-// other probe type ignores spacing entirely.
+// HasICMPProbe identifies schedules that must budget the full ping count.
 func HasICMPProbe(probes map[string]Probe) bool {
 	for _, p := range probes {
 		if p.Type == "icmp" {
+			return true
+		}
+	}
+	return false
+}
+
+// HasMTRProbe identifies schedules with a direct echo batch capped at ten.
+func HasMTRProbe(probes map[string]Probe) bool {
+	for _, p := range probes {
+		if p.Type == "mtr" {
 			return true
 		}
 	}
@@ -838,6 +846,11 @@ func (c *Config) Validate() error {
 	if HasICMPProbe(c.Probes) || (c.Cluster != nil && c.Cluster.Token != "") {
 		if _, err := ICMPPingBudget(c.Interval, c.Pings); err != nil {
 			return fmt.Errorf("icmp schedule: %w", err)
+		}
+	}
+	if HasMTRProbe(c.Probes) {
+		if _, err := ICMPPingBudget(c.Interval, min(c.Pings, MaxTraceRounds)); err != nil {
+			return fmt.Errorf("mtr direct echo schedule: %w", err)
 		}
 	}
 	ch := &c.Storage.ClickHouse

@@ -148,11 +148,17 @@ func TestCycleQueriesExcludeSamplelessSuccesses(t *testing.T) {
 		}
 	}
 	raw := queries["raw"]
+	if !strings.Contains(raw, "AND effective_sent > 0") {
+		t.Error("raw query retains legacy 1/0/all-zero rows as healthy 0ms")
+	}
 	if !strings.Contains(raw, "lost, effective_sent FROM probe_cycle") {
 		t.Errorf("raw query does not return effective sent with retained lost:\n%s", raw)
 	}
 
 	bucketed := queries["bucketed"]
+	if !strings.Contains(bucketed, "HAVING sum(effective_sent) > 0") {
+		t.Error("bucketed query retains buckets with no completed attempts")
+	}
 	if !strings.Contains(bucketed, "toUInt64(effective_sent - lost) AS latency_weight") {
 		t.Errorf("bucketed query does not zero latency weight for sample-less rows:\n%s", bucketed)
 	}
@@ -177,6 +183,42 @@ func orderByLead(query string) string {
 		}
 	}
 	return rest
+}
+
+// These consumers must agree with /cycles on a legacy 10/9/all-zero row:
+// nine completed losses, 100% loss, and no RTT. A 1/0 row has no measurement.
+func TestHistoricalConsumersUseEffectiveCycleMeasurements(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	for _, name := range []string{"pinned", "timeline", "overview"} {
+		t.Run(name, func(t *testing.T) {
+			conn := &recordConn{}
+			reader := &Reader{conn: conn}
+			var err error
+			var required []string
+			switch name {
+			case "pinned":
+				_, err = reader.queryCycleCounters(context.Background(), ref, []storage.HopPoint{{Source: "master", Time: from}})
+				required = []string{"any(effective_sent), any(lost), any(effective_loss_pct)", "AND effective_sent > 0"}
+			case "timeline":
+				_, err = reader.QueryHopsTimeline(context.Background(), ref, from, from.Add(time.Hour), storage.QueryFilter{Source: "master", Step: time.Minute})
+				required = []string{"sum(effective_sent)", "100.0 * sum(lost) / sum(effective_sent)", "argMax(timestamp, effective_loss_pct)", "AND effective_sent > 0"}
+			case "overview":
+				_, err = reader.QueryOverview(context.Background(), from, from.Add(time.Hour), []config.TargetRef{ref})
+				required = []string{"avg(effective_loss_pct)", "max(effective_loss_pct)", "toUInt64(effective_sent - lost) AS latency_weight", "(rtt_median_us, latency_weight)", "(p95_us, latency_weight)", "sum(latency_weight)", "AND effective_sent > 0"}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := strings.Join(strings.Fields(conn.query), " ")
+			required = append(required, "if(rtt_max_us = 0, lost, sent) AS effective_sent", "if(effective_sent = 0, 0, 100.0 * lost / effective_sent) AS effective_loss_pct")
+			for _, clause := range required {
+				if !strings.Contains(query, clause) {
+					t.Errorf("missing measurement contract: %s", clause)
+				}
+			}
+		})
+	}
 }
 
 // The charts consume row order straight from the server: ui/src/chartUtils.ts

@@ -13,6 +13,7 @@ import (
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/probe"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	"github.com/tumult/gosmokeping/internal/stats"
 	"github.com/tumult/gosmokeping/internal/storage"
 )
 
@@ -47,6 +48,7 @@ func newSeededReader(t *testing.T, ref config.TargetRef, at map[time.Time]int) *
 				Time: ts, RTT: time.Millisecond, Status: 200,
 			})
 		}
+		c.Summary = stats.Compute(c.RTTs)
 		w.OnCycle(ctx, c)
 	}
 	if err := w.Close(); err != nil {

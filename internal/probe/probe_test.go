@@ -235,6 +235,47 @@ func TestBuildRejectsUnschedulablePingBudget(t *testing.T) {
 	})
 }
 
+func TestMTRDirectScheduleBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		interval time.Duration
+		pings    int
+		icmpName string
+		wantOK   bool
+	}{
+		{"spacing exceeds cycle", time.Second, 10, "", false},
+		{"below ten ping floor", 2290 * time.Millisecond, 10, "", false},
+		{"ten ping floor", 2300 * time.Millisecond, 10, "", true},
+		{"cap above ten", 2300 * time.Millisecond, 20, "", true},
+		{"two ping floor", 300 * time.Millisecond, 2, "", true},
+		{"below two ping floor", 290 * time.Millisecond, 2, "", false},
+		{"one ping floor", 50 * time.Millisecond, 1, "", true},
+		{"below one ping floor", 49 * time.Millisecond, 1, "", false},
+		{"ordinary icmp keeps full count", 2300 * time.Millisecond, 20, "echo", false},
+		{"health icmp keeps full count", 2300 * time.Millisecond, 20, "_slave_health", false},
+		{"mixed full count floor", 4800 * time.Millisecond, 20, "echo", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probes := map[string]config.Probe{"path": {Type: "mtr", Timeout: time.Second}}
+			if tc.icmpName != "" {
+				probes[tc.icmpName] = config.Probe{Type: "icmp", Timeout: time.Second}
+			}
+			cfg := &config.Config{Interval: tc.interval, Pings: tc.pings, Probes: probes,
+				Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}}}
+			// _slave_health is injected after config validation; the registry
+			// must enforce its full-count budget on that received map.
+			if tc.icmpName != "_slave_health" {
+				if err := cfg.Validate(); (err == nil) != tc.wantOK {
+					t.Errorf("Validate error = %v, want accepted=%v", err, tc.wantOK)
+				}
+			}
+			if _, err := Build(probes, tc.interval, tc.pings); (err == nil) != tc.wantOK {
+				t.Errorf("Build error = %v, want accepted=%v", err, tc.wantOK)
+			}
+		})
+	}
+}
+
 func swapLookupIPAddr(t *testing.T, fn func(context.Context, string, string) ([]net.IP, error)) {
 	t.Helper()
 	orig := lookupIPFn
