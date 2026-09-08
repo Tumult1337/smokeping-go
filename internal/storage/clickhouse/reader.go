@@ -747,7 +747,8 @@ ORDER BY bucket_ts, ttl` + hopRowLimit(hopTimelineRowCap)
 	for rows.Next() {
 		var p storage.HopPoint
 		var ttl uint8
-		var sent, lost, replies uint64
+		var sent, lost uint64
+		var replies int64
 		var lossPct float64
 		var maxLossPct float32
 		var worstTs time.Time
@@ -757,7 +758,7 @@ ORDER BY bucket_ts, ttl` + hopRowLimit(hopTimelineRowCap)
 		p.Index = int64(ttl)
 		p.Sent = int64(sent)
 		p.LossCount = int64(lost)
-		p.ReplyCount = int64(replies)
+		p.ReplyCount = replies
 		p.LossPct = lossPct
 		p.MaxLossPct = float64(maxLossPct)
 		p.WorstTime = worstTs

@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -52,5 +53,45 @@ func TestQueryRTTsDropsNonFiniteRows(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].RTT != 1.5 || got[1].RTT != 0 {
 		t.Fatalf("QueryRTTs = %+v, want the finite rows 1.5 and 0 only", got)
+	}
+}
+
+type hopGridRows struct {
+	driver.Rows
+	left int
+}
+
+func (r *hopGridRows) Next() bool {
+	if r.left == 0 {
+		return false
+	}
+	r.left--
+	return true
+}
+
+func (r *hopGridRows) Scan(dest ...any) error {
+	if _, ok := dest[7].(*int64); !ok {
+		return fmt.Errorf("total_replies destination is %T, want *int64", dest[7])
+	}
+	return nil
+}
+
+func (*hopGridRows) Err() error   { return nil }
+func (*hopGridRows) Close() error { return nil }
+
+type hopGridConn struct{ driver.Conn }
+
+func (*hopGridConn) Query(context.Context, string, ...any) (driver.Rows, error) {
+	return &hopGridRows{left: 1}, nil
+}
+
+func TestQueryHopsGridScansSignedReplyCount(t *testing.T) {
+	ref := config.TargetRef{Group: "core", Target: config.Target{Name: "gw"}}
+	from := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+
+	_, err := (&Reader{conn: &hopGridConn{}}).queryHopsGrid(
+		context.Background(), ref, from, from.Add(time.Hour), "master", time.Hour)
+	if err != nil {
+		t.Fatalf("queryHopsGrid: %v", err)
 	}
 }
