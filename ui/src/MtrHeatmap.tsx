@@ -355,17 +355,30 @@ function PathHeatmap({
     // trace's own last-hop count, and the three agree. Intermediate rows keep
     // their trace per-hop loss above. ICMP targets are excluded: their
     // probe_cycle is the ordinary echo batch, not this trace, so mixing it in
-    // would make an ICMP graph outage read as MTR loss. A cycle with no
-    // authoritative value (old server, no measurement) keeps the trace paint.
-    const targetRow = visibleHops[visibleHops.length - 1];
-    const targetRowData = rows.get(targetRow);
-    if (probeType === "mtr" && targetRowData) {
+    // would make an ICMP graph outage read as MTR loss.
+    //
+    // Repaint each bucket's OWN deepest occupied row, not visibleHops[last]
+    // (the window's global deepest): after the clamp a bucket answered at hop 6
+    // has no row at the window's hop 10, so painting the fixed global row drew
+    // the target on cycles that never ran that deep — a phantom bottom-row
+    // strip. A cycle with no occupied row at all keeps the trace paint. Edge:
+    // a fully-lost, unclamped bucket's deepest row is a router, so its cell
+    // takes the end-to-end loss colour rather than the router's own.
+    if (probeType === "mtr") {
       for (const t of cycles) {
         const target = targetLossByCycle.get(t);
         if (!target) continue;
+        let rank = -1;
+        for (let r = visibleHops.length - 1; r >= 0; r--) {
+          if (rows.get(visibleHops[r])?.has(t)) {
+            rank = r;
+            break;
+          }
+        }
+        if (rank < 0) continue;
         const x = stepSec > 0 ? xForSec(t) : xForSec(t) - colW / 2;
         ctx.fillStyle = lossColor(target.LossPct, heatOk);
-        ctx.fillRect(x, 2 + visibleHops.indexOf(targetRow) * actualRowH, Math.max(1, colW), actualRowH - 1);
+        ctx.fillRect(x, 2 + rank * actualRowH, Math.max(1, colW), actualRowH - 1);
       }
     }
 
@@ -403,11 +416,16 @@ function PathHeatmap({
     }
     ctx.textAlign = "left";
 
-    // Selected-cycle marker.
+    // Selected-cycle marker, centred in its bucket cell. Cells draw from their
+    // bucket start (left edge), so marking the raw cycle time put the line on
+    // the cell's left edge — reading as the cycle before it. Snap to the bucket
+    // holding selectedSec (the same cycleAtSec a click uses) and offset by half
+    // a column. The raw tier (stepSec 0) sits on no grid, so mark it directly.
     if (selectedSec != null && selectedSec >= fromSec && selectedSec <= toSec) {
-      const x = xForSec(selectedSec);
+      const bucketStart = stepSec > 0 ? cycleAtSec(cycles, stepSec, selectedSec) : null;
+      const x = bucketStart != null ? xForSec(bucketStart) + colW / 2 : xForSec(selectedSec);
       ctx.fillStyle = markerFill;
-      ctx.fillRect(Math.round(x), 2, 2, plotH - 4);
+      ctx.fillRect(Math.round(x - 1), 2, 2, plotH - 4);
     }
   }, [rows, cycles, visibleHops, targetLossByCycle, height, fromSec, toSec, selectedSec, stepSec, repaintCount]);
 
