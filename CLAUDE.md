@@ -349,9 +349,17 @@ Key points a reader can't derive from a single file:
   budget and it returned no hops at all.
 
   **Each round runs to its own terminal**, an echo reply *or* an ICMP
-  unreachable, with no cross-round TTL clamp: a route that lengthens
-  mid-cycle gets its new hops probed and one that shortens keeps the rows the
-  longer path already measured. The unreachable's reporting gateway is the
+  unreachable. `walkRounds` then clamps its emitted rows at the nearest TTL the
+  target itself answered, the way mtr's `net_max` returns at the first hop equal
+  to the destination: a lost target echo makes a round overshoot to a deeper
+  TTL where the target answers again with spare TTL, and without the clamp that
+  echo became a fabricated deeper hop carrying the target's own address (the
+  same address at TTL 9/10/11 an operator reads as broken). The clamp is on the
+  emitted rows only — a round still walks to its own terminal, so a mid-cycle
+  route change is probed but the path shown is the nearest distance to the
+  target, not the union of every route seen. A target that never answered
+  leaves the path unclamped, so a dead path still shows every router it reached.
+  The unreachable's reporting gateway is the
   last hop, annotated with a closed-set `Unreach` label (`unreachLabel`,
   RFC 792 / RFC 4443 codes normalized across families); walking past it
   re-elicited that same gateway at every deeper TTL and fabricated a clean
@@ -369,9 +377,11 @@ Key points a reader can't derive from a single file:
   rounds × TTLs derivation is unchanged; a TTL's losses have no responder to
   blame and fold onto its first-seen row, which keeps single-responder
   numbers identical to the pre-split shape, and a TTL nothing answered emits
-  one `IP: ""` row. Rows the target itself answered carry `TargetReply` —
-  the target's row is no longer guaranteed to be the deepest, so `/hops`
-  redaction keys on that marker instead of on position. End-to-end loss does
+  one `IP: ""` row. Rows the target itself answered carry `TargetReply`;
+  `/hops` redaction keys on that marker rather than on position, because a TTL
+  can carry both a router's row and the target's echo (the target is not
+  necessarily first-seen), anycast can put two target rows at one TTL, and rows
+  stored before the clamp still hold the target at several TTLs. End-to-end loss does
   **not**: it comes from the cycle's own direct target-attempt counters, served
   as `target_loss` alongside `hops`, because target-marked trace rows can be
   duplicated by path changes.

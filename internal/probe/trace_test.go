@@ -127,15 +127,6 @@ func (s *scriptStep) step(_ context.Context, round, ttl int) ttlReply {
 	return ttlReply{}
 }
 
-func (s *scriptStep) called(round, ttl int) bool {
-	for _, c := range s.calls {
-		if c == [2]int{round, ttl} {
-			return true
-		}
-	}
-	return false
-}
-
 // addrOrZero maps a test case's "" onto the invalid zero Addr matchDatagram
 // reports for a non-match.
 func addrOrZero(s string) netip.Addr {
@@ -143,6 +134,18 @@ func addrOrZero(s string) netip.Addr {
 		return netip.Addr{}
 	}
 	return netip.MustParseAddr(s)
+}
+
+// hasTargetRow reports whether a marked target row for addr exists at idx; a
+// TTL can carry both a router and the target's echo, so an index lookup alone
+// cannot find it.
+func hasTargetRow(hops []Hop, idx int, addr string) bool {
+	for _, h := range hops {
+		if h.Index == idx && h.TargetReply && h.IP == addr {
+			return true
+		}
+	}
+	return false
 }
 
 func hopByIndex(t *testing.T, hops []Hop, idx int) Hop {
@@ -163,10 +166,11 @@ func ech(addr string) ttlReply {
 	return ttlReply{addr: netip.MustParseAddr(addr), rtt: time.Millisecond, kind: replyEcho}
 }
 
-// A route that lengthens mid-cycle must have its new downstream hops probed:
-// the old cross-round finalTTL clamp froze the walk at the shortest path yet
-// seen, so hops added by a reroute never appeared at all.
-func TestWalkRoundsFollowsRouteLengthening(t *testing.T) {
+// Real mtr clamps the displayed path at the nearest TTL whose address is the
+// destination (net_max returns at the first such hop). A round that takes a
+// longer path to the same target does not extend the path past the nearest hop
+// the target answered at.
+func TestWalkRoundsClampsToNearestTargetHop(t *testing.T) {
 	s := &scriptStep{replies: map[[2]int]ttlReply{
 		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
 		{1, 1}: te("10.0.0.1"), {1, 2}: te("10.0.1.2"), {1, 3}: te("10.0.1.3"), {1, 4}: ech("192.0.2.9"),
@@ -175,28 +179,32 @@ func TestWalkRoundsFollowsRouteLengthening(t *testing.T) {
 	if stats.reached == 0 {
 		t.Fatal("target answered in both rounds; reached must be true")
 	}
-	if !s.called(1, 3) || !s.called(1, 4) {
-		t.Fatalf("round 1 never probed past the round-0 path length; calls: %v", s.calls)
+	for _, h := range hops {
+		if h.Index > 2 {
+			t.Fatalf("path not clamped at the nearest target hop (2): %+v", h)
+		}
 	}
-	if h := hopByIndex(t, hops, 3); h.Sent != 1 {
-		t.Fatalf("hop 3 sent = %d, want 1", h.Sent)
+	if !hasTargetRow(hops, 2, "192.0.2.9") {
+		t.Fatalf("target row missing at the nearest hop: %+v", hops)
 	}
-	hopByIndex(t, hops, 4)
 }
 
-// A route that shortens must not discard rows already collected on the longer
-// path: they carry real measurements from the rounds that walked it.
-func TestWalkRoundsKeepsRowsFromShortenedRoute(t *testing.T) {
+// A route that shortens clamps to the nearer target hop: mtr shows the shortest
+// distance to the target, not the union of every route seen, so the deeper rows
+// the longer path measured are dropped.
+func TestWalkRoundsClampsToShortenedRoute(t *testing.T) {
 	s := &scriptStep{replies: map[[2]int]ttlReply{
 		{0, 1}: te("10.0.0.1"), {0, 2}: te("10.0.0.2"), {0, 3}: te("10.0.0.3"), {0, 4}: ech("192.0.2.9"),
 		{1, 1}: te("10.0.0.1"), {1, 2}: ech("192.0.2.9"),
 	}}
 	hops, _ := walkRounds(context.Background(), 2, 10, 0, s.step)
-	if h := hopByIndex(t, hops, 3); h.Sent != 1 || h.IP != "10.0.0.3" {
-		t.Fatalf("longer-path hop 3 lost or altered: %+v", h)
+	for _, h := range hops {
+		if h.Index > 2 {
+			t.Fatalf("deeper rows from the longer route not clamped: %+v", h)
+		}
 	}
-	if h := hopByIndex(t, hops, 4); h.Sent != 1 {
-		t.Fatalf("longer-path hop 4 lost: %+v", h)
+	if !hasTargetRow(hops, 2, "192.0.2.9") {
+		t.Fatalf("target row missing at the nearest hop: %+v", hops)
 	}
 }
 
@@ -215,11 +223,34 @@ func TestWalkRoundsStopsEachRoundAtEcho(t *testing.T) {
 	}
 }
 
-// The composed shape behind the redaction design: the target
-// echoes at ttl 2 in round 0, later rounds stay silent through maxTTL. The
-// echo row must carry TargetReply, deeper silent rows must not, and reached
-// stays true — TestRedactTerminalHopKeysOnTargetReply (internal/api) fixes its
-// fixture to this exact output.
+// A lost target echo must not fabricate deeper hops. Real mtr clamps the path
+// at the nearest TTL whose address is the destination (net_max returns at the
+// first such hop), so a round that loses the echo at the target's true TTL and
+// overshoots — the target answering again with spare TTL — adds no row past
+// that hop, and the lost echo counts as loss at the target's own hop.
+func TestWalkRoundsClampsOvershootPastTarget(t *testing.T) {
+	s := &scriptStep{replies: map[[2]int]ttlReply{
+		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
+		{1, 1}: te("10.0.0.1"), {1, 3}: ech("192.0.2.9"),
+	}}
+	hops, _ := walkRounds(context.Background(), 2, 10, 0, s.step)
+	for _, h := range hops {
+		if h.Index > 2 {
+			t.Fatalf("row past the target's nearest hop (2) not clamped: %+v", h)
+		}
+	}
+	target := hopByIndex(t, hops, 2)
+	if !target.TargetReply || target.IP != "192.0.2.9" {
+		t.Fatalf("target row wrong: %+v", target)
+	}
+	if target.Sent != 2 || target.Lost != 1 {
+		t.Fatalf("target hop must carry the lost echo as loss (sent=2 lost=1): %+v", target)
+	}
+}
+
+// The target echoes at ttl 2 in round 0; the path clamps at that hop, so a
+// later silent round adds no rows past it, the echo row carries TargetReply,
+// and reached stays true.
 func TestWalkRoundsMarksEarlyEchoRow(t *testing.T) {
 	s := &scriptStep{replies: map[[2]int]ttlReply{
 		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
@@ -233,12 +264,12 @@ func TestWalkRoundsMarksEarlyEchoRow(t *testing.T) {
 		t.Fatalf("echo row not marked: %+v", target)
 	}
 	for _, h := range hops {
+		if h.Index > 2 {
+			t.Fatalf("path not clamped at the target hop: %+v", h)
+		}
 		if h.Index != 2 && h.TargetReply {
 			t.Fatalf("non-echo row marked at index %d: %+v", h.Index, h)
 		}
-	}
-	if deepest := hopByIndex(t, hops, 4); deepest.IP != "" || deepest.TargetReply {
-		t.Fatalf("silent deep row must stay unmarked and addressless: %+v", deepest)
 	}
 }
 
@@ -637,9 +668,9 @@ func TestPeerAddrHandlesBothSocketTypes(t *testing.T) {
 	}
 }
 
-// MTR's loss is round-based, so a round that reached the target counts once
-// however many TTLs the target answered at: here a lengthening route marks it
-// at three, and the marked rows sum to more probes than there were rounds.
+// MTR's loss is round-based: reached counts every round that reached the target
+// however deep each round's echo landed, while the path clamps to the nearest
+// hop the target answered at rather than showing the target once per echo TTL.
 func TestWalkRoundsCountsRoundsNotEchoRows(t *testing.T) {
 	s := &scriptStep{replies: map[[2]int]ttlReply{
 		{0, 1}: te("10.0.0.1"), {0, 2}: ech("192.0.2.9"),
@@ -650,14 +681,17 @@ func TestWalkRoundsCountsRoundsNotEchoRows(t *testing.T) {
 	if stats.attempted != 3 || stats.reached != 3 {
 		t.Fatalf("stats = %+v, want 3 attempted and 3 reached", stats)
 	}
-	rowSent := 0
+	marked := 0
 	for _, h := range hops {
+		if h.Index > 2 {
+			t.Fatalf("target not clamped to its nearest hop: %+v", h)
+		}
 		if h.TargetReply {
-			rowSent += h.Sent
+			marked++
 		}
 	}
-	if rowSent <= stats.reached {
-		t.Fatalf("fixture no longer reproduces row-summed inflation: rowSent=%d", rowSent)
+	if marked != 1 {
+		t.Fatalf("target must appear at exactly one hop after clamping, got %d: %+v", marked, hops)
 	}
 }
 

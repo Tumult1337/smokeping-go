@@ -349,21 +349,20 @@ function PathHeatmap({
       }
     }
 
-    // Target loss is measured once per MTR cycle, independently of the hop
-    // rows. ICMP targets also have opportunistic hop rows, but their
-    // probe_cycle is the normal echo batch, not this trace; mixing it into
-    // the MTR matrix makes an ICMP graph outage look like MTR loss.
-    // Put MTR loss on the last path row so it remains visible when no hop row
-    // carries the lost target probes.
+    // The target is the last path row. Its loss is the end-to-end loss measured
+    // once per MTR cycle (the direct echo batch), the same number the graph and
+    // the header show — so the target row is repainted from that, not from the
+    // trace's own last-hop count, and the three agree. Intermediate rows keep
+    // their trace per-hop loss above. ICMP targets are excluded: their
+    // probe_cycle is the ordinary echo batch, not this trace, so mixing it in
+    // would make an ICMP graph outage read as MTR loss. A cycle with no
+    // authoritative value (old server, no measurement) keeps the trace paint.
     const targetRow = visibleHops[visibleHops.length - 1];
     const targetRowData = rows.get(targetRow);
     if (probeType === "mtr" && targetRowData) {
       for (const t of cycles) {
         const target = targetLossByCycle.get(t);
-        if (!target || target.LossPct <= 0) continue;
-        const p = targetRowData.get(t);
-        const hopLoss = p ? ((p as { MaxLossPct?: number }).MaxLossPct ?? p.LossPct) : 0;
-        if (hopLoss >= target.LossPct) continue;
+        if (!target) continue;
         const x = stepSec > 0 ? xForSec(t) : xForSec(t) - colW / 2;
         ctx.fillStyle = lossColor(target.LossPct, heatOk);
         ctx.fillRect(x, 2 + visibleHops.indexOf(targetRow) * actualRowH, Math.max(1, colW), actualRowH - 1);

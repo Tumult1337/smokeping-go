@@ -1032,6 +1032,35 @@ func TestGetHopsTimelineRedactsHealthTarget(t *testing.T) {
 	}
 }
 
+// A redacted health hop must keep its loss. The heatmap colours a cell from
+// MaxLossPct/LossPct gated on Sent-LossCount, so blanking those with the
+// address would render every redacted slave hop as a healthy no-loss cell —
+// redactAllHopAddresses must touch only the address and annotations.
+func TestGetHopsTimelineRedactionKeepsLoss(t *testing.T) {
+	now := time.Now()
+	r := &stubReader{hops: []storage.HopPoint{
+		{Source: "tokyo-1", Time: now, Index: 2, IP: "10.44.0.2",
+			Sent: 10, LossCount: 3, ReplyCount: 7, LossPct: 30, MaxLossPct: 50},
+	}}
+	srv := newTestServer(t, withReader(r), withHealth(healthStub()))
+
+	var body struct {
+		Hops []hopTimelineDTO `json:"hops"`
+	}
+	doJSON(t, srv, "GET", "/api/v1/targets/_cluster/tokyo-1/hops/timeline?source=tokyo-1", &body)
+
+	if len(body.Hops) != 1 {
+		t.Fatalf("got %d hops, want 1: %+v", len(body.Hops), body.Hops)
+	}
+	h := body.Hops[0]
+	if h.IP != hopAddrSentinel {
+		t.Fatalf("address not redacted: %+v", h)
+	}
+	if h.Sent != 10 || h.LossCount != 3 || h.ReplyCount != 7 || h.LossPct != 30 || h.MaxLossPct != 50 {
+		t.Fatalf("loss fields lost through redaction; heatmap would render no-loss: %+v", h)
+	}
+}
+
 // TestGetHopsTimelineKeepsOrdinaryTargetIntact is the /hops/timeline
 // counterpart to TestGetHopsKeepsOrdinaryTargetIntact.
 func TestGetHopsTimelineKeepsOrdinaryTargetIntact(t *testing.T) {

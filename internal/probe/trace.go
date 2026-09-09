@@ -166,11 +166,12 @@ type roundStats struct {
 
 // walkRounds runs the TTL walk over an injected per-probe step so tests drive
 // this exact loop. Each round walks 1..maxTTL and stops at its own terminal —
-// an echo reply or a gateway's unreachable, which is the real end of the path
-// — so a route that changes mid-cycle is followed rather than clamped to the
-// shortest path seen. Every responder at a TTL gets its own row, and each row
-// that echoed is marked TargetReply because the target's row is no longer
-// guaranteed to be the deepest.
+// an echo reply or a gateway's unreachable. The emitted rows are then clamped
+// at the nearest TTL the target answered, as mtr's net_max does, so a lost
+// target echo cannot fabricate a deeper hop from the target's own address.
+// Every responder at a TTL gets its own row, and each row that echoed is marked
+// TargetReply — kept because a router row can share the target's TTL, so the
+// marker rather than position identifies the target after clamping.
 func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, step stepFunc) ([]Hop, roundStats) {
 	type respondent struct {
 		addr        netip.Addr
@@ -243,8 +244,28 @@ func walkRounds(ctx context.Context, rounds, maxTTL int, spacing time.Duration, 
 		}
 	}
 
+	// Clamp the path at the nearest TTL the target itself answered, as mtr's
+	// net_max does (it returns at the first hop whose address is the
+	// destination). A lost target echo makes a round overshoot to a deeper TTL
+	// where the target answers again with spare TTL; without this the echo
+	// becomes a fabricated deeper hop carrying the target's own address. The
+	// unreachable terminal is already per-round, and a target that never
+	// answered leaves targetTTL 0 so the full walk still shows.
+	targetTTL := 0
+	for ttl := 1; ttl <= maxTTL && targetTTL == 0; ttl++ {
+		for _, row := range agg[ttl].rows {
+			if row.targetReply {
+				targetTTL = ttl
+				break
+			}
+		}
+	}
+
 	var hops []Hop
 	for ttl := 1; ttl <= maxTTL; ttl++ {
+		if targetTTL != 0 && ttl > targetTTL {
+			break
+		}
 		a := agg[ttl]
 		if len(a.rows) == 0 {
 			if a.losses > 0 {

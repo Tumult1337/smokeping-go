@@ -1,5 +1,16 @@
 import { useCallback, useState } from "react";
-import type { HopPoint } from "./api";
+import type { CycleLoss, HopPoint } from "./api";
+
+// End-to-end loss for one source, or null when unknown (server predates
+// target_loss, or that source's cycle recorded no measurement). Sent <= 0 is
+// "no measurement", never 0% loss. Shared by the path table and MtrSection so
+// the target row, the header and the graph read one number.
+export function lossForSource(cycles: CycleLoss[] | null, source: string): number | null {
+  if (cycles == null) return null;
+  const row = cycles.find((c) => (c.Source ?? "") === source);
+  if (row == null || row.Sent <= 0) return null;
+  return row.LossPct;
+}
 
 // COLLAPSED_SOURCES_KEY is the localStorage key shared by MtrHeatmap and
 // MtrSection so a user who collapses a source in one place stays collapsed

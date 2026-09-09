@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getHops, type CycleLoss, type HopPoint } from "./api";
-import { groupBySource } from "./mtrUtils";
+import { groupBySource, lossForSource } from "./mtrUtils";
 import { lossTextColor } from "./palette";
 
 interface Props {
@@ -101,6 +101,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
           rows={g.hops}
           scale={sharedScale}
           showSourceHeading={groups.length > 1}
+          targetLoss={probeType === "mtr" ? lossForSource(cycleLoss, g.source) : null}
         />
       ))}
     </>
@@ -113,12 +114,18 @@ export function HopsPath({
   rows,
   scale,
   showSourceHeading,
+  targetLoss,
 }: {
   source: string;
   time: string;
   rows: HopPoint[];
   scale: number;
   showSourceHeading: boolean;
+  // End-to-end loss for this source (the MTR direct echo batch), shown on the
+  // target's own row so the path table, the graph and the header agree. null
+  // for non-MTR or when no authoritative value exists; the target row then
+  // falls back to its trace loss.
+  targetLoss?: number | null;
 }) {
   return (
     <div className="hops-path">
@@ -145,7 +152,17 @@ export function HopsPath({
           <tbody>
             {/* Index and IP both collide inside one TTL — ECMP responders,
                 and two target rows blanked alike by health redaction. */}
-            {rows.map((h, i) => (
+            {rows.map((h, i) => {
+              // The target's own row shows the end-to-end loss when we have it,
+              // so it matches the graph and header; every other hop keeps its
+              // trace per-hop loss. Only the loss cell changes — the latency
+              // columns and bar stay gated on the trace row's own loss, because
+              // the RTTs are the trace's samples and h.LossPct >= 100 is what
+              // marks a row that measured none (rendering 0.0 would put an
+              // unmeasured hop at the top of the latency column).
+              const effLoss =
+                h.TargetReply && targetLoss != null ? targetLoss : h.LossPct;
+              return (
               <tr key={`${h.Index}|${h.IP}|${i}`}>
                 <td>{h.Index}</td>
                 <td>
@@ -174,8 +191,8 @@ export function HopsPath({
                     </span>
                   )}
                 </td>
-                <td className="num" style={{ color: lossTextColor(h.LossPct, "#cfd3dd") }}>
-                  {h.LossPct.toFixed(1)}
+                <td className="num" style={{ color: lossTextColor(effLoss, "#cfd3dd") }}>
+                  {effLoss.toFixed(1)}
                 </td>
                 <td className="num">{h.Sent}</td>
                 {/* A hop that answered nothing has all three at 0, which is a
@@ -191,7 +208,8 @@ export function HopsPath({
                   )}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

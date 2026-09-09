@@ -3,7 +3,7 @@ import { getHops, type CycleLoss, type HopPoint } from "./api";
 import { HopsPath } from "./HopsTable";
 import { HopsTable } from "./HopsTable";
 import { MtrHeatmap } from "./MtrHeatmap";
-import { countDistinct, groupBySource, useCollapsedSources } from "./mtrUtils";
+import { countDistinct, groupBySource, lossForSource, useCollapsedSources } from "./mtrUtils";
 import { lossTextColor } from "./palette";
 
 interface Props {
@@ -307,6 +307,7 @@ function MultiSourceLayout({
                     rows={g.hops}
                     scale={scale}
                     showSourceHeading={false}
+                    targetLoss={endToEndLoss}
                   />
                   {fromSec != null && toSec != null && (
                     <MtrHeatmap
@@ -333,17 +334,6 @@ function MultiSourceLayout({
       </div>
     </>
   );
-}
-
-// Loss at the target comes from the cycle's own round counters and from
-// nowhere else — hop rows cannot answer how many rounds reached the target
-// once each round stops at its own terminal. null means unknown: the server
-// predates target_loss, or that source's cycle recorded no measurement.
-function lossForSource(cycles: CycleLoss[] | null, source: string): number | null {
-  if (cycles == null) return null;
-  const row = cycles.find((c) => (c.Source ?? "") === source);
-  if (row == null || row.Sent <= 0) return null;
-  return row.LossPct;
 }
 
 function roundsForSource(cycles: CycleLoss[] | null, source: string): number | null {
