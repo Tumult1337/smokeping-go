@@ -6,6 +6,24 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/icon.svg" />
     <title>gosmokeping</title>
+    <script>
+      // Apply the stored theme before first paint so there is no wrong-theme
+      // flash. Key and values mirror src/theme.ts.
+      (function () {
+        try {
+          var pref = localStorage.getItem("gosmokeping.theme") || "system";
+          var dark =
+            pref === "dark" ||
+            (pref !== "light" &&
+              matchMedia("(prefers-color-scheme: dark)").matches);
+          var theme = dark ? "dark" : "light";
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch (_) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

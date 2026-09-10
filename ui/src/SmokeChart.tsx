@@ -3,7 +3,8 @@ import uPlot, { type Options, type AlignedData, type Series, type Band } from "u
 import type { CyclePoint } from "./api";
 import { paletteForSorted, type PaletteEntry } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, decadeSplits, LOG_Y_FLOOR } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, decadeSplits, LOG_Y_FLOOR, chartChrome } from "./chartUtils";
+import { useEffectiveTheme, type Theme } from "./theme";
 
 interface Props {
   points: CyclePoint[];
@@ -56,7 +57,8 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
   // so the LossStripCanvas canvas covers exactly the same x range as the chart.
   const [plotOffsets, setPlotOffsets] = useState({ left: 34, right: 0 });
 
-  const built = useMemo(() => buildAligned(points), [points]);
+  const theme = useEffectiveTheme();
+  const built = useMemo(() => buildAligned(points, theme), [points, theme]);
   builtRef.current = built;
   // Stable signature of the source set: only a change here forces a uPlot
   // teardown, since series and band topology depend on the source count.
@@ -90,6 +92,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
   useEffect(() => {
     if (!divRef.current) return;
 
+    const chrome = chartChrome();
     const opts: Options = {
       width: divRef.current.clientWidth,
       height,
@@ -100,10 +103,10 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
           : { auto: true, range: { min: { pad: 0.1 }, max: { pad: 0.1 } } },
       },
       axes: [
-        { stroke: "#8a93a6", grid: { stroke: "#1f2430" } },
+        { stroke: chrome.axis, grid: { stroke: chrome.grid } },
         {
-          stroke: "#8a93a6",
-          grid: { stroke: "#1f2430" },
+          stroke: chrome.axis,
+          grid: { stroke: chrome.grid },
           label: "ms",
           labelSize: 30,
           // One tick per decade in log mode — uPlot's default minor ticks
@@ -227,8 +230,9 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
     // updates flow through the setData effect below so refreshes don't flash.
     // yScale forces a rebuild because uPlot's scale `distr` is read once at
     // construction time — setScale("y", …) can't switch a scale from lin to
-    // log after the fact.
-  }, [height, sourcesKey, yScale]);
+    // log after the fact. theme forces a rebuild so the axis/grid strokes
+    // re-read the chart-chrome tokens.
+  }, [height, sourcesKey, yScale, theme]);
 
   // Pin the x scale when the requested window changes (range button, new
   // target). On a plain data refresh within the same window we skip the pin
@@ -416,12 +420,12 @@ const PCT_KEYS = ["Min", "P5", "P25", "Median", "P75", "P95", "Max"] as const;
 const PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max"] as const;
 
 
-function buildAligned(points: CyclePoint[]): Built {
+function buildAligned(points: CyclePoint[], theme: Theme): Built {
   const xSeries: Series = {};
   if (points.length === 0) {
     // Keep a single-band topology so the legend doesn't flicker between
     // zero-source and one-source states while loading.
-    const palette = paletteForSorted([""]);
+    const palette = paletteForSorted([""], theme);
     const only = palette.get("")!;
     return {
       sources: [""],
@@ -446,7 +450,7 @@ function buildAligned(points: CyclePoint[]): Built {
     g.secs.push(unixSec(p.Time));
   }
   const sources = [...bySource.keys()].sort();
-  const paletteBySource = paletteForSorted(sources);
+  const paletteBySource = paletteForSorted(sources, theme);
   // Only prefix legend labels when there's something to disambiguate — a plain
   // single-source chart should read "min / p5 / median / …" like it always has.
   const prefixed = sources.length > 1;

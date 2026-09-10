@@ -3,7 +3,8 @@ import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { paletteForSorted, lossColor, type PaletteEntry } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss, decadeSplits, LOG_Y_FLOOR } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss, decadeSplits, LOG_Y_FLOOR, chartChrome } from "./chartUtils";
+import { useEffectiveTheme, type Theme } from "./theme";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
@@ -85,7 +86,8 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
   const soloIdxRef = useRef<number | null>(null);
   const soloSourceRef = useRef<string | null>(null);
 
-  const built = useMemo(() => buildSources(points), [points]);
+  const theme = useEffectiveTheme();
+  const built = useMemo(() => buildSources(points, theme), [points, theme]);
   // Left/right gutter of the uPlot plot area in CSS px, tracked from u.bbox
   // so the LossStripCanvas canvas covers exactly the same x range as the chart.
   const [plotOffsets, setPlotOffsets] = useState({ left: 34, right: 0 });
@@ -151,6 +153,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
       for (const label of BAR_PCT_LABELS) series.push(mk(label));
     });
 
+    const chrome = chartChrome();
     const opts: Options = {
       width: divRef.current.clientWidth,
       height,
@@ -161,10 +164,10 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
           : { auto: false, range: () => yRangeRef.current },
       },
       axes: [
-        { stroke: "#8a93a6", grid: { stroke: "#1f2430" } },
+        { stroke: chrome.axis, grid: { stroke: chrome.grid } },
         {
-          stroke: "#8a93a6",
-          grid: { stroke: "#1f2430" },
+          stroke: chrome.axis,
+          grid: { stroke: chrome.grid },
           label: "ms",
           labelSize: 30,
           // Default log splits land on every 2/3/5/7 inside each decade;
@@ -203,7 +206,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
             ctx.clip();
             for (let si = 0; si < stacks.length; si++) {
               if (soloIdx != null && si !== soloIdx) continue;
-              drawStack(u, ctx, stacks[si], hiddenRef.current);
+              drawStack(u, ctx, stacks[si], hiddenRef.current, theme);
             }
             ctx.restore();
           },
@@ -318,8 +321,9 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
     // sourcesKey rebuilds the chart when the set of sources changes; data-only
     // updates flow through the setData effect below. yScale is in deps because
     // uPlot reads `distr` once at construction — flipping lin↔log requires a
-    // full rebuild.
-  }, [height, sourcesKey, yScale]);
+    // full rebuild. theme rebuilds so the axis/grid strokes and the draw hook's
+    // captured theme re-read on a light/dark flip.
+  }, [height, sourcesKey, yScale, theme]);
 
   // Pin the x scale only when the requested window changes. A plain data
   // refresh passes resetScales=false so user drag-zooms survive the tick.
@@ -530,7 +534,7 @@ type Built = {
   aggregates: SourceAgg[];
 };
 
-function buildSources(points: CyclePoint[]): Built {
+function buildSources(points: CyclePoint[], theme: Theme): Built {
   if (points.length === 0) {
     return {
       sources: [],
@@ -554,7 +558,7 @@ function buildSources(points: CyclePoint[]): Built {
     g.secs.push(unixSec(p.Time));
   }
   const sources = [...bySource.keys()].sort();
-  const paletteBySource = paletteForSorted(sources);
+  const paletteBySource = paletteForSorted(sources, theme);
 
   // Union x-axis so the cursor can pick any source's sample. Each source's
   // values stay on its own index domain inside the stack; uPlot only uses
@@ -741,6 +745,7 @@ function drawStack(
   ctx: CanvasRenderingContext2D,
   stack: SourceStack,
   hidden: Set<string>,
+  theme: Theme,
 ) {
   const { ts, bands: bandsArr, medians, losses } = stack;
   const n = ts.length;
@@ -797,7 +802,7 @@ function drawStack(
       // the median tick falls back to the plain palette stroke.
       ctx.fillStyle = lossHidden
         ? stack.medianColor
-        : lossColor(losses[i], stack.medianColor);
+        : lossColor(losses[i], stack.medianColor, theme);
       ctx.fillRect(x, yMed, w, 1);
     }
   }

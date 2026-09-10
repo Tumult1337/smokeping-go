@@ -15,6 +15,8 @@ import { paletteForSorted, lossTextColor } from "./palette";
 import { effectiveMin, windowLoss } from "./chartUtils";
 import { OverviewView, type SortKey, type SortDir } from "./OverviewView";
 import type { OverviewWindow } from "./api";
+import { ThemeContext, useThemeController } from "./theme";
+import { ThemeToggle } from "./ThemeToggle";
 
 type Range = "-1h" | "-6h" | "-24h" | "-7d" | "-30d" | "-180d" | "-365d";
 type ChartStyle = "band" | "bars";
@@ -131,6 +133,7 @@ export default function App() {
   // so the address bar tracks the UI without forcing React to re-parse on
   // every render.
   const initialUrl = useMemo(() => readUrlState(), []);
+  const { pref: themePref, effective: theme, setPref: setThemePref } = useThemeController();
   const [targets, setTargets] = useState<Target[]>([]);
   const [sources, setSources] = useState<string[]>([]);
   const [slaveView, setSlaveView] = useState<string | null>(initialUrl.slaveView);
@@ -140,9 +143,7 @@ export default function App() {
   const [range, setRange] = useState<Range>(initialUrl.range ?? "-24h");
   const [cycles, setCycles] = useState<CyclesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState(true);
   const [refreshTick, setRefreshTick] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
   const [chartStyle, setChartStyle] = useState<ChartStyle>(() => {
     if (initialUrl.mode) return initialUrl.mode;
     const saved = typeof localStorage !== "undefined" ? localStorage.getItem(CHART_STYLE_KEY) : null;
@@ -387,7 +388,6 @@ export default function App() {
         setPickedSource(null);
       }
     }
-    setRefreshing(true);
     let cancelled = false;
     getCycles(selectedId, fromArg, toArg, selectedSource ?? undefined)
       .then((c) => {
@@ -398,22 +398,22 @@ export default function App() {
           setError(String(e));
           setCycles(null);
         }
-      })
-      .finally(() => {
-        if (!cancelled) setRefreshing(false);
       });
     return () => {
       cancelled = true;
     };
   }, [selectedId, range, refreshTick, selectedSource, zoom]);
 
+  // Auto-refresh runs on a fixed interval, but pauses while the user is zoomed
+  // into a sub-window: a live update would yank the view out from under a manual
+  // inspection. Resetting the zoom (the "reset zoom" button) resumes it.
   useEffect(() => {
-    if (!autoRefresh) return;
+    if (zoom != null) return;
     const id = setInterval(() => {
       setRefreshTick((n) => n + 1);
     }, AUTO_REFRESH_MS);
     return () => clearInterval(id);
-  }, [autoRefresh]);
+  }, [zoom]);
 
   // Mirror UI state into the URL so the current view is shareable via copy-
   // paste. replaceState (not pushState) keeps the back button sane — we're
@@ -483,10 +483,6 @@ export default function App() {
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, []);
-
-  const refresh = useCallback(() => {
-    setRefreshTick((n) => n + 1);
   }, []);
 
   useEffect(() => {
@@ -592,8 +588,8 @@ export default function App() {
     const present = new Set<string>();
     for (const p of points) present.add(p.Source ?? "");
     if (present.size < 2) return new Map();
-    return paletteForSorted([...present].sort());
-  }, [points, selectedSource]);
+    return paletteForSorted([...present].sort(), theme);
+  }, [points, selectedSource, theme]);
 
   const pickTarget = (id: string, source?: string) => {
     if (id !== selectedId || overviewView || slaveView !== null) navIntentRef.current = "push";
@@ -648,12 +644,16 @@ export default function App() {
   const showOverview = !showSlaveOverview && (!selectedId || overviewView);
 
   return (
+    <ThemeContext.Provider value={theme}>
     <div className={`app ${sidebarOpen ? "sidebar-open" : ""}`}>
       {sidebarOpen && (
         <div className="sidebar-backdrop" ref={backdropRef} onClick={() => setSidebarOpen(false)} />
       )}
       <aside className="sidebar" ref={sidebarRef}>
-        <h1>gosmokeping</h1>
+        <div className="sidebar-head">
+          <h1>gosmokeping</h1>
+          <ThemeToggle pref={themePref} onChange={setThemePref} />
+        </div>
         <div className="search-wrap">
           <input
             ref={searchInputRef}
@@ -770,10 +770,7 @@ export default function App() {
               setOverviewSort(s);
               setOverviewDir(d);
             }}
-            autoRefresh={autoRefresh}
-            onAutoRefreshChange={setAutoRefresh}
             refreshTick={refreshTick}
-            onRefresh={refresh}
             onOpenSidebar={() => setSidebarOpen(true)}
             onPickTarget={pickTarget}
           />
@@ -843,37 +840,11 @@ export default function App() {
               {zoom && (
                 <button
                   onClick={() => setZoom(null)}
-                  title="Reset zoom to selected range"
+                  title="Reset zoom to resume auto-refresh"
                 >
                   reset zoom
                 </button>
               )}
-              <button
-                onClick={refresh}
-                disabled={refreshing}
-                title="Refresh now"
-                aria-label="Refresh"
-              >
-                {refreshing ? "…" : "↻"}
-              </button>
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 4,
-                  fontSize: 13,
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                }}
-                title={`Auto-refresh every ${AUTO_REFRESH_MS / 1000}s`}
-              >
-                <input
-                  type="checkbox"
-                  checked={autoRefresh}
-                  onChange={(e) => setAutoRefresh(e.target.checked)}
-                />
-                auto
-              </label>
             </div>
             {targetSources.length > 0 && (
               <div className="source-chips">
@@ -982,13 +953,13 @@ export default function App() {
                       {windowStats.loss == null ? (
                         <strong>—</strong>
                       ) : (
-                        <strong style={{ color: lossTextColor(windowStats.loss, "#8a93a6") }}>
+                        <strong style={{ color: lossTextColor(windowStats.loss, "#8a93a6", theme) }}>
                           {windowStats.loss.toFixed(1)}%
                         </strong>
                       )}{" "}
                       <span style={{ color: "var(--text-muted)" }}>
                         (max{" "}
-                        <strong style={{ color: lossTextColor(windowStats.maxLoss, "#8a93a6") }}>
+                        <strong style={{ color: lossTextColor(windowStats.maxLoss, "#8a93a6", theme) }}>
                           {windowStats.maxLoss.toFixed(1)}%
                         </strong>
                         )
@@ -1018,5 +989,6 @@ export default function App() {
         )}
       </main>
     </div>
+    </ThemeContext.Provider>
   );
 }

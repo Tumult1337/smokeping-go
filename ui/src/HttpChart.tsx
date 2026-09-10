@@ -4,6 +4,8 @@ import { getHttpSamples, type HttpPoint } from "./api";
 import { paletteForSorted, lossTextColor } from "./palette";
 import { colorFor, statusLabel, statusClass, isSuccess, type StatusClass } from "./httpStatus";
 import { StatusStrip } from "./StatusStrip";
+import { chartChrome } from "./chartUtils";
+import { useEffectiveTheme } from "./theme";
 
 interface Props {
   targetId: string;
@@ -37,6 +39,7 @@ export function HttpChart({
 }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
+  const theme = useEffectiveTheme();
   const [points, setPoints] = useState<HttpPoint[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -53,8 +56,8 @@ export function HttpChart({
   const palette = useMemo(() => {
     const uniq = new Set<string>();
     for (const p of points) uniq.add(p.Source ?? "");
-    return paletteForSorted([...uniq].sort());
-  }, [points]);
+    return paletteForSorted([...uniq].sort(), theme);
+  }, [points, theme]);
   // The draw hook runs off refs because the uPlot instance is built once per
   // mount and its closures can't see later renders' palette/points.
   const paletteRef = useRef(palette);
@@ -127,6 +130,7 @@ export function HttpChart({
   useEffect(() => {
     if (!divRef.current) return;
 
+    const chrome = chartChrome();
     const opts: Options = {
       width: divRef.current.clientWidth,
       height,
@@ -135,10 +139,10 @@ export function HttpChart({
         y: { auto: true, range: (_u, _min, max) => [0, Math.max(max, 1)] },
       },
       axes: [
-        { stroke: "#8a93a6", grid: { stroke: "#1f2430" } },
+        { stroke: chrome.axis, grid: { stroke: chrome.grid } },
         {
-          stroke: "#8a93a6",
-          grid: { stroke: "#1f2430" },
+          stroke: chrome.axis,
+          grid: { stroke: chrome.grid },
           label: "ms",
           labelSize: 30,
         },
@@ -256,7 +260,8 @@ export function HttpChart({
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [height]);
+    // theme rebuilds so the axis/grid strokes re-read the chart-chrome tokens.
+  }, [height, theme]);
 
   // Pin the x scale only when the requested window changes. On a plain data
   // refresh (same fromSec/toSec) we skip the pin and pass resetScales=false
@@ -290,7 +295,10 @@ export function HttpChart({
       }
       u.setData(data, false);
     });
-  }, [points, fromSec, toSec]);
+    // theme is a dep so a theme flip — which destroys and rebuilds uPlot in the
+    // construction effect — refills the fresh instance instead of leaving it
+    // empty until the next data change.
+  }, [points, fromSec, toSec, theme]);
 
   const hovered = hover && hover.idx < points.length ? points[hover.idx] : null;
 
@@ -318,22 +326,23 @@ export function HttpChart({
               transform: "translate(-50%, -100%)",
               marginTop: -8,
               pointerEvents: "none",
-              background: "#10141c",
-              border: "1px solid #2a3142",
+              background: "var(--surface-inset)",
+              border: "1px solid var(--border-strong)",
               borderRadius: 4,
               padding: "4px 8px",
               fontSize: 12,
               whiteSpace: "nowrap",
+              color: "var(--text-dim)",
               zIndex: 5,
             }}
           >
-            <div style={{ color: "#8a93a6" }}>{new Date(hovered.Time).toLocaleString()}</div>
+            <div style={{ color: "var(--text-muted)" }}>{new Date(hovered.Time).toLocaleString()}</div>
             <div>
-              <span style={{ color: colorFor(hovered.Status) }}>● {statusLabel(hovered.Status)}</span>
+              <span style={{ color: colorFor(hovered.Status, theme) }}>● {statusLabel(hovered.Status)}</span>
               {hovered.Status !== 0 && <span style={{ marginLeft: 8 }}>{hovered.RTT.toFixed(1)} ms</span>}
-              {hovered.Source && <span style={{ marginLeft: 8, color: "#8a93a6" }}>{hovered.Source}</span>}
+              {hovered.Source && <span style={{ marginLeft: 8, color: "var(--text-muted)" }}>{hovered.Source}</span>}
             </div>
-            {hovered.Err && <div style={{ color: "#ef4444" }}>{hovered.Err.slice(0, 80)}</div>}
+            {hovered.Err && <div style={{ color: "var(--error-text)" }}>{hovered.Err.slice(0, 80)}</div>}
           </div>
         )}
       </div>
@@ -350,30 +359,30 @@ export function HttpChart({
         <div className="stats" style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 16 }}>
           <span>
             uptime:{" "}
-            <strong style={{ color: lossTextColor(100 - summary.uptime, "#5eead4") }}>
+            <strong style={{ color: lossTextColor(100 - summary.uptime, theme === "light" ? "#0d9488" : "#5eead4", theme) }}>
               {summary.uptime.toFixed(1)}%
             </strong>{" "}
-            <span style={{ color: "#8a93a6" }}>({summary.total} samples)</span>
+            <span style={{ color: "var(--text-muted)" }}>({summary.total} samples)</span>
           </span>
           <span style={{ display: "inline-flex", gap: 8 }}>
             {(["2xx", "3xx", "4xx", "5xx", "err"] as StatusClass[])
               .filter((c) => summary.dist[c] > 0)
               .map((c) => (
-                <span key={c} style={{ color: colorFor(classSample(c)) }}>
+                <span key={c} style={{ color: colorFor(classSample(c), theme) }}>
                   {c === "err" ? "network error" : c} {summary.dist[c]}
                 </span>
               ))}
           </span>
-          <span style={{ color: "#8a93a6" }}>
-            TTFB p50 <strong style={{ color: "#cbd5e1" }}>{fmtMs(summary.p50)}</strong> · p95{" "}
-            <strong style={{ color: "#cbd5e1" }}>{fmtMs(summary.p95)}</strong>
+          <span style={{ color: "var(--text-muted)" }}>
+            TTFB p50 <strong style={{ color: "var(--text-dim)" }}>{fmtMs(summary.p50)}</strong> · p95{" "}
+            <strong style={{ color: "var(--text-dim)" }}>{fmtMs(summary.p95)}</strong>
           </span>
         </div>
       )}
 
       {/* Labelled legends: each names the element it explains, so there's no
           guessing which mark is what. */}
-      <div className="stats" style={{ marginTop: 8, fontSize: 12, color: "#8a93a6" }}>
+      <div className="stats" style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>
         <span className="source-label" style={{ marginRight: 4 }}>bar color = source:</span>
         {[...palette.entries()].map(([name, p]) => (
           <span key={name || "—"} style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
@@ -408,15 +417,16 @@ function classSample(c: StatusClass): number {
 }
 
 function HttpLegend() {
+  const theme = useEffectiveTheme();
   const items: { label: string; color: string }[] = [
-    { label: "2xx", color: colorFor(200) },
-    { label: "3xx", color: colorFor(301) },
-    { label: "4xx", color: colorFor(404) },
-    { label: "5xx", color: colorFor(500) },
-    { label: "network error", color: colorFor(0) },
+    { label: "2xx", color: colorFor(200, theme) },
+    { label: "3xx", color: colorFor(301, theme) },
+    { label: "4xx", color: colorFor(404, theme) },
+    { label: "5xx", color: colorFor(500, theme) },
+    { label: "network error", color: colorFor(0, theme) },
   ];
   return (
-    <div className="stats" style={{ marginTop: 8, fontSize: 12, color: "#8a93a6" }}>
+    <div className="stats" style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>
       <span className="source-label" style={{ marginRight: 4 }}>strip color = status:</span>
       {items.map((i) => (
         <span key={i.label} style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>

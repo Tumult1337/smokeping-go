@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getHopsTimeline, type HopPoint, type HopTimelineLoss } from "./api";
 import { lossColor } from "./palette";
 import { cycleAtSec } from "./chartUtils";
+import { useEffectiveTheme } from "./theme";
 
 // The heatmap's chrome colours all live as CSS custom properties in styles.css
 // (single source of truth). A <canvas> 2d context can't read CSS vars, so
@@ -10,10 +11,18 @@ import { cycleAtSec } from "./chartUtils";
 // if the vars are somehow missing.
 function readHeatColors() {
   const s = getComputedStyle(document.documentElement);
-  const heatOk = s.getPropertyValue("--heat-ok").trim() || "#2c3647";
-  const noReply = s.getPropertyValue("--heat-noreply").trim() || "#4a5570";
-  const accentRgb = s.getPropertyValue("--accent-rgb").trim() || "79, 147, 245";
-  return { heatOk, noReply, markerFill: `rgba(${accentRgb}, 0.7)` };
+  const v = (name: string, fallback: string) => s.getPropertyValue(name).trim() || fallback;
+  const accentRgb = v("--accent-rgb", "79, 147, 245");
+  return {
+    heatOk: v("--heat-ok", "#2c3647"),
+    noReply: v("--heat-noreply", "#4a5570"),
+    markerFill: `rgba(${accentRgb}, 0.7)`,
+    bg: v("--surface-inset", "#0f141c"),
+    rowBg: v("--surface-raised", "#131823"),
+    axisLabel: v("--text-muted", "#8a93a6"),
+    tickLabel: v("--text-faint", "#4a5160"),
+    tickLine: v("--border-strong", "#2a3142"),
+  };
 }
 
 // Legend thresholds. Swatch colours derive from lossColor() (the single source
@@ -29,11 +38,12 @@ const HEATMAP_LEGEND: ReadonlyArray<readonly [string, number]> = [
 // HeatmapLegend is the color key rendered once beneath the heatmap(s) so the
 // ok/loss ramp is readable without hovering.
 function HeatmapLegend() {
+  const theme = useEffectiveTheme();
   return (
     <div className="mtr-heatmap-legend">
       {HEATMAP_LEGEND.map(([label, pct]) => (
         <span key={label}>
-          <i style={{ background: lossColor(pct, "var(--heat-ok)") }} />
+          <i style={{ background: lossColor(pct, "var(--heat-ok)", theme) }} />
           {label}
         </span>
       ))}
@@ -183,6 +193,7 @@ function PathHeatmap({
   onPick?: (timeSec: number, source?: string) => void;
   stale: boolean;
 }) {
+  const theme = useEffectiveTheme();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   // Holds the settle loop below so an unmount inside its 1.5s window cancels it.
@@ -281,10 +292,10 @@ function PathHeatmap({
     canvas.style.height = cssH + "px";
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const { heatOk, noReply, markerFill } = readHeatColors();
+    const { heatOk, noReply, markerFill, bg, rowBg, axisLabel, tickLabel, tickLine } = readHeatColors();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
-    ctx.fillStyle = "#0f141c";
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, cssW, cssH);
 
     if (visibleHops.length === 0 || cycles.length === 0) return;
@@ -326,7 +337,7 @@ function PathHeatmap({
       const hop = visibleHops[rank];
       const row = rows.get(hop);
       const y = 2 + rank * actualRowH;
-      ctx.fillStyle = "#131823";
+      ctx.fillStyle = rowBg;
       ctx.fillRect(plotX, y, plotW, actualRowH - 1);
       if (row) {
         for (const t of cycles) {
@@ -343,7 +354,7 @@ function PathHeatmap({
           // doesn't read as a genuine outage; only hops that actually replied
           // get the red ramp.
           const replyCount = p.ReplyCount ?? Math.max(0, p.Sent - p.LossCount);
-          ctx.fillStyle = replyCount > 0 ? lossColor(worst, heatOk) : noReply;
+          ctx.fillStyle = replyCount > 0 ? lossColor(worst, heatOk, theme) : noReply;
           ctx.fillRect(x, y, Math.max(1, colW), actualRowH - 1);
         }
       }
@@ -377,13 +388,13 @@ function PathHeatmap({
         }
         if (rank < 0) continue;
         const x = stepSec > 0 ? xForSec(t) : xForSec(t) - colW / 2;
-        ctx.fillStyle = lossColor(target.LossPct, heatOk);
+        ctx.fillStyle = lossColor(target.LossPct, heatOk, theme);
         ctx.fillRect(x, 2 + rank * actualRowH, Math.max(1, colW), actualRowH - 1);
       }
     }
 
     // Hop index gutter labels.
-    ctx.fillStyle = "#8a93a6";
+    ctx.fillStyle = axisLabel;
     ctx.font = '10px "JetBrains Mono Variable", ui-monospace, monospace';
     ctx.textBaseline = "middle";
     const labelStep = actualRowH < 12 ? Math.ceil(12 / actualRowH) : 1;
@@ -397,8 +408,8 @@ function PathHeatmap({
     // short labels. Lets the heatmap stand on its own without the user
     // having to glance up at the chart's x-axis.
     const ticks = pickAxisTicks(fromSec, toSec, 5);
-    ctx.fillStyle = "#4a5160";
-    ctx.strokeStyle = "#2a3142";
+    ctx.fillStyle = tickLabel;
+    ctx.strokeStyle = tickLine;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(plotX, plotH);
@@ -427,7 +438,7 @@ function PathHeatmap({
       ctx.fillStyle = markerFill;
       ctx.fillRect(Math.round(x - 1), 2, 2, plotH - 4);
     }
-  }, [rows, cycles, visibleHops, targetLossByCycle, height, fromSec, toSec, selectedSec, stepSec, repaintCount]);
+  }, [rows, cycles, visibleHops, targetLossByCycle, height, fromSec, toSec, selectedSec, stepSec, repaintCount, theme]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -646,8 +657,8 @@ function PathHeatmap({
             top: 4,
             right: 4,
             fontSize: 10,
-            color: "#8a93a6",
-            background: "#0f141c",
+            color: "var(--text-muted)",
+            background: "var(--surface-inset)",
             padding: "1px 5px",
             borderRadius: 3,
             pointerEvents: "none",

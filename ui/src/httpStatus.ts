@@ -2,10 +2,20 @@
 // tooltip) and StatusStrip so both agree on what a 404 or a network error looks
 // like. One source of truth for the status palette.
 
+import type { Theme } from "./theme";
+
 // Color by status class. Network error (status == 0) gets its own grey so you
-// can tell "server said no" apart from "never reached server".
-export function colorFor(status: number): string {
+// can tell "server said no" apart from "never reached server". The light-theme
+// hues are darkened so a 2xx/3xx tile reads on a white strip.
+export function colorFor(status: number, theme: Theme = "dark"): string {
   if (status === 0) return "#6b7280";
+  if (theme === "light") {
+    if (status >= 500) return "#dc2626";
+    if (status >= 400) return "#d97706";
+    if (status >= 300) return "#2563eb";
+    if (status >= 200) return "#0d9488";
+    return "#59616f";
+  }
   if (status >= 500) return "#ef4444";
   if (status >= 400) return "#f59e0b";
   if (status >= 300) return "#60a5fa";

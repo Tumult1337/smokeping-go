@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { colorFor, isSuccess } from "./httpStatus";
 import { paletteForSorted } from "./palette";
-import { unixSec } from "./chartUtils";
+import { unixSec, chartChrome } from "./chartUtils";
+import { useEffectiveTheme } from "./theme";
 import type { HttpPoint } from "./api";
 
 export const STATUS_STRIP_H = 7;
@@ -32,6 +33,9 @@ export function StatusStrip({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const theme = useEffectiveTheme();
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
 
   // Rows ordered by sorted source name so colours match paletteForSorted
   // everywhere on the page.
@@ -53,8 +57,8 @@ export function StatusStrip({
   }, [points]);
 
   const palette = useMemo(
-    () => paletteForSorted(rows.map((r) => r.source)),
-    [rows],
+    () => paletteForSorted(rows.map((r) => r.source), theme),
+    [rows, theme],
   );
 
   const rowsRef = useRef(rows);
@@ -81,8 +85,9 @@ export function StatusStrip({
     ctx.scale(dpr, dpr);
     const span = to - from || 1;
     const valToX = (t: number) => ((t - from) / span) * w;
+    const th = themeRef.current;
     // Faint backing so a row with sparse samples still reads as a lane.
-    ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+    ctx.fillStyle = chartChrome().stripe;
     ctx.fillRect(0, 0, w, stripH);
 
     // Minimum width for a failure mark. With dense sampling (tens of thousands
@@ -116,7 +121,7 @@ export function StatusStrip({
         }
         const x = Math.max(0, Math.floor(lo));
         const cw = Math.max(1, Math.min(w - x, Math.ceil(hi) - x));
-        ctx.fillStyle = colorFor(statuses[i]);
+        ctx.fillStyle = colorFor(statuses[i], th);
         ctx.fillRect(x, rowTop, cw, STATUS_STRIP_H);
       }
       // Pass 2: redraw failures (4xx/5xx/network-error) on top at a guaranteed
@@ -124,7 +129,7 @@ export function StatusStrip({
       for (let i = 0; i < n; i++) {
         if (isSuccess(statuses[i])) continue;
         const x = Math.max(0, Math.min(w - FAIL_MIN_W, Math.round(cxs[i]) - Math.floor(FAIL_MIN_W / 2)));
-        ctx.fillStyle = colorFor(statuses[i]);
+        ctx.fillStyle = colorFor(statuses[i], th);
         ctx.fillRect(x, rowTop, FAIL_MIN_W, STATUS_STRIP_H);
       }
     });
@@ -132,7 +137,7 @@ export function StatusStrip({
 
   useEffect(() => {
     draw();
-  }, [rows, fromSec, toSec, draw, plotLeft]);
+  }, [rows, fromSec, toSec, draw, plotLeft, theme]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -155,7 +160,7 @@ export function StatusStrip({
         display: "flex",
         alignItems: "stretch",
         gap: GAP,
-        borderTop: "1px solid #2a3142",
+        borderTop: "1px solid var(--border-strong)",
         paddingTop: 3,
         marginTop: 2,
       }}
@@ -196,7 +201,7 @@ export function StatusStrip({
               top: 0,
               fontSize: 10,
               lineHeight: `${rows.length * STATUS_STRIP_H}px`,
-              color: "#8a93a6",
+              color: "var(--text-muted)",
             }}
           >
             status

@@ -44,8 +44,76 @@
 
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 16px rgba(0, 0, 0, 0.22);
 
+  /* Neutral surfaces that were inline literals before the light theme existed. */
+  --surface-raised: #131823;  /* MTR section/heatmap heading strip */
+  --surface-active: #252b3a;  /* button :hover, skeleton shimmer midpoint */
+  --on-accent:      #fff;     /* text over an --accent-dim filled surface */
+
+  /* Silent-target row (a configured target with no recent cycles). */
+  --silent-bg:          rgba(40, 18, 22, 0.55);
+  --silent-bg-hover:    rgba(58, 26, 32, 0.75);
+  --silent-text:        #c97a83;
+  --silent-text-strong: #e7a3aa;
+
+  --error-text: #ff6b6b;
+  --error-bg:   #2a1519;
+
+  /* Chart chrome the canvas/uPlot code reads via getComputedStyle. --chart-axis
+     mirrors --text-muted and --chart-grid mirrors --border; they are named
+     separately so the light theme can tune them without moving the chrome
+     tokens. */
+  --chart-axis:   #8a93a6;
+  --chart-grid:   #1f2430;
+  --chart-stripe: rgba(255, 255, 255, 0.04);  /* loss/status strip alt rows */
+
   --font-sans: "Geist Variable", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Light theme. Applied by <html data-theme="light">, set before first paint by
+   the inline script in index.html and by src/theme.ts. Only the tokens change;
+   every rule below consumes them. Data colours (palette.ts) carry their own
+   light variants. */
+:root[data-theme="light"] {
+  --bg:            #f5f6f8;
+  --surface-1:     #ffffff;
+  --surface-2:     #ffffff;
+  --surface-inset: #eef1f5;
+  --surface-hover: #eceef2;
+  --surface-active: #e0e4ea;
+  --surface-raised: #f0f2f5;
+  --border:        #e3e6eb;
+  --border-strong: #cfd4dc;
+  --border-hover:  #b3bac6;
+
+  --text:       #1a1d23;
+  --text-dim:   #384150;
+  --text-muted: #59616f;
+  --text-faint: #98a1b0;
+  --text-subtle: #59616f;
+  --text-id:    #6b7280;
+
+  /* Darker blue so the accent clears 3:1 as a UI colour on white. */
+  --accent-rgb:    37, 99, 235;
+  --accent-text:   color-mix(in srgb, rgb(var(--accent-rgb)) 82%, black);
+  --on-accent:     color-mix(in srgb, rgb(var(--accent-rgb)) 82%, black);
+
+  --heat-ok: #cdd6e2;
+  --heat-noreply: #a7b1c1;
+
+  --silent-bg:          rgba(220, 38, 38, 0.08);
+  --silent-bg-hover:    rgba(220, 38, 38, 0.14);
+  --silent-text:        #b42318;
+  --silent-text-strong: #8a1c15;
+
+  --error-text: #b42318;
+  --error-bg:   #fdecec;
+
+  --chart-axis:   #59616f;
+  --chart-grid:   #e3e6eb;
+  --chart-stripe: rgba(0, 0, 0, 0.035);
+
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.06), 0 6px 16px rgba(16, 24, 40, 0.10);
 }
 
 * { box-sizing: border-box; }
@@ -158,10 +226,10 @@ th.overview-th { padding: 0; }
 }
 
 .overview-row.silent td {
-  background: rgba(40, 18, 22, 0.55);
-  color: #c97a83;
+  background: var(--silent-bg);
+  color: var(--silent-text);
 }
-.overview-row.silent:hover td { background: rgba(58, 26, 32, 0.75); }
+.overview-row.silent:hover td { background: var(--silent-bg-hover); }
 
 .overview-target { white-space: nowrap; max-width: 280px; overflow: hidden; }
 .overview-target-name {
@@ -171,7 +239,7 @@ th.overview-th { padding: 0; }
   text-overflow: ellipsis;
   overflow: hidden;
 }
-.overview-row.silent .overview-target-name { color: #e7a3aa; }
+.overview-row.silent .overview-target-name { color: var(--silent-text-strong); }
 .overview-target-id {
   display: block;
   font-size: 11px;
@@ -212,7 +280,7 @@ th.overview-th { padding: 0; }
 .overview-skel td { padding: 10px; }
 .overview-skel-bar {
   height: 14px;
-  background: linear-gradient(90deg, var(--surface-hover) 0%, #232938 50%, var(--surface-hover) 100%);
+  background: linear-gradient(90deg, var(--surface-hover) 0%, var(--surface-active) 50%, var(--surface-hover) 100%);
   background-size: 200% 100%;
   border-radius: 3px;
   animation: skel-shimmer 1.4s infinite linear;
@@ -245,12 +313,59 @@ th.overview-th { padding: 0; }
   height: 100vh;
 }
 
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.sidebar .sidebar-head h1 {
+  margin: 0;
+  flex: 1;
+}
+
 .sidebar h1 {
   font-size: 18px;
   margin: 0 0 12px;
   letter-spacing: -0.02em;
   font-weight: 600;
 }
+
+/* Theme switch in the sidebar header. Built on the segmented control, but each
+   button floats inside the pill with its own rounded highlight (3px inset, no
+   separators, no square inset ring), so the pill's corner radius never clips an
+   icon or the active fill. */
+.theme-toggle {
+  padding: 2px;
+  gap: 2px;
+  /* Never shrink inside the sidebar header — a shrunk inline-flex overflows its
+     own overflow:hidden box and clips the last icon. The wordmark yields
+     instead (it has room to spare at 260px). */
+  flex-shrink: 0;
+}
+/* The element carries both `segmented` and `theme-toggle`, and `.segmented
+   button` is defined later in this file, so these overrides need the extra
+   class to win on specificity rather than source order. */
+.theme-toggle.segmented button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 7px;
+  border-right: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+.theme-toggle.segmented button:hover {
+  color: var(--text-dim);
+  background: var(--surface-hover);
+}
+.theme-toggle.segmented button.active {
+  color: var(--accent-text);
+  background: var(--accent-dim);
+  box-shadow: none;
+}
+.theme-toggle.segmented button:focus-visible { border-radius: 6px; }
+.theme-toggle svg { display: block; }
 
 .search-wrap {
   position: relative;
@@ -326,7 +441,7 @@ th.overview-th { padding: 0; }
    "selected" via the interactive accent, not just a neutral grey. */
 .target-item.active {
   background: var(--accent-dim);
-  color: #fff;
+  color: var(--on-accent);
   box-shadow: inset 2px 0 0 0 var(--accent);
 }
 
@@ -355,7 +470,7 @@ th.overview-th { padding: 0; }
   font-size: 16px;
   line-height: 1;
 }
-.hamburger:hover { background: #252b3a; }
+.hamburger:hover { background: var(--surface-active); }
 
 .sidebar-backdrop {
   display: none;
@@ -376,10 +491,10 @@ th.overview-th { padding: 0; }
 }
 .toolbar button.active {
   background: var(--accent-dim);
-  color: #fff;
+  color: var(--on-accent);
   border-color: var(--accent-border);
 }
-.toolbar button:hover { background: #252b3a; }
+.toolbar button:hover { background: var(--surface-active); }
 .toolbar button.active:hover { background: var(--accent-dim); }
 
 /* Segmented control — the time-range buttons collapse into one connected
@@ -537,7 +652,7 @@ th.overview-th { padding: 0; }
   font-size: 12px;
   cursor: pointer;
 }
-.hops-reset:hover { background: #222837; }
+.hops-reset:hover { background: var(--surface-active); }
 
 .hops-path + .hops-path { margin-top: 14px; }
 .hops-path-heading {
@@ -634,7 +749,7 @@ th.overview-th { padding: 0; }
   align-items: baseline;
   gap: 10px;
   width: 100%;
-  background: #131823;
+  background: var(--surface-raised);
   border: none;
   color: var(--text-dim);
   padding: 6px 10px;
@@ -681,7 +796,7 @@ th.overview-th { padding: 0; }
   align-items: baseline;
   gap: 10px;
   width: 100%;
-  background: #131823;
+  background: var(--surface-raised);
   border: none;
   color: var(--text-dim);
   padding: 8px 12px;
@@ -768,9 +883,9 @@ th.overview-th { padding: 0; }
 }
 
 .error {
-  color: #ff6b6b;
+  color: var(--error-text);
   padding: 8px 12px;
-  background: #2a1519;
+  background: var(--error-bg);
   border-radius: 4px;
   margin-bottom: 12px;
 }
@@ -856,7 +971,7 @@ th.overview-th { padding: 0; }
 }
 .smoke-legend-val.off strong { color: var(--text-muted); }
 
-/* Match uPlot dark theme to the page. */
+/* Match uPlot's own theme to the page tokens (both themes). */
 .u-legend { color: var(--text-dim) !important; }
 .u-axis { color: var(--text-muted); }
 

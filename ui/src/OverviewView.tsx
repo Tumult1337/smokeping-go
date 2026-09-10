@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { getOverview, type OverviewRow, type OverviewWindow } from "./api";
 import { lossTextColor } from "./palette";
+import { useEffectiveTheme } from "./theme";
 
 // SortKey covers every clickable column header. The "target" sort orders
 // rows alphabetically by id — handy when the user wants a stable view
@@ -23,10 +24,7 @@ interface Props {
   sort: SortKey;
   dir: SortDir;
   onSortChange: (s: SortKey, d: SortDir) => void;
-  autoRefresh: boolean;
-  onAutoRefreshChange: (v: boolean) => void;
   refreshTick: number;
-  onRefresh: () => void;
   onOpenSidebar: () => void;
   onPickTarget: (id: string, source?: string) => void;
   // When set, the overview is scoped to a single probe source (the "By slave"
@@ -34,8 +32,8 @@ interface Props {
   source?: string;
 }
 
-// One overview re-render per interval, independent of the data refresh: the
-// label must keep ageing when auto-refresh is off.
+// One overview re-render per interval, independent of the data refresh, so the
+// "last seen" labels keep ageing between fetches.
 const LAST_SEEN_TICK_MS = 15_000;
 
 const WINDOW_BUTTONS: { label: string; value: OverviewWindow }[] = [
@@ -51,10 +49,7 @@ export function OverviewView(props: Props) {
     sort,
     dir,
     onSortChange,
-    autoRefresh,
-    onAutoRefreshChange,
     refreshTick,
-    onRefresh,
     onOpenSidebar,
     onPickTarget,
     source,
@@ -67,7 +62,6 @@ export function OverviewView(props: Props) {
     return () => clearInterval(id);
   }, []);
   const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
   // prevKeyRef tracks the last (window, source) we fetched. A change to either
   // wipes to skeleton; a same-key refresh tick keeps existing rows visible.
   const prevKeyRef = useRef(`${win}|${source ?? ""}`);
@@ -75,7 +69,6 @@ export function OverviewView(props: Props) {
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    setRefreshing(true);
     const key = `${win}|${source ?? ""}`;
     if (prevKeyRef.current !== key) {
       prevKeyRef.current = key;
@@ -89,10 +82,6 @@ export function OverviewView(props: Props) {
       .catch((e) => {
         if (cancelled) return;
         setError(String(e));
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setRefreshing(false);
       });
     return () => {
       cancelled = true;
@@ -152,31 +141,6 @@ export function OverviewView(props: Props) {
             </button>
           ))}
         </div>
-        <button
-          onClick={onRefresh}
-          disabled={refreshing}
-          title="Refresh now"
-          aria-label="Refresh"
-        >
-          {refreshing ? "…" : "↻"}
-        </button>
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 4,
-            fontSize: 13,
-            color: "#8a93a6",
-            cursor: "pointer",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={autoRefresh}
-            onChange={(e) => onAutoRefreshChange(e.target.checked)}
-          />
-          auto
-        </label>
       </div>
       {error && <div className="error">{error}</div>}
       <div className="overview-wrap">
@@ -315,6 +279,8 @@ function Row({
   hideWorstSrc?: boolean;
 }) {
   const label = row.title || row.id;
+  const theme = useEffectiveTheme();
+  const lossOk = theme === "light" ? "#384150" : "#cfd3dd";
   return (
     <tr
       className={`overview-row${row.silent ? " silent" : ""}`}
@@ -337,7 +303,7 @@ function Row({
         {row.loss_avg == null ? (
           <span className="overview-na">—</span>
         ) : (
-          <span style={{ color: lossTextColor(row.loss_avg, "#cfd3dd") }}>
+          <span style={{ color: lossTextColor(row.loss_avg, lossOk, theme) }}>
             {row.loss_avg.toFixed(1)}%
           </span>
         )}
@@ -346,7 +312,7 @@ function Row({
         {row.loss_max == null ? (
           <span className="overview-na">—</span>
         ) : (
-          <span style={{ color: lossTextColor(row.loss_max, "#cfd3dd") }}>
+          <span style={{ color: lossTextColor(row.loss_max, lossOk, theme) }}>
             {row.loss_max.toFixed(1)}%
           </span>
         )}
@@ -406,6 +372,8 @@ function skeletonRows(): React.ReactNode[] {
 // array — rebuilding every path string per tick is the landing view's one
 // recurring cost.
 const Sparkline = memo(function Sparkline({ values, silent }: { values: Array<number | null> | null; silent: boolean }) {
+  const theme = useEffectiveTheme();
+  const stroke = theme === "light" ? "#0d9488" : "#5eead4";
   // The null check leads: it used to be reachable only because `silent ||`
   // short-circuited first, so reordering the condition threw inside render,
   // and there is no ErrorBoundary above this — the landing page went blank.
@@ -450,7 +418,7 @@ const Sparkline = memo(function Sparkline({ values, silent }: { values: Array<nu
       preserveAspectRatio="none"
     >
       {segments.map((d, i) => (
-        <path key={i} d={d} fill="none" stroke="#5eead4" strokeWidth={1.25} />
+        <path key={i} d={d} fill="none" stroke={stroke} strokeWidth={1.25} />
       ))}
     </svg>
   );

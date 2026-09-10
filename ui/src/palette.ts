@@ -15,6 +15,8 @@
 //
 // `text` is the same hue lightened where the stroke misses the 4.5:1 small-text
 // gate; strokes are graphics (3:1) and stay exactly as validated above.
+import type { Theme } from "./theme";
+
 export type PaletteEntry = {
   stroke: string;
   text: string;
@@ -22,7 +24,9 @@ export type PaletteEntry = {
   dash?: number[];
 };
 
-const PALETTE: { stroke: string; text: string; fill: (a: number) => string }[] = [
+type PaletteHue = { stroke: string; text: string; fill: (a: number) => string };
+
+const PALETTE: PaletteHue[] = [
   { stroke: "#0c6f4d", text: "#348b67", fill: (a) => `rgba(12,111,77,${a})` },
   { stroke: "#c50991", text: "#dc30a5", fill: (a) => `rgba(197,9,145,${a})` },
   { stroke: "#d7727c", text: "#d7727c", fill: (a) => `rgba(215,114,124,${a})` },
@@ -33,6 +37,28 @@ const PALETTE: { stroke: string; text: string; fill: (a: number) => string }[] =
   { stroke: "#256fb8", text: "#377fc9", fill: (a) => `rgba(37,111,184,${a})` },
   { stroke: "#b571e6", text: "#b571e6", fill: (a) => `rgba(181,113,230,${a})` },
 ];
+
+// Light-theme data hues. Best-effort, hand-tuned darker versions of the dark
+// hues in the SAME hue family so a source keeps a recognisable colour across
+// themes, chosen to read on the white surfaces (>=3:1 as a stroke, text used
+// for legend labels). These are NOT run through check-palette's CVD/contrast
+// gate — that gate is anchored to the dark --bg only, by decision. Index i here
+// is the same identity slot as PALETTE[i].
+const PALETTE_LIGHT: PaletteHue[] = [
+  { stroke: "#0b6446", text: "#0b6446", fill: (a) => `rgba(11,100,70,${a})` },
+  { stroke: "#b3067f", text: "#b3067f", fill: (a) => `rgba(179,6,127,${a})` },
+  { stroke: "#b3454f", text: "#b3454f", fill: (a) => `rgba(179,69,79,${a})` },
+  { stroke: "#0d7a80", text: "#0d7a80", fill: (a) => `rgba(13,122,128,${a})` },
+  { stroke: "#4b2fd6", text: "#4b2fd6", fill: (a) => `rgba(75,47,214,${a})` },
+  { stroke: "#a03d06", text: "#a03d06", fill: (a) => `rgba(160,61,6,${a})` },
+  { stroke: "#6d6810", text: "#6d6810", fill: (a) => `rgba(109,104,16,${a})` },
+  { stroke: "#1f5f9e", text: "#1f5f9e", fill: (a) => `rgba(31,95,158,${a})` },
+  { stroke: "#8a3fce", text: "#8a3fce", fill: (a) => `rgba(138,63,206,${a})` },
+];
+
+function hueTable(theme: Theme): PaletteHue[] {
+  return theme === "light" ? PALETTE_LIGHT : PALETTE;
+}
 
 // Solid first so an ordinary install never draws a dashed line; the other two are
 // separated in both dash and gap so they stay distinct at one-pixel stroke width.
@@ -52,9 +78,9 @@ function hashName(name: string): number {
   return h >>> 0;
 }
 
-function entryAt(identity: number): PaletteEntry {
+function entryAt(identity: number, table: PaletteHue[]): PaletteEntry {
   // DASHES[0] is undefined, so identities below HUES are exactly the solid ones.
-  return { ...PALETTE[identity % HUES], dash: DASHES[Math.floor(identity / HUES)] };
+  return { ...table[identity % HUES], dash: DASHES[Math.floor(identity / HUES)] };
 }
 
 // Every solid hue ranks above every dashed slot, so the first HUES sources are
@@ -80,7 +106,11 @@ function preferences(name: string): number[] {
 // absolute — the alternative, honouring the hash unconditionally, collides at
 // 98% for 7 sources over 9 slots and is the defect this replaces. Past
 // IDENTITIES sources the slots are all spent and entries repeat.
-export function paletteForSorted(sortedSources: string[]): Map<string, PaletteEntry> {
+export function paletteForSorted(
+  sortedSources: string[],
+  theme: Theme = "dark",
+): Map<string, PaletteEntry> {
+  const table = hueTable(theme);
   // Uncontested names claim their first choice before anyone probes, so adding a
   // source cannot cascade past the one incumbent it displaces.
   const byTop = new Map<number, string[]>();
@@ -119,7 +149,7 @@ export function paletteForSorted(sortedSources: string[]): Map<string, PaletteEn
   // Built in the caller's order; charts index this map while walking their own
   // sorted source list, and claim order is otherwise arbitrary.
   const out = new Map<string, PaletteEntry>();
-  for (const name of sortedSources) out.set(name, entryAt(claimed.get(name)!));
+  for (const name of sortedSources) out.set(name, entryAt(claimed.get(name)!, table));
   return out;
 }
 
@@ -128,17 +158,28 @@ export function paletteForSorted(sortedSources: string[]): Map<string, PaletteEn
 // mode and bars mode tell the same story for the same data. okColor lets the
 // caller fall back to a source-specific stroke at zero loss; that way a
 // per-source colored line/tick stays uniform when there's nothing to flag.
-export function lossColor(pct: number, okColor: string): string {
+export function lossColor(pct: number, okColor: string, theme: Theme = "dark"): string {
   if (pct <= 0) return okColor;
+  if (theme === "light") {
+    if (pct < 5) return "#b45309";
+    if (pct < 20) return "#c2410c";
+    return "#dc2626";
+  }
   if (pct < 5) return "#eab308";
   if (pct < 20) return "#f97316";
   return "#ef4444";
 }
 
 // lossColor's ramp with the >=20% red lightened to clear 4.5:1 as small text.
-// Canvas marks keep lossColor — they are graphics, gated at 3:1.
-export function lossTextColor(pct: number, okColor: string): string {
+// Canvas marks keep lossColor — they are graphics, gated at 3:1. The light ramp
+// is already dark enough on white, so it matches lossColor there.
+export function lossTextColor(pct: number, okColor: string, theme: Theme = "dark"): string {
   if (pct <= 0) return okColor;
+  if (theme === "light") {
+    if (pct < 5) return "#b45309";
+    if (pct < 20) return "#c2410c";
+    return "#dc2626";
+  }
   if (pct < 5) return "#eab308";
   if (pct < 20) return "#f97316";
   return "#f15c5c";

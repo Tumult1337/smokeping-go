@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { lossColor, paletteForSorted } from "./palette";
+import { chartChrome } from "./chartUtils";
+import { useEffectiveTheme } from "./theme";
 
 export const LOSS_STRIP_H = 6;
 
@@ -33,6 +35,9 @@ export function LossStripCanvas({
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const theme = useEffectiveTheme();
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
 
   const effectiveSeries = useMemo(
     () => lossSeries.filter((s) => s.hasLoss),
@@ -41,8 +46,8 @@ export function LossStripCanvas({
   // Indexed over every source, lossy or not, because the chart assigns its
   // palette by position in the full sorted source list.
   const palette = useMemo(
-    () => paletteForSorted(lossSeries.map((s) => s.source)),
-    [lossSeries],
+    () => paletteForSorted(lossSeries.map((s) => s.source), theme),
+    [lossSeries, theme],
   );
 
   const effectiveSeriesRef = useRef(effectiveSeries);
@@ -69,7 +74,8 @@ export function LossStripCanvas({
     ctx.scale(dpr, dpr);
     const span = to - from;
     const valToX = (t: number) => ((t - from) / span) * w;
-    ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+    const th = themeRef.current;
+    ctx.fillStyle = chartChrome().stripe;
     ctx.fillRect(0, 0, w, stripH);
     ls.forEach((src, row) => {
       const { ts, losses } = src;
@@ -87,13 +93,13 @@ export function LossStripCanvas({
         else { lo = (cxs[i - 1] + cx) / 2; hi = (cx + cxs[i + 1]) / 2; }
         const x = Math.max(0, Math.floor(lo));
         const cw = Math.max(1, Math.min(w - x, Math.ceil(hi) - x));
-        ctx.fillStyle = lossColor(losses[i], "transparent");
+        ctx.fillStyle = lossColor(losses[i], "transparent", th);
         ctx.fillRect(x, rowTop, cw, LOSS_STRIP_H);
       }
     });
   }, []);
 
-  useEffect(() => { draw(); }, [effectiveSeries, fromSec, toSec, draw, plotLeft]);
+  useEffect(() => { draw(); }, [effectiveSeries, fromSec, toSec, draw, plotLeft, theme]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -138,7 +144,7 @@ export function LossStripCanvas({
         display: "flex",
         alignItems: "stretch",
         gap: GAP,
-        borderTop: "1px solid #2a3142",
+        borderTop: "1px solid var(--border-strong)",
         paddingTop: 3,
         marginTop: 2,
       }}

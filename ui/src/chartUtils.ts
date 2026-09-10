@@ -58,6 +58,19 @@ export function unixSec(iso: string): number {
   return Math.floor(new Date(iso).getTime() / 1000);
 }
 
+// chartChrome reads the theme's chart-chrome tokens off <html>. A <canvas> 2d
+// context and uPlot's axis options can't reference CSS variables, so callers
+// read them here and re-read on a theme change (the effective theme is in the
+// effect deps). Fallbacks are the dark-theme values.
+export function chartChrome(): { axis: string; grid: string; stripe: string } {
+  const s = getComputedStyle(document.documentElement);
+  return {
+    axis: s.getPropertyValue("--chart-axis").trim() || "#8a93a6",
+    grid: s.getPropertyValue("--chart-grid").trim() || "#1f2430",
+    stripe: s.getPropertyValue("--chart-stripe").trim() || "rgba(255, 255, 255, 0.04)",
+  };
+}
+
 // LOG_Y_FLOOR is the smallest value a log y-axis may show; 0 has no log.
 // Shared because the band chart and the bar chart are two arms of one
 // toggle over the same data and must draw the same gridlines.

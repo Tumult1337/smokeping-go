@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getHops, type CycleLoss, type HopPoint } from "./api";
 import { groupBySource, lossForSource } from "./mtrUtils";
 import { lossTextColor } from "./palette";
+import { useEffectiveTheme } from "./theme";
 
 interface Props {
   targetId: string;
@@ -127,6 +128,8 @@ export function HopsPath({
   // falls back to its trace loss.
   targetLoss?: number | null;
 }) {
+  const theme = useEffectiveTheme();
+  const lossOk = theme === "light" ? "#384150" : "#cfd3dd";
   return (
     <div className="hops-path">
       {showSourceHeading && (
@@ -191,7 +194,7 @@ export function HopsPath({
                     </span>
                   )}
                 </td>
-                <td className="num" style={{ color: lossTextColor(effLoss, "#cfd3dd") }}>
+                <td className="num" style={{ color: lossTextColor(effLoss, lossOk, theme) }}>
                   {effLoss.toFixed(1)}
                 </td>
                 <td className="num">{h.Sent}</td>
@@ -262,13 +265,16 @@ function HopBar({
   scale: number;
 }) {
   const pct = (v: number) => `${(100 * v) / scale}%`;
+  const theme = useEffectiveTheme();
+  const rangeFill = theme === "light" ? "rgba(13,148,136,0.35)" : "rgba(94,234,212,0.4)";
+  const meanFill = theme === "light" ? "#0d9488" : "#5eead4";
   return (
     <div
       style={{
         position: "relative",
         height: 10,
         width: 160,
-        background: "#1a1f2b",
+        background: "var(--surface-hover)",
         borderRadius: 2,
       }}
     >
@@ -279,7 +285,7 @@ function HopBar({
           width: pct(Math.max(0, max - min)),
           top: 0,
           bottom: 0,
-          background: "rgba(94,234,212,0.4)",
+          background: rangeFill,
           borderRadius: 2,
         }}
       />
@@ -290,7 +296,7 @@ function HopBar({
           width: 2,
           top: -1,
           bottom: -1,
-          background: "#5eead4",
+          background: meanFill,
         }}
       />
     </div>
