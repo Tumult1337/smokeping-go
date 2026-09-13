@@ -53,6 +53,8 @@ export interface CycleLoss {
 export interface HopsResponse {
   target: string;
   hops: HopPoint[];
+  // Optional while a newly built UI may still be served by an older backend.
+  hostnames?: Record<string, string>;
   // Absent when talking to a server that predates the field, and empty for a
   // source whose cycle recorded no measurement. Both mean "unknown", never 0%.
   target_loss?: CycleLoss[];
@@ -188,6 +190,8 @@ export interface HopsTimelineResponse {
   target: string;
   from: string;
   to: string;
+  // Optional while a newly built UI may still be served by an older backend.
+  hostnames?: Record<string, string>;
   // Bucket width the server's ladder picked, 0 on the raw tier. The heatmap
   // needs it to size a column: row spacing cannot be measured when a window
   // holds a single bucket.

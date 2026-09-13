@@ -3,6 +3,7 @@ import { getHopsTimeline, type HopPoint, type HopTimelineLoss } from "./api";
 import { lossColor } from "./palette";
 import { cycleAtSec } from "./chartUtils";
 import { useEffectiveTheme } from "./theme";
+import { hopHostname } from "./hopNames";
 
 // The heatmap's chrome colours all live as CSS custom properties in styles.css
 // (single source of truth). A <canvas> 2d context can't read CSS vars, so
@@ -90,6 +91,7 @@ export function MtrHeatmap({
 }: Props) {
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [targetLoss, setTargetLoss] = useState<HopTimelineLoss[]>([]);
+  const [hostnames, setHostnames] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null);
 
   const [stepSec, setStepSec] = useState(0);
@@ -107,6 +109,7 @@ export function MtrHeatmap({
     if (keyChanged) {
       setHops(null);
       setStepSec(0);
+      setHostnames({});
     }
     setErr(null);
     setTargetLoss([]);
@@ -127,6 +130,7 @@ export function MtrHeatmap({
     getHopsTimeline(targetId, fromISO, toISO, source, controller.signal)
       .then((r) => {
         setHops(r.hops ?? []);
+        setHostnames(r.hostnames ?? {});
         setStepSec(r.step_sec ?? 0);
         setTargetLoss(r.target_loss ?? []);
       })
@@ -150,6 +154,7 @@ export function MtrHeatmap({
         source={source}
         hops={hops}
         targetLoss={targetLoss}
+        hostnames={hostnames}
         probeType={probeType}
         fromSec={fromSec}
         toSec={toSec}
@@ -174,6 +179,7 @@ function PathHeatmap({
   source,
   hops,
   targetLoss,
+  hostnames,
   probeType,
   fromSec,
   toSec,
@@ -185,6 +191,7 @@ function PathHeatmap({
   source: string;
   hops: HopPoint[];
   targetLoss: HopTimelineLoss[];
+  hostnames: Readonly<Record<string, string>>;
   probeType?: string;
   fromSec: number;
   toSec: number;
@@ -589,6 +596,8 @@ function PathHeatmap({
     pinRafRef.current = requestAnimationFrame(tick);
   }
 
+  const hoverHostname = hover ? hopHostname(hostnames, hover.p.IP) : undefined;
+
   if (visibleHops.length === 0) {
     return <div className="empty">All hops clean in this range</div>;
   }
@@ -626,6 +635,9 @@ function PathHeatmap({
           <div className="mtr-heatmap-tip-head">
             hop {hover.hop} · {new Date(hover.sec * 1000).toLocaleString()}
           </div>
+          {hoverHostname && (
+            <div className="mtr-heatmap-tip-hostname">{hoverHostname}</div>
+          )}
           <div>{hover.p.IP || "no reply"}</div>
           <div>
             loss {(hover.p.MaxLossPct ?? hover.p.LossPct).toFixed(1)}%

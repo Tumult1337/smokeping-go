@@ -153,6 +153,7 @@ function MultiSourceLayout({
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [cycleLoss, setCycleLoss] = useState<CycleLoss[] | null>(null);
   const [cycleTime, setCycleTime] = useState<string | null>(null);
+  const [hostnames, setHostnames] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null);
   const prevKey = useRef<string>("");
 
@@ -166,12 +167,16 @@ function MultiSourceLayout({
     const changed = prevKey.current !== targetId;
     prevKey.current = targetId;
     setErr(null);
-    if (changed) setHops(null);
+    if (changed) {
+      setHops(null);
+      setHostnames({});
+    }
     const controller = new AbortController();
     getHops(targetId, atSec ?? undefined, undefined, controller.signal)
       .then((r) => {
         const rows = r.hops ?? [];
         setHops(rows);
+        setHostnames(r.hostnames ?? {});
         setCycleLoss(r.target_loss ?? null);
         // Label the header from the rows on screen: atSec is the requested
         // time and the server returns the nearest cycle, not that instant.
@@ -308,6 +313,7 @@ function MultiSourceLayout({
                     scale={scale}
                     showSourceHeading={false}
                     targetLoss={endToEndLoss}
+                    hostnames={hostnames}
                   />
                   {fromSec != null && toSec != null && (
                     <MtrHeatmap

@@ -3,6 +3,7 @@ import { getHops, type CycleLoss, type HopPoint } from "./api";
 import { groupBySource, lossForSource } from "./mtrUtils";
 import { lossTextColor } from "./palette";
 import { useEffectiveTheme } from "./theme";
+import { hopHostname } from "./hopNames";
 
 interface Props {
   targetId: string;
@@ -26,6 +27,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
   const [hops, setHops] = useState<HopPoint[] | null>(null);
   const [cycleLoss, setCycleLoss] = useState<CycleLoss[] | null>(null);
   const [cycleTime, setCycleTime] = useState<string | null>(null);
+  const [hostnames, setHostnames] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null);
   const prevKeyRef = useRef<string>("");
 
@@ -38,12 +40,16 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
     const keyChanged = prevKeyRef.current !== k;
     prevKeyRef.current = k;
     setErr(null);
-    if (keyChanged) setHops(null);
+    if (keyChanged) {
+      setHops(null);
+      setHostnames({});
+    }
     const controller = new AbortController();
     getHops(targetId, atSec, source, controller.signal)
       .then((r) => {
         const rows = r.hops ?? [];
         setHops(rows);
+        setHostnames(r.hostnames ?? {});
         setCycleLoss(r.target_loss ?? null);
         setCycleTime(rows.length > 0 ? rows[0].Time : null);
       })
@@ -103,6 +109,7 @@ export function HopsTable({ targetId, refreshTick, atSec, onResetAt, source, hid
           scale={sharedScale}
           showSourceHeading={groups.length > 1}
           targetLoss={probeType === "mtr" ? lossForSource(cycleLoss, g.source) : null}
+          hostnames={hostnames}
         />
       ))}
     </>
@@ -116,6 +123,7 @@ export function HopsPath({
   scale,
   showSourceHeading,
   targetLoss,
+  hostnames,
 }: {
   source: string;
   time: string;
@@ -127,6 +135,7 @@ export function HopsPath({
   // for non-MTR or when no authoritative value exists; the target row then
   // falls back to its trace loss.
   targetLoss?: number | null;
+  hostnames: Readonly<Record<string, string>>;
 }) {
   const theme = useEffectiveTheme();
   const lossOk = theme === "light" ? "#384150" : "#cfd3dd";
@@ -156,6 +165,7 @@ export function HopsPath({
             {/* Index and IP both collide inside one TTL — ECMP responders,
                 and two target rows blanked alike by health redaction. */}
             {rows.map((h, i) => {
+              const hostname = hopHostname(hostnames, h.IP);
               // The target's own row shows the end-to-end loss when we have it,
               // so it matches the graph and header; every other hop keeps its
               // trace per-hop loss. Only the loss cell changes — the latency
@@ -170,18 +180,21 @@ export function HopsPath({
                 <td>{h.Index}</td>
                 <td>
                   {h.IP ? (
-                    <>
-                      <span className="hop-ip">{h.IP}</span>
-                      <a
-                        className="hop-whois"
-                        href={`https://bgp.tools/search?q=${encodeURIComponent(h.IP)}`}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        title={`Look up ${h.IP} on bgp.tools`}
-                      >
-                        ↗
-                      </a>
-                    </>
+                    <span className="hop-host">
+                      {hostname && <span className="hop-hostname">{hostname}</span>}
+                      <span className="hop-address">
+                        <span className="hop-ip">{h.IP}</span>
+                        <a
+                          className="hop-whois"
+                          href={"https://bgp.tools/search?q=" + encodeURIComponent(h.IP)}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          title={"Look up " + h.IP + " on bgp.tools"}
+                        >
+                          ↗
+                        </a>
+                      </span>
+                    </span>
                   ) : (
                     <span className="hop-none">???</span>
                   )}

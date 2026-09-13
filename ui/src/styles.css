@@ -603,6 +603,17 @@ th.overview-th { padding: 0; }
 .hops-table td.num { text-align: left; font-variant-numeric: tabular-nums; }
 .hops-table tr:hover td { background: var(--surface-hover); }
 .hops-table .hop-ip { color: var(--text-dim); }
+.hops-table .hop-host {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.25;
+}
+.hops-table .hop-hostname { color: var(--text); }
+.hops-table .hop-address {
+  display: inline-flex;
+  align-items: baseline;
+}
 .hops-table .hop-none { color: var(--text-faint); font-style: italic; }
 .hops-table .hop-whois {
   margin-left: 6px;
@@ -698,6 +709,7 @@ th.overview-th { padding: 0; }
   color: var(--text-muted);
   margin-bottom: 2px;
 }
+.mtr-heatmap-tip-hostname { color: var(--text); }
 .mtr-heatmap-tip-unreach {
   margin-top: 3px;
   color: var(--text-muted);
