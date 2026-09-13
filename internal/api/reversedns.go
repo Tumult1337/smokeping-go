@@ -77,12 +77,11 @@ func (c *reverseDNSCache) hostnames(ctx context.Context, ips []string) map[strin
 			missing = append(missing, group)
 		}
 	}
-
-	lookupCtx, cancel := context.WithTimeout(ctx, c.responseTimeout)
-	defer cancel()
 	if len(missing) == 0 {
 		return names
 	}
+	lookupCtx, cancel := context.WithTimeout(ctx, c.responseTimeout)
+	defer cancel()
 
 	type result struct {
 		group reverseDNSGroup

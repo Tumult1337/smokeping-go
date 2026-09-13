@@ -168,6 +168,9 @@ func newTestServerWithInterval(t *testing.T, interval time.Duration, opts ...tes
 	o := Options{
 		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Store: store,
+		ReverseDNSLookup: func(context.Context, string) ([]string, error) {
+			return nil, nil
+		},
 	}
 	for _, opt := range opts {
 		opt(&o)
