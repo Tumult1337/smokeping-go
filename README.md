@@ -320,6 +320,11 @@ at every TTL it ever answered at, so summing the marked rows counts one round
 once per marked TTL. A source whose cycle sent nothing recorded no measurement
 and has no entry; treat a missing one as unknown, never as 0%.
 
+Both hop responses include a `hostnames` object mapping each resolved hop IP
+to its cached PTR name. Missing names are omitted from the object; hop rows
+always retain their IP address. Addresses redacted from `_cluster` hop rows
+are not resolved.
+
 ## Deployment
 
 **Docker compose on a host that already runs ClickHouse natively.** The repo
