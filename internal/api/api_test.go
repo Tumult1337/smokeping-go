@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,6 +128,10 @@ func withReaderStats(s ReaderStats) testOpt {
 
 func withAlertStats(s AlertStats) testOpt {
 	return func(o *Options) { o.AlertStats = s }
+}
+
+func withReverseDNSLookup(lookup reverseLookupFunc) testOpt {
+	return func(o *Options) { o.ReverseDNSLookup = lookup }
 }
 
 type alertStatStub uint64
@@ -994,6 +1001,144 @@ func TestGetHopsKeepsOrdinaryTargetIntact(t *testing.T) {
 		if h.Index == 2 && h.IP != "10.44.0.2" {
 			t.Fatalf("ordinary target's terminal hop was redacted: %+v", h)
 		}
+	}
+}
+
+func TestGetHopsCarriesReverseDNSNames(t *testing.T) {
+	reader := &stubReader{hops: []storage.HopPoint{
+		{Source: "master", Index: 1, IP: "192.0.2.1"},
+		{Source: "master", Index: 2, IP: "192.0.2.2"},
+	}}
+	resolved := map[string]string{
+		"192.0.2.1": "edge.example.net.",
+		"192.0.2.2": "core.example.net.",
+	}
+	srv := newTestServer(t, withReader(reader), withReverseDNSLookup(
+		func(_ context.Context, addr string) ([]string, error) {
+			return []string{resolved[addr]}, nil
+		},
+	))
+
+	var body struct {
+		Hostnames map[string]string `json:"hostnames"`
+	}
+	doJSON(t, srv, http.MethodGet, "/api/v1/targets/core/gw/hops", &body)
+
+	want := map[string]string{
+		"192.0.2.1": "edge.example.net",
+		"192.0.2.2": "core.example.net",
+	}
+	if !maps.Equal(body.Hostnames, want) {
+		t.Fatalf("hostnames = %#v, want %#v", body.Hostnames, want)
+	}
+}
+
+func TestGetHopsTimelineCarriesReverseDNSNames(t *testing.T) {
+	now := time.Now()
+	reader := &stubReader{hops: []storage.HopPoint{
+		{Source: "master", Time: now, Index: 1, IP: "192.0.2.1"},
+		{Source: "master", Time: now.Add(time.Minute), Index: 1, IP: "192.0.2.1"},
+		{Source: "master", Time: now, Index: 2, IP: "192.0.2.2"},
+	}}
+	var calls atomic.Int64
+	srv := newTestServer(t, withReader(reader), withReverseDNSLookup(
+		func(_ context.Context, addr string) ([]string, error) {
+			calls.Add(1)
+			return []string{"name-" + addr + "."}, nil
+		},
+	))
+
+	var body struct {
+		Hostnames map[string]string `json:"hostnames"`
+	}
+	doJSON(t, srv, http.MethodGet, "/api/v1/targets/core/gw/hops/timeline?source=master", &body)
+
+	want := map[string]string{
+		"192.0.2.1": "name-192.0.2.1",
+		"192.0.2.2": "name-192.0.2.2",
+	}
+	if !maps.Equal(body.Hostnames, want) {
+		t.Fatalf("hostnames = %#v, want %#v", body.Hostnames, want)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("lookup calls = %d, want one per unique address", got)
+	}
+}
+
+func TestHopResponsesEncodeEmptyHostnameObject(t *testing.T) {
+	srv := newTestServer(t, withReader(&stubReader{}), withReverseDNSLookup(
+		func(context.Context, string) ([]string, error) {
+			t.Fatal("empty hop response must not call the resolver")
+			return nil, nil
+		},
+	))
+	for _, requestPath := range []string{
+		"/api/v1/targets/core/gw/hops",
+		"/api/v1/targets/core/gw/hops/timeline?source=master",
+	} {
+		raw := doRaw(t, srv, http.MethodGet, requestPath)
+		if !strings.Contains(raw, "\"hostnames\":{}") {
+			t.Fatalf("%s did not encode a non-null hostname object: %s", requestPath, raw)
+		}
+	}
+}
+
+func TestGetHopsReverseDNSRunsAfterHealthRedaction(t *testing.T) {
+	reader := &stubReader{hops: []storage.HopPoint{
+		{Source: "tokyo-1", Index: 1, IP: "203.0.113.1"},
+		{Source: "tokyo-1", Index: 2, IP: "10.44.0.2"},
+	}}
+	var mu sync.Mutex
+	var lookups []string
+	srv := newTestServer(t, withReader(reader), withHealth(healthStub()), withReverseDNSLookup(
+		func(_ context.Context, addr string) ([]string, error) {
+			mu.Lock()
+			lookups = append(lookups, addr)
+			mu.Unlock()
+			return []string{"name-" + addr + "."}, nil
+		},
+	))
+
+	var body struct {
+		Hostnames map[string]string `json:"hostnames"`
+	}
+	doJSON(t, srv, http.MethodGet, "/api/v1/targets/_cluster/tokyo-1/hops", &body)
+
+	want := map[string]string{"203.0.113.1": "name-203.0.113.1"}
+	if !maps.Equal(body.Hostnames, want) {
+		t.Fatalf("hostnames = %#v, want only the visible intermediate %#v", body.Hostnames, want)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(lookups, []string{"203.0.113.1"}) {
+		t.Fatalf("resolver saw addresses %#v, want only the post-redaction intermediate", lookups)
+	}
+}
+
+func TestGetHopsTimelineReverseDNSSkipsAllRedactedHealthAddresses(t *testing.T) {
+	now := time.Now()
+	reader := &stubReader{hops: []storage.HopPoint{
+		{Source: "tokyo-1", Time: now, Index: 1, IP: "203.0.113.1"},
+		{Source: "tokyo-1", Time: now, Index: 2, IP: "10.44.0.2"},
+	}}
+	var calls atomic.Int64
+	srv := newTestServer(t, withReader(reader), withHealth(healthStub()), withReverseDNSLookup(
+		func(context.Context, string) ([]string, error) {
+			calls.Add(1)
+			return []string{"must-not-be-served.example."}, nil
+		},
+	))
+
+	var body struct {
+		Hostnames map[string]string `json:"hostnames"`
+	}
+	doJSON(t, srv, http.MethodGet, "/api/v1/targets/_cluster/tokyo-1/hops/timeline?source=tokyo-1", &body)
+
+	if len(body.Hostnames) != 0 {
+		t.Fatalf("redacted timeline hostnames = %#v, want empty", body.Hostnames)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("resolver calls = %d, want zero for fully redacted rows", got)
 	}
 }
 

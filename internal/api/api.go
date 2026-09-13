@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"net/netip"
 	"path"
@@ -75,6 +76,7 @@ type Server struct {
 	alertStats     AlertStats
 	version        string
 	startAt        time.Time
+	reverseDNS     *reverseDNSCache
 }
 
 type Options struct {
@@ -104,12 +106,18 @@ type Options struct {
 	AlertStats AlertStats
 	// Version is the build version reported by /health. Empty falls back to "dev".
 	Version string
+	// ReverseDNSLookup overrides net.DefaultResolver.LookupAddr in tests.
+	ReverseDNSLookup func(context.Context, string) ([]string, error)
 }
 
 func New(opts Options) *Server {
 	v := opts.Version
 	if v == "" {
 		v = "dev"
+	}
+	reverseDNSLookup := opts.ReverseDNSLookup
+	if reverseDNSLookup == nil {
+		reverseDNSLookup = net.DefaultResolver.LookupAddr
 	}
 	return &Server{
 		log:            opts.Log,
@@ -124,6 +132,7 @@ func New(opts Options) *Server {
 		alertStats:     opts.AlertStats,
 		version:        v,
 		startAt:        time.Now(),
+		reverseDNS:     newReverseDNSCache(reverseDNSLookup),
 	}
 }
 
@@ -549,6 +558,7 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 	if slavehealth.IsHealthGroup(ref.Group) {
 		hops = redactTerminalHops(hops)
 	}
+	hostnames := s.reverseDNS.hostnames(r.Context(), hopIPs(hops))
 	// target_loss is a sibling of hops, not a field on one: a hop row's
 	// sent/lost counts probes at a single TTL, and reading that as the
 	// target's loss is the bug this key exists to retire. A source whose
@@ -556,6 +566,7 @@ func (s *Server) getHops(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"target":      ref.ID(),
 		"hops":        hops,
+		"hostnames":   hostnames,
 		"target_loss": cycleCounterDTOs(res.Cycles),
 	})
 }
@@ -603,6 +614,7 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 	if slavehealth.IsHealthGroup(ref.Group) {
 		hops = redactAllHopAddresses(hops)
 	}
+	hostnames := s.reverseDNS.hostnames(r.Context(), hopIPs(hops))
 	loss := make([]hopTimelineLossDTO, len(res.TimelineLoss))
 	for i, p := range res.TimelineLoss {
 		loss[i] = hopTimelineLossDTO{
@@ -641,8 +653,17 @@ func (s *Server) getHopsTimeline(w http.ResponseWriter, r *http.Request) {
 		"to":          to,
 		"step_sec":    int64(step / time.Second),
 		"hops":        dtos,
+		"hostnames":   hostnames,
 		"target_loss": loss,
 	})
+}
+
+func hopIPs(hops []storage.HopPoint) []string {
+	ips := make([]string, 0, len(hops))
+	for _, hop := range hops {
+		ips = append(ips, hop.IP)
+	}
+	return ips
 }
 
 type hopTimelineLossDTO struct {
