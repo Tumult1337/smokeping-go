@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { colorFor, isSuccess } from "./httpStatus";
+import { colorFor, isSuccess, statusClass } from "./httpStatus";
 import { paletteForSorted } from "./palette";
 import { unixSec, chartChrome } from "./chartUtils";
 import { chartName, statusSummaryText, type StatusDistribution } from "./chartA11y";
-import { statusClass } from "./httpStatus";
 import { useEffectiveTheme } from "./theme";
 import type { HttpPoint } from "./api";
 

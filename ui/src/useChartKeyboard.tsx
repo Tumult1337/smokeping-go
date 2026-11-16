@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useId, useRef, useState, type FocusEvent, type KeyboardEvent, type ReactNode } from "react";
 import {
-  decodeKey,
+  decodeKeyInMode,
   edgeIndex,
-  formatInstant,
+  formatLocalTime,
   isZoomed,
   keyHelpText,
   moveIndex,
   moveRow,
   nearestIndex,
+  nextAnnouncement,
   pickAnnouncement,
+  resolveZoomNow,
   shouldAnnounce,
+  type Announcement,
   zoomAnnouncement,
   zoomIn,
   zoomOut,
@@ -36,7 +39,7 @@ interface Options {
   toSec?: number;
   rangeSpanSec?: number;
   readout: (cursor: ChartCursor) => string;
-  onPick?: (cursor: ChartCursor) => void;
+  onPick?: (cursor: ChartCursor) => number | null;
   onZoomChange?: (window: ZoomWindow | null) => void;
 }
 
@@ -57,7 +60,9 @@ export interface ChartKeyboard {
   focusClassName: string;
   cursor: ChartCursor | null;
   focused: boolean;
-  announcer: ReactNode;
+  onPointerLeave: () => void;
+  liveRegion: ReactNode;
+  keyHelp: ReactNode;
 }
 
 function keyInput(e: KeyboardEvent<HTMLElement>): KeyInput {
@@ -87,8 +92,13 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
   const cursorRef = useRef<ChartCursor | null>(null);
   const repeatedRef = useRef(false);
   const [cursor, setCursor] = useState<ChartCursor | null>(null);
-  const [liveText, setLiveText] = useState("");
+  const focusVisibleRef = useRef(false);
+  const [announcement, setAnnouncement] = useState<Announcement>({ text: "", seq: 0 });
   const [focused, setFocused] = useState(false);
+
+  const announce = useCallback((text: string) => {
+    setAnnouncement((previous) => nextAnnouncement(previous, text));
+  }, []);
 
   const commitCursor = useCallback((next: ChartCursor | null) => {
     cursorRef.current = next;
@@ -124,20 +134,21 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     const window: ZoomWindow = { from: fromSec, to: toSec };
     let result: ZoomResult = { changed: false };
     if (action.type === "zoomIn") result = zoomIn(window, current.sec);
-    else if (action.type === "zoomOut") result = zoomOut(window, current.sec, rangeSpanSec, Math.floor(Date.now() / 1000));
+    else if (action.type === "zoomOut") result = zoomOut(window, current.sec, rangeSpanSec, resolveZoomNow(Date.now() / 1000, toSec));
     else if (action.type === "zoomReset" && isZoomed(window, rangeSpanSec)) result = zoomReset(window, rangeSpanSec);
     if (!result.changed) return;
     onZoomChange(result.window);
-    setLiveText(zoomAnnouncement(result.window));
-  }, []);
+    announce(zoomAnnouncement(result.window));
+  }, [announce]);
 
   const onKeyDown = useCallback(
     (e: KeyboardEvent<HTMLElement>) => {
       const { kind, times, rowCount = 0, readout, onPick } = optionsRef.current;
       const input = keyInput(e);
-      const action = decodeKey(input, kind);
+      const keyboardMode = cursorRef.current != null || focusVisibleRef.current;
+      const action = decodeKeyInMode(input, kind, keyboardMode);
       if (!action) {
-        if (input.repeat && decodeKey({ ...input, repeat: false }, kind)) e.preventDefault();
+        if (input.repeat && decodeKeyInMode({ ...input, repeat: false }, kind, keyboardMode)) e.preventDefault();
         return;
       }
       e.preventDefault();
@@ -146,7 +157,7 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
       else repeatedRef.current = false;
       if (action.type === "escape") {
         commitCursor(null);
-        setLiveText("");
+        announce("");
         return;
       }
       if (times.length === 0) return;
@@ -158,12 +169,12 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
           row: kind === "heatmap" ? moveRow(null, rowCount, -1) : null,
         };
         commitCursor(first);
-        setLiveText(readout(first));
+        announce(readout(first));
         return;
       }
       if (action.type === "pick") {
-        onPick?.(current);
-        setLiveText(pickAnnouncement(formatInstant(current.sec)));
+        const picked = onPick?.(current);
+        if (picked != null) announce(pickAnnouncement(formatLocalTime(picked)));
         return;
       }
       if (action.type === "zoomIn" || action.type === "zoomOut" || action.type === "zoomReset") {
@@ -173,30 +184,38 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
       const next = applyCursorAction(action, current);
       if (!next) return;
       commitCursor(next);
-      if (shouldAnnounce("down", e.repeat, repeatedRef.current)) setLiveText(readout(next));
+      if (shouldAnnounce("down", e.repeat, repeatedRef.current)) announce(readout(next));
     },
-    [applyCursorAction, commitCursor, runZoom],
+    [announce, applyCursorAction, commitCursor, runZoom],
   );
 
   const onKeyUp = useCallback((e: KeyboardEvent<HTMLElement>) => {
     const { kind, readout } = optionsRef.current;
-    const action = decodeKey({ ...keyInput(e), repeat: false }, kind);
-    if (!action || (action.type !== "step" && action.type !== "row")) return;
     const current = cursorRef.current;
+    const action = decodeKeyInMode({ ...keyInput(e), repeat: false }, kind, current != null);
+    if (!action || (action.type !== "step" && action.type !== "row")) return;
     const repeated = repeatedRef.current;
     repeatedRef.current = false;
-    if (current && shouldAnnounce("up", false, repeated)) setLiveText(readout(current));
-  }, []);
+    if (current && shouldAnnounce("up", false, repeated)) announce(readout(current));
+  }, [announce]);
 
   const onFocus = useCallback((e: FocusEvent<HTMLElement>) => {
-    setFocused(matchesFocusVisible(e.currentTarget));
+    focusVisibleRef.current = matchesFocusVisible(e.currentTarget);
+    setFocused(focusVisibleRef.current);
   }, []);
 
   const onBlur = useCallback(() => {
     repeatedRef.current = false;
+    focusVisibleRef.current = false;
     setFocused(false);
     commitCursor(null);
-  }, [commitCursor]);
+    announce("");
+  }, [announce, commitCursor]);
+
+  const onPointerLeave = useCallback(() => {
+    const current = cursorRef.current;
+    if (current) setCursor({ ...current });
+  }, []);
 
   const { times, rowCount, fromSec, toSec } = options;
   useEffect(() => {
@@ -213,15 +232,15 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     commitCursor({ idx, sec: times[idx], row });
   }, [times, rowCount, fromSec, toSec, commitCursor]);
 
-  const announcer = (
-    <>
-      <div className="sr-only" aria-live="polite" aria-atomic="true">
-        {liveText}
-      </div>
-      <div id={helpId} className={focused ? "chart-key-help" : "sr-only"}>
-        {keyHelpText(options.kind)}
-      </div>
-    </>
+  const liveRegion = (
+    <div className="sr-only" aria-live="polite" aria-atomic="true">
+      {announcement.text && <span key={announcement.seq}>{announcement.text}</span>}
+    </div>
+  );
+  const keyHelp = (
+    <div id={helpId} className={focused ? "chart-key-help" : "sr-only"}>
+      {keyHelpText(options.kind)}
+    </div>
   );
 
   return {
@@ -239,6 +258,8 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     focusClassName: "chart-focus",
     cursor,
     focused,
-    announcer,
+    onPointerLeave,
+    liveRegion,
+    keyHelp,
   };
 }

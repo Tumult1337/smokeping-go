@@ -364,9 +364,13 @@ Key points a reader can't derive from a single file:
   key map, the cursor math, the zoom bounds and the text of each chart name and
   readout; `ui/src/useChartKeyboard.tsx` owns the cursor state, the key
   handlers and the live region. Only the key handler writes the live region, so
-  a mouse move or a data refresh never announces. A keyboard zoom stays inside
+  a mouse move or a data refresh never announces, and each announcement
+  replaces a keyed child of the region so equal text is announced again. A
+  chart focused by a mouse click and holding no cursor handles only the cursor
+  arrows, so the page keys keep scrolling. A keyboard zoom stays inside
   the bounds of the mouse path: whole seconds, a 1 s floor, a ceiling at the
-  selected range, one `onZoomChange` call for each physical press and none when
+  selected range (zoom out reads the larger of the client clock and the echoed
+  `to`), one `onZoomChange` call for each physical press and none when
   the window does not change. The focus element is the uPlot host `div`, not
   `u.over`, because `SmokeChart` rebuilds uPlot when its source set changes.
 

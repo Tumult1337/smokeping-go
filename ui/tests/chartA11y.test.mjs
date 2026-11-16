@@ -4,6 +4,10 @@ import test from "node:test";
 import {
   chartName,
   decodeKey,
+  decodeKeyInMode,
+  formatLocalTime,
+  nextAnnouncement,
+  resolveZoomNow,
   edgeIndex,
   heatmapNoDataText,
   heatmapReadoutText,
@@ -507,4 +511,69 @@ test("each key help lists only the keys of its chart", () => {
     assert.ok(!/[—·]/.test(text(kind)), `${kind} has an em dash or a middle dot`);
     assert.ok(keyHelp(kind).length > 0);
   }
+});
+
+test("Space with mouse focus and no cursor gives no action", () => {
+  for (const kind of ALL_KINDS) {
+    assert.equal(decodeKeyInMode(key(" "), kind, false), null);
+    assert.equal(decodeKeyInMode(key(" ", { repeat: true }), kind, false), null);
+    assert.equal(decodeKeyInMode(key("Enter"), kind, false), null);
+  }
+});
+
+test("with mouse focus only the cursor arrows act", () => {
+  for (const kind of ALL_KINDS) {
+    assert.deepEqual(decodeKeyInMode(key("ArrowRight"), kind, false), { type: "step", direction: 1, large: false });
+    assert.deepEqual(decodeKeyInMode(key("ArrowLeft"), kind, false), { type: "step", direction: -1, large: false });
+    assert.deepEqual(decodeKeyInMode(key("ArrowLeft", { shiftKey: true }), kind, false), { type: "step", direction: -1, large: true });
+    for (const name of ["PageUp", "PageDown", "Home", "End", "Escape", "+", "=", "-", "0"]) {
+      assert.equal(decodeKeyInMode(key(name), kind, false), null, `${name} ${kind}`);
+    }
+  }
+  assert.deepEqual(decodeKeyInMode(key("ArrowUp"), "heatmap", false), { type: "row", direction: -1 });
+  assert.deepEqual(decodeKeyInMode(key("ArrowDown"), "heatmap", false), { type: "row", direction: 1 });
+  assert.equal(decodeKeyInMode(key("ArrowUp"), "band", false), null);
+});
+
+test("with keyboard mode every key of the map acts as before", () => {
+  for (const kind of ALL_KINDS) {
+    for (const name of ["PageUp", "Home", "End", "Escape", "ArrowRight", " ", "Enter", "+", "-", "0", "ArrowUp"]) {
+      assert.deepEqual(decodeKeyInMode(key(name), kind, true), decodeKey(key(name), kind), `${name} ${kind}`);
+    }
+  }
+});
+
+test("mouse focus still passes modifier keys to the browser", () => {
+  assert.equal(decodeKeyInMode(key("ArrowRight", { ctrlKey: true }), "band", false), null);
+});
+
+test("each announcement changes the sequence, also for equal text", () => {
+  const first = nextAnnouncement({ text: "", seq: 0 }, "T: a");
+  const second = nextAnnouncement(first, "T: a");
+  assert.equal(second.text, first.text);
+  assert.notEqual(second.seq, first.seq);
+  const cleared = nextAnnouncement(second, "");
+  assert.equal(cleared.text, "");
+  assert.notEqual(cleared.seq, second.seq);
+});
+
+test("the zoom clock is the larger of the client clock and the echoed end", () => {
+  assert.equal(resolveZoomNow(1000.4, 1120), 1120);
+  assert.equal(resolveZoomNow(1120, 1120), 1120);
+  assert.equal(resolveZoomNow(1200.9, 1120), 1200);
+  assert.equal(resolveZoomNow(1000.4, undefined), 1000);
+});
+
+test("zoom out with a client clock behind the server keeps the cursor in the window", () => {
+  const serverNow = 1_800_000_000;
+  const clientNow = serverNow - 120;
+  const current = { from: serverNow - 60, to: serverNow };
+  const cursor = serverNow - 5;
+  const result = zoomOut(current, cursor, HOUR, resolveZoomNow(clientNow, current.to));
+  assert.equal(result.changed, true);
+  assert.ok(result.window.from <= cursor && cursor <= result.window.to);
+});
+
+test("the local time text is the locale string of the instant", () => {
+  assert.equal(formatLocalTime(1_700_000_000), new Date(1_700_000_000_000).toLocaleString());
 });

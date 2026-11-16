@@ -5,7 +5,7 @@ import { paletteForSorted, lossTextColor } from "./palette";
 import { colorFor, statusLabel, statusClass, isSuccess, type StatusClass } from "./httpStatus";
 import { StatusStrip } from "./StatusStrip";
 import { chartChrome } from "./chartUtils";
-import { chartName, formatInstant, httpReadoutText, httpSummaryText } from "./chartA11y";
+import { chartName, formatLocalTime, httpReadoutText, httpSummaryText } from "./chartA11y";
 import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme } from "./theme";
 
@@ -305,18 +305,23 @@ export function HttpChart({
   }, [points, fromSec, toSec, theme]);
 
   const times = useMemo(() => points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000)), [points]);
+  const chartLabel = useMemo(
+    () =>
+      chartName({
+        subject: "HTTP response time chart",
+        target: targetId,
+        fromSec,
+        toSec,
+        summary: httpSummaryText(
+          summary && { samples: summary.total, uptime: summary.uptime, p50: summary.p50, p95: summary.p95 },
+          loading && points.length === 0,
+        ),
+      }),
+    [targetId, fromSec, toSec, summary, loading, points.length],
+  );
   const keyboard = useChartKeyboard({
     kind: "http",
-    name: chartName({
-      subject: "HTTP response time chart",
-      target: targetId,
-      fromSec,
-      toSec,
-      summary: httpSummaryText(
-        summary && { samples: summary.total, uptime: summary.uptime, p50: summary.p50, p95: summary.p95 },
-        loading && points.length === 0,
-      ),
-    }),
+    name: chartLabel,
     times,
     fromSec,
     toSec,
@@ -325,7 +330,7 @@ export function HttpChart({
       const p = pointsRef.current[cursor.idx];
       if (!p) return "";
       return httpReadoutText({
-        timeText: formatInstant(cursor.sec),
+        timeText: formatLocalTime(cursor.sec),
         status: p.Status,
         rtt: p.RTT,
         source: p.Source ?? "",
@@ -367,9 +372,10 @@ export function HttpChart({
           ref={divRef}
           style={{ width: "100%" }}
           {...keyboard.focusProps}
+          onMouseLeave={keyboard.onPointerLeave}
           className={`${keyboard.focusClassName} chart-focus-overlay`}
         />
-        {keyboard.announcer}
+        {keyboard.liveRegion}
         {points.length === 0 &&
           (loading ? (
             <div className="chart-skeleton" role="status" aria-label="Loading…" />
@@ -395,7 +401,7 @@ export function HttpChart({
               zIndex: 5,
             }}
           >
-            <div style={{ color: "var(--text-muted)" }}>{new Date(hovered.Time).toLocaleString()}</div>
+            <div style={{ color: "var(--text-muted)" }}>{formatLocalTime(Math.floor(new Date(hovered.Time).getTime() / 1000))}</div>
             <div>
               <span style={{ color: colorFor(hovered.Status, theme) }}>● {statusLabel(hovered.Status)}</span>
               {hovered.Status !== 0 && <span style={{ marginLeft: 8 }}>{hovered.RTT.toFixed(1)} ms</span>}
@@ -414,6 +420,7 @@ export function HttpChart({
         plotLeft={plotOffsets.left}
         plotRight={plotOffsets.right}
       />
+      {keyboard.keyHelp}
 
       {summary && (
         <div className="stats" style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 16 }}>

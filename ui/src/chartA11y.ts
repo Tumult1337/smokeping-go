@@ -80,6 +80,28 @@ export function decodeKey(input: KeyInput, kind: ChartKind): KeyAction | null {
   }
 }
 
+export function decodeKeyInMode(input: KeyInput, kind: ChartKind, keyboardMode: boolean): KeyAction | null {
+  const action = decodeKey(input, kind);
+  if (keyboardMode || !action) return action;
+  const movesCursor =
+    (action.type === "step" && (input.key === "ArrowLeft" || input.key === "ArrowRight")) || action.type === "row";
+  return movesCursor ? action : null;
+}
+
+export interface Announcement {
+  text: string;
+  seq: number;
+}
+
+export function nextAnnouncement(previous: Announcement, text: string): Announcement {
+  return { text, seq: previous.seq + 1 };
+}
+
+export function resolveZoomNow(clientNowSec: number, echoedToSec: number | undefined): number {
+  const client = Math.floor(clientNowSec);
+  return echoedToSec == null ? client : Math.max(client, echoedToSec);
+}
+
 export function largeStep(sampleCount: number): number {
   return Math.max(1, Math.round(sampleCount / LARGE_STEP_DIVISOR));
 }
@@ -158,13 +180,28 @@ export function shouldAnnounce(phase: "down" | "up", repeat: boolean, repeatedSi
   return phase === "down" ? !repeat : repeatedSinceDown;
 }
 
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+function instantFormatter(format?: TimeFormat): Intl.DateTimeFormat {
+  const cacheKey = `${format?.locale ?? ""}|${format?.timeZone ?? ""}`;
+  let formatter = formatters.get(cacheKey);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(format?.locale, {
+      dateStyle: "medium",
+      timeStyle: "medium",
+      timeZone: format?.timeZone,
+    });
+    formatters.set(cacheKey, formatter);
+  }
+  return formatter;
+}
+
 export function formatInstant(sec: number, format?: TimeFormat): string {
-  const formatter = new Intl.DateTimeFormat(format?.locale, {
-    dateStyle: "medium",
-    timeStyle: "medium",
-    timeZone: format?.timeZone,
-  });
-  return formatter.format(new Date(sec * 1000)).replace(/ /g, " ");
+  return instantFormatter(format).format(new Date(sec * 1000)).replace(/\u202f/g, " ");
+}
+
+export function formatLocalTime(sec: number): string {
+  return new Date(sec * 1000).toLocaleString();
 }
 
 export function windowText(fromSec: number | undefined, toSec: number | undefined, format?: TimeFormat): string {

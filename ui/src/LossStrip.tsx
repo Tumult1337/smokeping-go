@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { lossColor, paletteForSorted } from "./palette";
 import { chartChrome } from "./chartUtils";
-import { chartName, formatInstant, lossReadoutText, lossSummaryText, type LossSummary } from "./chartA11y";
+import { chartName, formatLocalTime, lossReadoutText, lossSummaryText, type LossSummary } from "./chartA11y";
 import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme } from "./theme";
 
@@ -94,8 +94,13 @@ export function LossStripCanvas({
     }),
     times,
     readout: (cursor) =>
-      lossReadoutText(formatInstant(cursor.sec), lossAt(effectiveSeries, cursor.sec)),
-    onPick: (cursor) => onCyclePickRef.current?.(cursor.sec),
+      lossReadoutText(formatLocalTime(cursor.sec), lossAt(effectiveSeries, cursor.sec)),
+    onPick: (cursor) => {
+      const cb = onCyclePickRef.current;
+      if (!cb) return null;
+      cb(cursor.sec);
+      return cursor.sec;
+    },
   });
   const cursorSecRef = useRef<number | null>(null);
   cursorSecRef.current = keyboard.cursor?.sec ?? null;
@@ -190,7 +195,7 @@ export function LossStripCanvas({
   const labelWidth = plotLeft != null ? Math.max(0, plotLeft - GAP) : 28;
 
   const cursorReadout = keyboard.cursor
-    ? lossReadoutText(formatInstant(keyboard.cursor.sec), lossAt(effectiveSeries, keyboard.cursor.sec))
+    ? lossReadoutText(formatLocalTime(keyboard.cursor.sec), lossAt(effectiveSeries, keyboard.cursor.sec))
     : null;
 
   return (
@@ -248,7 +253,7 @@ export function LossStripCanvas({
       <canvas
         ref={canvasRef}
         {...keyboard.focusProps}
-        className={keyboard.focusClassName}
+        className={`${keyboard.focusClassName} chart-focus-outside`}
         style={{
           flex: 1,
           minWidth: 0,
@@ -260,8 +265,9 @@ export function LossStripCanvas({
         onClick={handleClick}
       />
     </div>
-    {keyboard.announcer}
+    {keyboard.liveRegion}
     {cursorReadout && <div className="chart-cursor-readout">{cursorReadout}</div>}
+    {keyboard.keyHelp}
     </>
   );
 }

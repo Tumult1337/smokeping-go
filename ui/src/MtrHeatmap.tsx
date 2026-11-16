@@ -4,7 +4,7 @@ import { lossColor } from "./palette";
 import { cycleAtSec } from "./chartUtils";
 import {
   chartName,
-  formatInstant,
+  formatLocalTime,
   heatmapNoDataText,
   heatmapReadoutText,
   heatmapSummaryText,
@@ -320,7 +320,7 @@ function PathHeatmap({
     readout: (cursor) => {
       const hop = cursor.row == null ? undefined : visibleHops[cursor.row];
       if (hop == null) return "";
-      const timeText = formatInstant(cursor.sec);
+      const timeText = formatLocalTime(cursor.sec);
       const p = rows.get(hop)?.get(cursor.sec);
       if (!p) return heatmapNoDataText(hop, timeText);
       const target = probeType === "mtr" ? targetLossByCycle.get(cursor.sec) : undefined;
@@ -338,9 +338,11 @@ function PathHeatmap({
       });
     },
     onPick: (cursor) => {
-      if (!onPick) return;
+      if (!onPick) return null;
       pinScrollAcrossReflow();
-      onPick(worstCycleSec(cursor.sec), source || undefined);
+      const picked = worstCycleSec(cursor.sec);
+      onPick(picked, source || undefined);
+      return picked;
     },
   });
   const keyboardCursor = keyboard.cursor;
@@ -725,7 +727,10 @@ function PathHeatmap({
         onPick(worstCycleSec(t), source || undefined);
       }}
       onMouseMove={handleMouseMove}
-      onMouseLeave={() => setHover(null)}
+      onMouseLeave={() => {
+        setHover(null);
+        keyboard.onPointerLeave();
+      }}
     >
       <canvas ref={canvasRef} style={{ display: "block" }} />
       {hover && (
@@ -738,7 +743,7 @@ function PathHeatmap({
           }
         >
           <div className="mtr-heatmap-tip-head">
-            hop {hover.hop} · {new Date(hover.sec * 1000).toLocaleString()}
+            hop {hover.hop} · {formatLocalTime(hover.sec)}
           </div>
           {hoverHostname && (
             <div className="mtr-heatmap-tip-hostname">{hoverHostname}</div>
@@ -785,7 +790,8 @@ function PathHeatmap({
         </div>
       )}
     </div>
-    {keyboard.announcer}
+    {keyboard.liveRegion}
+    {keyboard.keyHelp}
     </>
   );
 }

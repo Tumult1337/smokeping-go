@@ -4,7 +4,7 @@ import type { CyclePoint } from "./api";
 import { paletteForSorted, lossColor, type PaletteEntry } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
 import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss, decadeSplits, LOG_Y_FLOOR, chartChrome, latencySummary } from "./chartUtils";
-import { chartName, formatInstant, latencyReadoutText, latencySummaryText, type LatencyReadoutEntry } from "./chartA11y";
+import { chartName, formatLocalTime, latencyReadoutText, latencySummaryText, type LatencyReadoutEntry } from "./chartA11y";
 import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme, type Theme } from "./theme";
 
@@ -374,21 +374,36 @@ export function SmokeBarChart({ targetId, rangeSpanSec, points, height = 320, fr
   }, [built, fromSec, toSec, yScale]);
 
   const times = useMemo(() => (points.length === 0 ? [] : (built.data[0] as number[])), [points, built]);
+  const namedPoints = useMemo(
+    () => (soloSource != null ? points.filter((p) => (p.Source ?? "") === soloSource) : points),
+    [points, soloSource],
+  );
+  const namedSummary = useMemo(() => latencySummary(namedPoints), [namedPoints]);
+  const chartLabel = useMemo(
+    () =>
+      chartName({
+        subject: "Latency bar chart",
+        target: targetId,
+        fromSec,
+        toSec,
+        summary: latencySummaryText(namedSummary, loading === true && points.length === 0),
+      }),
+    [targetId, fromSec, toSec, namedSummary, loading, points.length],
+  );
   const keyboard = useChartKeyboard({
     kind: "bars",
-    name: chartName({
-      subject: "Latency bar chart",
-      target: targetId,
-      fromSec,
-      toSec,
-      summary: latencySummaryText(latencySummary(points), loading === true && points.length === 0),
-    }),
+    name: chartLabel,
     times,
     fromSec,
     toSec,
     rangeSpanSec,
-    readout: (cursor) => latencyReadoutText(formatInstant(cursor.sec), barReadoutEntries(built, cursor.idx, soloSource)),
-    onPick: (cursor) => onCyclePickRef.current?.(cursor.sec),
+    readout: (cursor) => latencyReadoutText(formatLocalTime(cursor.sec), barReadoutEntries(built, cursor.idx, soloSource)),
+    onPick: (cursor) => {
+      const cb = onCyclePickRef.current;
+      if (!cb) return null;
+      cb(cursor.sec);
+      return cursor.sec;
+    },
     onZoomChange: (window) => onZoomChangeRef.current?.(window),
   });
   const keyboardCursor = keyboard.cursor;
@@ -413,9 +428,10 @@ export function SmokeBarChart({ targetId, rangeSpanSec, points, height = 320, fr
         ref={divRef}
         style={{ width: "100%" }}
         {...keyboard.focusProps}
+        onMouseLeave={keyboard.onPointerLeave}
         className={`${keyboard.focusClassName} chart-focus-overlay`}
       />
-      {keyboard.announcer}
+      {keyboard.liveRegion}
       {points.length === 0 &&
         (loading ? (
           <div className="chart-skeleton" role="status" aria-label="Loading…" />
@@ -446,6 +462,7 @@ export function SmokeBarChart({ targetId, rangeSpanSec, points, height = 320, fr
           onSoloChangeRef={onSoloChangeRef}
         />
       )}
+      {keyboard.keyHelp}
     </div>
   );
 }
