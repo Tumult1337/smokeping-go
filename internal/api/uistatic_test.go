@@ -365,7 +365,7 @@ func TestOtherMethodsOnAStaticFileGet405WithAllowGetHead(t *testing.T) {
 	}
 }
 
-func TestEachMethodOnAnUnknownPathGets404(t *testing.T) {
+func TestUnknownPathsGet404(t *testing.T) {
 	methods := []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions}
 	textMethods := append(slices.Clone(methods), "PROPFIND")
 	routers := []struct {
@@ -412,7 +412,7 @@ func TestEachMethodOnAnUnknownPathGets404(t *testing.T) {
 	}
 }
 
-func TestStaticFallbackRefusesANameWhoseLastElementStartsWithADot(t *testing.T) {
+func TestStaticHandlerRefusesANameWhoseLastElementStartsWithADot(t *testing.T) {
 	uiFiles := testUIFS()
 	uiFiles[".gitkeep"] = &fstest.MapFile{}
 	uiFiles["assets/.cache-AbCd12_-.js"] = &fstest.MapFile{Data: []byte("hidden")}
@@ -441,7 +441,7 @@ func (f *anyNameFS) Open(name string) (fs.File, error) {
 	return fstest.MapFS{"file.js": {Data: []byte("served for any name")}}.Open("file.js")
 }
 
-func TestStaticFallbackHandsTheUIFSOnlyValidNames(t *testing.T) {
+func TestStaticHandlerHandsTheUIFSOnlyValidNames(t *testing.T) {
 	anyName := &anyNameFS{}
 	h := newTestServer(t, withUIFS(anyName))
 	if res := get(t, h, "/valid.js", nil); res.StatusCode != http.StatusOK {

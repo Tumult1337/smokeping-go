@@ -84,7 +84,7 @@ type Options struct {
 	Store  *config.Store
 	Reader storage.Reader
 	// UIFS is the filesystem holding the built SPA (index.html + assets/).
-	// May be nil — routes will 404 for UI paths in that case.
+	// May be nil; each path outside /api then gets 404.
 	UIFS fs.FS
 	// ClusterHandler is the master-side sub-router for /api/v1/cluster/*. Nil
 	// in standalone or slave mode; set when the master exposes cluster endpoints.

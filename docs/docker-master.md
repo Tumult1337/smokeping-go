@@ -419,10 +419,18 @@ the API, the cluster endpoints, and each 404 and 405.
   206, or 304. Each other status of a static path, for example a 404, a
   405, a 412, a 416, or the 301 from `/index.html` to `/`, carries
   `Cache-Control: no-store`, so no cache stores it.
-- Each unknown path gets status 404 with `Cache-Control: no-store`, for
-  each method. Below `/api/`, the body is JSON: `{"error":"not found"}`.
-  Below `/api/v1/cluster/`, the bearer check answers first, so a request
-  without a valid token gets 401.
+- The clean form of the path decides which side answers. A path whose
+  clean form is outside `/api/` goes to the static file rules: an unknown
+  path, and a path that differs from its clean form, get status 404 with
+  `Cache-Control: no-store`, for each method. This includes a raw path
+  that starts with `/api/v1/cluster/` and leaves `/api/` through `..`.
+- Below `/api/`, an unknown path gets status 404 with the JSON body
+  `{"error":"not found"}` and `Cache-Control: no-store`, for GET, HEAD,
+  POST, PUT, PATCH, DELETE, OPTIONS, TRACE, and CONNECT. Each other
+  method, such as PROPFIND, gets status 405 from the router, with no
+  `Allow` and no `Cache-Control`, before the route and the bearer check.
+  Below `/api/v1/cluster/`, the bearer check answers before the route,
+  so a request without a valid token gets 401.
 - A 404 is cacheable by default (RFC 9111). Without `no-store`, a CDN
   that keys its cache on the normalized URL and sends the raw URL to the
   origin can store the 404 of `/%61ssets/<file>` under the key of the

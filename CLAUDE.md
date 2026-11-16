@@ -297,7 +297,11 @@ Key points a reader can't derive from a single file:
   as a 412, a 416 and the 301 from `/index.html` to `/`.
   Below `/api/v1/cluster/` the mounted `BearerAuth` answers before the route
   match, so an unknown path there gets 401 without a token and the JSON 404
-  with one. Other API responses carry no `Cache-Control`.
+  with one. The clean form of the path selects the static side or the API
+  side, so a raw path below `/api/v1/cluster/` that leaves `/api` through
+  `..` gets the text 404. Below `/api`, chi answers a method outside its
+  table with its own 405, before the route and before `BearerAuth`. Other
+  API responses carry no `Cache-Control`.
 
   **CSP-driven build rules.** The pre-paint theme script is
   `ui/public/theme.js`, loaded by a classic `<script src="/theme.js">` in
@@ -393,7 +397,9 @@ Key points a reader can't derive from a single file:
   Right, so every other key, Up and Down included, keeps scrolling the page;
   `isKeyboardMode` decides both that rule and the visibility of the key help.
   The `aria-label` of a focused chart keeps its focus-time text (`stableName`),
-  so a refresh never changes what a screen reader reads. Every time in a live text, a name,
+  so a refresh never changes what a screen reader reads. A keyboard zoom
+  leaves that text unchanged until blur, and the live region states the
+  zoomed window. Every time in a live text, a name,
   a summary and a tooltip comes from `formatLocalTime`, and `clampBoxStart`
   keeps a chart tooltip inside its host. A keyboard zoom stays inside
   the bounds of the mouse path: whole seconds, a 1 s floor, a ceiling at the
