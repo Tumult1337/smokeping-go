@@ -405,8 +405,9 @@ the API, the cluster endpoints, and each 404 and 405.
 - Do not add the headers of the table again in the proxy. A second
   copy gives duplicate headers, and a browser applies each
   `Content-Security-Policy` that it receives.
-- `net/http` writes some error responses itself, for example a 400 for
-  a malformed request line. These responses carry none of the headers.
+- `net/http` writes some responses itself: an error, for example a 400
+  for a malformed request line, and the empty 200 for `OPTIONS *`.
+  These responses carry none of the headers.
 
 ### Caching and unknown paths
 
@@ -445,6 +446,8 @@ the API, the cluster endpoints, and each 404 and 405.
   percent-encoding that the default form does not need, such as
   `/theme%2Ejs` or `/assets%2F<file>`, also gets 404. So does a name
   whose last element starts with a dot, such as `/.gitkeep`.
+- An empty path is `/`. The request `GET http://host HTTP/1.1` gets the
+  index page, as `GET /` does. `GET *` gets status 404.
 
 ---
 

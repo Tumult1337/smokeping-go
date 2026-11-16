@@ -222,7 +222,7 @@ func (s *Server) serveFileOrNotFound(w http.ResponseWriter, r *http.Request, cle
 }
 
 func (s *Server) staticFileName(r *http.Request, cleanPath string) (string, bool) {
-	if s.uiFS == nil || r.URL.RawPath != "" || r.URL.Path != cleanPath {
+	if s.uiFS == nil || r.URL.RawPath != "" || cmp.Or(r.URL.Path, "/") != cleanPath {
 		return "", false
 	}
 	name := strings.TrimPrefix(cleanPath, "/")

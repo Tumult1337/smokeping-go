@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,12 +9,14 @@ import (
 	"io/fs"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"unicode/utf8"
@@ -521,5 +524,129 @@ func TestEmbeddedBuildFollowsTheStaticFileRules(t *testing.T) {
 	}
 	if requireUI && dotFiles == 0 {
 		t.Error("precondition: the build holds no dot file, so the dot rule did not run on it; npm run build writes .gitkeep")
+	}
+}
+
+type seenRequest struct {
+	method string
+	path   string
+}
+
+type requestRecorder struct {
+	mu   sync.Mutex
+	seen []seenRequest
+}
+
+func (rec *requestRecorder) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.mu.Lock()
+		rec.seen = append(rec.seen, seenRequest{method: r.Method, path: r.URL.Path})
+		rec.mu.Unlock()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (rec *requestRecorder) take() []seenRequest {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	seen := rec.seen
+	rec.seen = nil
+	return seen
+}
+
+func sendRequestLine(t *testing.T, addr, requestLine, method string) (*http.Response, string) {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "%s\r\nHost: example.com\r\nConnection: close\r\n\r\n", requestLine); err != nil {
+		t.Fatalf("write %q: %v", requestLine, err)
+	}
+	res, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: method})
+	if err != nil {
+		t.Fatalf("read the response to %q: %v", requestLine, err)
+	}
+	return res, readBody(t, res)
+}
+
+func headerWithoutDate(header http.Header) http.Header {
+	clone := header.Clone()
+	clone.Del("Date")
+	return clone
+}
+
+func startRecordedServer(t *testing.T, opts ...testOpt) (*requestRecorder, string) {
+	t.Helper()
+	rec := &requestRecorder{}
+	srv := httptest.NewUnstartedServer(rec.wrap(newTestServer(t, opts...)))
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return rec, srv.Listener.Addr().String()
+}
+
+func TestEmptyRequestPathGetsTheAnswerOfSlash(t *testing.T) {
+	uiFiles := testUIFS()
+	rec, addr := startRecordedServer(t, withUIFS(uiFiles))
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		want, wantBody := sendRequestLine(t, addr, method+" / HTTP/1.1", method)
+		rec.take()
+		requestLine := method + " http://example.com HTTP/1.1"
+		got, gotBody := sendRequestLine(t, addr, requestLine, method)
+		if seen := rec.take(); len(seen) != 1 || seen[0].path != "" {
+			t.Fatalf("precondition: %s reached the handler as %+v, want one request with an empty URL.Path", requestLine, seen)
+		}
+		if want.StatusCode != http.StatusOK || got.StatusCode != want.StatusCode {
+			t.Errorf("%s: status = %d, want %d as for %s /, which must be 200", requestLine, got.StatusCode, want.StatusCode, method)
+		}
+		if !maps.EqualFunc(headerWithoutDate(got.Header), headerWithoutDate(want.Header), slices.Equal) {
+			t.Errorf("%s: headers = %v, want the headers of %s / %v", requestLine, got.Header, method, want.Header)
+		}
+		if gotBody != wantBody {
+			t.Errorf("%s: body = %q, want the body of %s / %q", requestLine, gotBody, method, wantBody)
+		}
+		if method == http.MethodGet && gotBody != string(uiFiles["index.html"].Data) {
+			t.Errorf("%s: body = %q, want the index page", requestLine, gotBody)
+		}
+		assertSecurityHeaders(t, got.Header)
+	}
+
+	const connect = "CONNECT example.com:443 HTTP/1.1"
+	res, body := sendRequestLine(t, addr, connect, http.MethodConnect)
+	if seen := rec.take(); len(seen) != 1 || seen[0].method != http.MethodConnect || seen[0].path != "" {
+		t.Fatalf("precondition: %s reached the handler as %+v, want one CONNECT with an empty URL.Path", connect, seen)
+	}
+	if res.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("%s: status = %d, want 405 as for CONNECT /", connect, res.StatusCode)
+	}
+	if got := res.Header.Values("Allow"); len(got) != 1 || got[0] != "GET, HEAD" {
+		t.Errorf("%s: Allow = %q, want exactly \"GET, HEAD\"", connect, got)
+	}
+	if strings.Contains(body, indexMarker) {
+		t.Errorf("%s: body holds the index page: %q", connect, body)
+	}
+	assertNoStore(t, connect, res)
+	assertSecurityHeaders(t, res.Header)
+}
+
+func TestAsteriskRequestTargetGetsNoFile(t *testing.T) {
+	rec, addr := startRecordedServer(t, withUIFS(testUIFS()))
+
+	const getAsterisk = "GET * HTTP/1.1"
+	res, body := sendRequestLine(t, addr, getAsterisk, http.MethodGet)
+	if seen := rec.take(); len(seen) != 1 || seen[0].path != "*" {
+		t.Fatalf("precondition: %s reached the handler as %+v, want one request with URL.Path *", getAsterisk, seen)
+	}
+	assertTextNotFound(t, getAsterisk, res, body)
+	assertSecurityHeaders(t, res.Header)
+
+	const optionsAsterisk = "OPTIONS * HTTP/1.1"
+	res, body = sendRequestLine(t, addr, optionsAsterisk, http.MethodOptions)
+	if seen := rec.take(); len(seen) != 0 {
+		t.Errorf("%s reached the handler as %+v, want net/http to answer it before the handler", optionsAsterisk, seen)
+	}
+	if res.StatusCode != http.StatusOK || body != "" {
+		t.Errorf("%s: status = %d, body = %q, want the empty 200 of net/http", optionsAsterisk, res.StatusCode, body)
 	}
 }

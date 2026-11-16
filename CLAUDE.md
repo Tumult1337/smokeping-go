@@ -273,7 +273,12 @@ Key points a reader can't derive from a single file:
   405 that has no `Allow`. A request below `/api/` (by the cleaned path) goes
   to chi, and an unknown path there gets the `writeErr` JSON 404 of
   `serveAPINotFound`. Outside `/api/`, `staticFileName` decides the one name
-  that is stat'ed and served, and `/` names `index.html`. It refuses, with the
+  that is stat'ed and served, and `/` names `index.html`. An empty request
+  path is `/` (RFC 9110 section 4.2.3): the absolute form `GET http://host`
+  gets the index page, and the authority form of CONNECT gets the 405 of
+  `/`. `net/http` answers `OPTIONS *` itself with an empty 200 before the
+  router, so that answer carries none of the headers; `GET *` reaches the
+  handler and gets the text 404. It refuses, with the
   text 404 of `net/http` and never the index page: a request path that
   differs from its clean form (a `..` or `.` element, a double slash, a
   trailing slash); a non-empty `URL.RawPath`, which is a percent-encoding that
