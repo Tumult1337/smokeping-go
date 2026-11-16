@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 	"testing/fstest"
 )
@@ -55,6 +56,65 @@ func assertSecurityHeaders(t *testing.T, header http.Header) {
 	}
 	if hsts := header.Values("Strict-Transport-Security"); len(hsts) != 0 {
 		t.Errorf("Strict-Transport-Security = %q, want absent: the binary serves plain HTTP and the TLS proxy owns HSTS", hsts)
+	}
+}
+
+type statusLog struct {
+	header   http.Header
+	statuses []int
+	body     []byte
+}
+
+func (s *statusLog) Header() http.Header { return s.header }
+
+func (s *statusLog) WriteHeader(status int) { s.statuses = append(s.statuses, status) }
+
+func (s *statusLog) Write(body []byte) (int, error) {
+	s.body = append(s.body, body...)
+	return len(body), nil
+}
+
+func TestCacheControlWriterTreatsABareWriteAsStatus200(t *testing.T) {
+	inner := &statusLog{header: http.Header{}}
+	w := &successCacheControlWriter{ResponseWriter: inner, cacheControl: "no-cache"}
+	if _, err := w.Write([]byte("body")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(inner.statuses) != 1 || inner.statuses[0] != http.StatusOK {
+		t.Errorf("statuses forwarded = %v, want [200]", inner.statuses)
+	}
+	if got := inner.header.Values("Cache-Control"); len(got) != 1 || got[0] != "no-cache" {
+		t.Errorf("Cache-Control = %q, want exactly no-cache on the implicit 200", got)
+	}
+	if string(inner.body) != "body" {
+		t.Errorf("body = %q, want body", inner.body)
+	}
+}
+
+func TestCacheControlWriterDecidesOnTheFirstStatusOnly(t *testing.T) {
+	inner := &statusLog{header: http.Header{}}
+	w := &successCacheControlWriter{ResponseWriter: inner, cacheControl: "no-cache"}
+	w.WriteHeader(http.StatusPreconditionFailed)
+	if _, err := w.Write([]byte("refused")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	w.WriteHeader(http.StatusOK)
+	if want := []int{http.StatusPreconditionFailed, http.StatusOK}; !slices.Equal(inner.statuses, want) {
+		t.Errorf("statuses forwarded = %v, want %v: a Write after a status adds none", inner.statuses, want)
+	}
+	if got := inner.header.Values("Cache-Control"); len(got) != 0 {
+		t.Errorf("Cache-Control = %q after a 412 and a late 200, want none", got)
+	}
+}
+
+func TestCacheControlWriterUnwrapsForTheResponseController(t *testing.T) {
+	rec := httptest.NewRecorder()
+	w := &successCacheControlWriter{ResponseWriter: rec, cacheControl: "no-cache"}
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		t.Fatalf("Flush through the wrapper: %v", err)
+	}
+	if !rec.Flushed {
+		t.Error("the wrapped recorder was not flushed")
 	}
 }
 

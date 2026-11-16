@@ -71,7 +71,7 @@
 }
 
 /* Light theme. Applied by <html data-theme="light">, set before first paint by
-   the inline script in index.html and by src/theme.ts. Only the tokens change;
+   public/theme.js and by src/theme.ts. Only the tokens change;
    every rule below consumes them. Data colours (palette.ts) carry their own
    light variants. */
 :root[data-theme="light"] {

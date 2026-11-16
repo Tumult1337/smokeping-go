@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveConfig } from "vite";
 
+import { scriptTags } from "./html-script-tags.mjs";
+
 const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = path.resolve(uiDir, "../internal/ui/dist");
 const assetsDir = path.join(distDir, "assets");
@@ -56,11 +58,32 @@ function checkThemeScriptIsBuilt() {
   return [`${themePath} is missing, so the page paints before the stored theme applies`];
 }
 
-async function checkBuildConfigKeepsTheHashedDefaultNames() {
+function checkIndexLoadsThemeScriptBeforeTheModuleEntry() {
+  const indexPath = path.join(distDir, "index.html");
+  if (!existsSync(indexPath)) return [`${indexPath} is missing`];
+  const tags = scriptTags(readFileSync(indexPath, "utf8"));
+  const themeIndex = tags.findIndex((tag) => tag.attributes.get("src") === "/theme.js");
+  if (themeIndex === -1) return ["index.html loads no /theme.js outside a comment, so the page paints before the stored theme applies"];
+  const failures = [];
+  for (const attribute of ["async", "defer", "type"]) {
+    if (tags[themeIndex].attributes.has(attribute)) failures.push(`the /theme.js tag has the ${attribute} attribute, so it does not block the parser`);
+  }
+  const moduleIndex = tags.findIndex((tag) => tag.attributes.get("type") === "module");
+  if (moduleIndex === -1) failures.push("index.html has no module entry");
+  if (moduleIndex !== -1 && themeIndex > moduleIndex) failures.push("/theme.js comes after the module entry");
+  return failures;
+}
+
+async function checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset() {
   const config = await resolveConfig({ configFile: path.join(uiDir, "vite.config.ts"), logLevel: "silent" }, "build", "production");
   const builds = [["build", config.build], ...Object.entries(config.environments ?? {}).map(([name, env]) => [`environments.${name}.build`, env.build])];
   const failures = [];
   for (const [buildPath, build] of builds) {
+    const inlineLimit = build?.assetsInlineLimit;
+    if (inlineLimit !== 0) {
+      const shown = typeof inlineLimit === "function" ? "a function" : String(inlineLimit);
+      failures.push(`${buildPath}.assetsInlineLimit is ${shown}, not 0, so a small asset becomes a data: URL that the CSP refuses`);
+    }
     for (const optionsKey of BUILD_OPTION_KEYS) {
       const output = build?.[optionsKey]?.output;
       if (output == null) continue;
@@ -81,7 +104,8 @@ const rules = [
   ["built CSS inlines no data: URL", checkCSSInlinesNoDataURL],
   ["built index.html has no inline script or style", checkIndexHasNoInlineScriptOrStyle],
   ["theme.js is built", checkThemeScriptIsBuilt],
-  ["build config keeps the hashed default names", checkBuildConfigKeepsTheHashedDefaultNames],
+  ["built index.html loads /theme.js before the module entry", checkIndexLoadsThemeScriptBeforeTheModuleEntry],
+  ["build config keeps the hashed default names and inlines no asset", checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset],
 ];
 
 let failed = false;

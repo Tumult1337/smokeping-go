@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -69,17 +70,16 @@ func TestRootBuildFilesAreServedAndUnknownPathsGet404(t *testing.T) {
 	}
 
 	res := get(t, h, "/some/app/route", nil)
-	body := readBody(t, res)
-	if res.StatusCode != http.StatusNotFound {
-		t.Errorf("/some/app/route: status = %d, want 404", res.StatusCode)
-	}
-	assertNotIndexPage(t, "/some/app/route", res, body)
+	assertTextNotFound(t, "/some/app/route", res, readBody(t, res))
 }
 
-func assertNotIndexPage(t *testing.T, target string, res *http.Response, body string) {
+func assertTextNotFound(t *testing.T, target string, res *http.Response, body string) {
 	t.Helper()
-	if ct := res.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
-		t.Errorf("%s: Content-Type = %q, want no text/html", target, ct)
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("%s: status = %d, want 404", target, res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Errorf("%s: Content-Type = %q, want the text 404 of net/http", target, ct)
 	}
 	if strings.Contains(body, indexMarker) {
 		t.Errorf("%s: served the index page: %q", target, body)
@@ -119,8 +119,10 @@ func TestUnknownPathsGet404WithJSONBelowAPI(t *testing.T) {
 		"/api/v1/does-not-exist",
 		"/api/v1/targets/core/gw/does-not-exist",
 		"/api/v2/health",
+		"//api/v1/does-not-exist",
+		"/foo/../api/x",
 	}
-	otherPaths := []string{"/does-not-exist", "/some/app/route", "/apix", "/favicon.ico"}
+	otherPaths := []string{"/does-not-exist", "/some/app/route", "/apix", "/favicon.ico", "/api/../favicon.svg"}
 
 	for _, rt := range routers {
 		t.Run(rt.name, func(t *testing.T) {
@@ -130,11 +132,7 @@ func TestUnknownPathsGet404WithJSONBelowAPI(t *testing.T) {
 			}
 			for _, target := range otherPaths {
 				res := get(t, rt.router, target, nil)
-				body := readBody(t, res)
-				if res.StatusCode != http.StatusNotFound {
-					t.Errorf("%s: status = %d, want 404", target, res.StatusCode)
-				}
-				assertNotIndexPage(t, target, res, body)
+				assertTextNotFound(t, target, res, readBody(t, res))
 			}
 		})
 	}
@@ -163,7 +161,7 @@ func TestUnknownClusterPathAnswersAfterTheBearerCheck(t *testing.T) {
 	assertSecurityHeaders(t, res.Header)
 }
 
-func TestStaticHandlerRefusesTraversalDirectoriesAndFilesOutsideTheUI(t *testing.T) {
+func TestStaticHandlerRefusesNonCanonicalPathsDirectoriesAndFilesOutsideTheUI(t *testing.T) {
 	h := newTestServer(t, withUIFS(testUIFS()))
 	assetName := strings.TrimPrefix(fixtureAssetJS, "/assets/")
 	for _, target := range []string{
@@ -172,6 +170,11 @@ func TestStaticHandlerRefusesTraversalDirectoriesAndFilesOutsideTheUI(t *testing
 		"/assets/../index.html",
 		"/%2e%2e/api.go",
 		"/assets/%2e%2e/favicon.svg",
+		"/index.html/",
+		"/favicon.svg/",
+		fixtureAssetJS + "/",
+		"/" + fixtureAssetJS,
+		"/./favicon.svg",
 		"/api.go",
 		"/uistatic_test.go",
 		"/assets",
@@ -179,16 +182,13 @@ func TestStaticHandlerRefusesTraversalDirectoriesAndFilesOutsideTheUI(t *testing
 	} {
 		res := get(t, h, target, nil)
 		body := readBody(t, res)
-		if res.StatusCode != http.StatusNotFound {
-			t.Errorf("%s: status = %d, want 404", target, res.StatusCode)
-		}
+		assertTextNotFound(t, target, res, body)
 		if strings.Contains(body, assetName) {
 			t.Errorf("%s: body lists the directory: %q", target, body)
 		}
 		if strings.Contains(body, "package api") {
 			t.Errorf("%s: body is a source file outside the UI", target)
 		}
-		assertNotIndexPage(t, target, res, body)
 	}
 }
 
@@ -198,8 +198,11 @@ func TestCacheControlFollowsTheFileKind(t *testing.T) {
 		noCache   = "no-cache"
 	)
 	h := newTestServer(t, withUIFS(testUIFS()))
+	staleETag := http.Header{"If-Match": {`"stale"`}}
+	anyETag := http.Header{"If-None-Match": {"*"}}
 	cases := []struct {
 		target     string
+		header     http.Header
 		wantStatus int
 		wantCache  string
 	}{
@@ -209,25 +212,33 @@ func TestCacheControlFollowsTheFileKind(t *testing.T) {
 		{target: "/icon.svg", wantStatus: http.StatusOK, wantCache: noCache},
 		{target: fixtureAssetJS, wantStatus: http.StatusOK, wantCache: immutable},
 		{target: fixtureAssetCSS, wantStatus: http.StatusOK, wantCache: immutable},
+		{target: fixtureAssetJS, header: staleETag, wantStatus: http.StatusPreconditionFailed},
+		{target: "/theme.js", header: staleETag, wantStatus: http.StatusPreconditionFailed},
+		{target: fixtureAssetJS, header: anyETag, wantStatus: http.StatusNotModified, wantCache: immutable},
+		{target: "/theme.js", header: anyETag, wantStatus: http.StatusNotModified, wantCache: noCache},
+		{target: fixtureAssetJS, header: http.Header{"Range": {"bytes=0-3"}}, wantStatus: http.StatusPartialContent, wantCache: immutable},
+		{target: fixtureAssetJS, header: http.Header{"Range": {"bytes=9999-"}}, wantStatus: http.StatusRequestedRangeNotSatisfiable},
+		{target: "/index.html", wantStatus: http.StatusMovedPermanently},
 		{target: "/assets/does-not-exist.js", wantStatus: http.StatusNotFound},
 		{target: "/does-not-exist.js", wantStatus: http.StatusNotFound},
 		{target: "/api/v1/health", wantStatus: http.StatusOK},
 		{target: "/api/v1/does-not-exist", wantStatus: http.StatusNotFound},
 	}
 	for _, tc := range cases {
-		res := get(t, h, tc.target, nil)
+		res := get(t, h, tc.target, tc.header)
+		row := fmt.Sprintf("%s %v", tc.target, tc.header)
 		if res.StatusCode != tc.wantStatus {
-			t.Errorf("%s: status = %d, want %d", tc.target, res.StatusCode, tc.wantStatus)
+			t.Errorf("%s: status = %d, want %d", row, res.StatusCode, tc.wantStatus)
 		}
 		got := res.Header.Values("Cache-Control")
 		if tc.wantCache == "" {
 			if len(got) != 0 {
-				t.Errorf("%s: Cache-Control = %q, want none", tc.target, got)
+				t.Errorf("%s: Cache-Control = %q on status %d, want none", row, got, res.StatusCode)
 			}
 			continue
 		}
 		if len(got) != 1 || got[0] != tc.wantCache {
-			t.Errorf("%s: Cache-Control = %q, want exactly %q", tc.target, got, tc.wantCache)
+			t.Errorf("%s: Cache-Control = %q, want exactly %q", row, got, tc.wantCache)
 		}
 	}
 }

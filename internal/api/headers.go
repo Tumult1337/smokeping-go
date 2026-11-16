@@ -25,3 +25,41 @@ func setSecurityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// successCacheControlWriter decides at the first status write, because
+// http.ServeFileFS selects the status itself and a 412 or a 301 must not be
+// cached as the file.
+type successCacheControlWriter struct {
+	http.ResponseWriter
+	cacheControl string
+	wroteHeader  bool
+}
+
+func (w *successCacheControlWriter) WriteHeader(status int) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+		if cacheableStatus(status) {
+			w.Header().Set("Cache-Control", w.cacheControl)
+		}
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *successCacheControlWriter) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *successCacheControlWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func cacheableStatus(status int) bool {
+	switch status {
+	case http.StatusOK, http.StatusPartialContent, http.StatusNotModified:
+		return true
+	}
+	return false
+}

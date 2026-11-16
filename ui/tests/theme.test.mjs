@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
+import { scriptTags, withoutComments } from "../scripts/html-script-tags.mjs";
+
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 function readIndexHtml() {
@@ -11,21 +13,6 @@ function readIndexHtml() {
 
 function readThemeScript() {
   return readFileSync(new URL("../public/theme.js", import.meta.url), "utf8");
-}
-
-function parseAttributes(source) {
-  const attributes = new Map();
-  for (const match of source.matchAll(/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) {
-    attributes.set(match[1].toLowerCase(), match[2] ?? match[3] ?? match[4] ?? "");
-  }
-  return attributes;
-}
-
-function scriptTags(html) {
-  return [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)].map((match) => ({
-    attributes: parseAttributes(match[1]),
-    body: match[2],
-  }));
 }
 
 function runThemeScript({ stored, prefersDark, storage = "available" }) {
@@ -54,6 +41,20 @@ function runThemeScript({ stored, prefersDark, storage = "available" }) {
   return { theme: root.dataset.theme, colorScheme: root.style.colorScheme, requestedKeys };
 }
 
+test("a script tag inside an HTML comment does not count", () => {
+  const html = [
+    '<script src="/kept.js"></script>',
+    '<!-- <script src="/theme.js"></script> -->',
+    '<!--\n<script src="/multi-line.js"></script>\n-->',
+    '<script type="module" src="/entry.js"></script>',
+    '<!-- unterminated <script src="/after-open-comment.js"></script>',
+  ].join("\n");
+  assert.deepEqual(
+    scriptTags(html).map((tag) => tag.attributes.get("src")),
+    ["/kept.js", "/entry.js"],
+  );
+});
+
 test("index.html holds no script without src", () => {
   const tags = scriptTags(readIndexHtml());
   assert.ok(tags.length > 0, "index.html holds no script tag at all");
@@ -78,7 +79,7 @@ test("the theme script blocks the parser: no async, no defer, no type", () => {
   for (const attribute of ["async", "defer", "type"]) {
     assert.equal(theme.attributes.has(attribute), false, `the theme script has the ${attribute} attribute`);
   }
-  const head = readIndexHtml().split(/<\/head>/i)[0];
+  const head = withoutComments(readIndexHtml()).split(/<\/head>/i)[0];
   assert.match(head, /<script\b[^>]*\bsrc="\/theme\.js"/, "the theme script is not in <head>");
 });
 

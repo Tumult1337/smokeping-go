@@ -196,7 +196,7 @@ func (s *Server) serveFileOrNotFound(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	if s.uiFS == nil || hasDotDotElement(r.URL.Path) {
+	if s.uiFS == nil || r.URL.Path != cleanPath {
 		http.NotFound(w, r)
 		return
 	}
@@ -210,21 +210,12 @@ func (s *Server) serveFileOrNotFound(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Cache-Control", cacheControlFor(name))
-	http.ServeFileFS(w, r, s.uiFS, name)
+	cacheWriter := &successCacheControlWriter{ResponseWriter: w, cacheControl: cacheControlFor(name)}
+	http.ServeFileFS(cacheWriter, r, s.uiFS, name)
 }
 
 func isAPIPath(cleanPath string) bool {
 	return cleanPath == "/api" || strings.HasPrefix(cleanPath, "/api/")
-}
-
-func hasDotDotElement(urlPath string) bool {
-	for element := range strings.SplitSeq(urlPath, "/") {
-		if element == ".." {
-			return true
-		}
-	}
-	return false
 }
 
 func cacheControlFor(name string) string {

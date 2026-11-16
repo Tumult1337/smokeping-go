@@ -269,11 +269,16 @@ Key points a reader can't derive from a single file:
   **Unknown paths and caching.** `serveFileOrNotFound` is the `NotFound`
   handler in every mode, with or without a UI. Each unknown path gets 404:
   below `/api/` (by the cleaned path) the body is `writeErr` JSON, and
-  elsewhere it is the text 404 of `net/http`, never the index page. An
+  elsewhere it is the text 404 of `net/http`, never the index page. Outside
+  `/api/`, a request path that differs from its clean form gets 404 before
+  any lookup: a `..` or `.` element, a double slash, or a trailing slash. An
   existing regular file of the embedded UI is served under the exact name it
   stat'ed, with `public, max-age=31536000, immutable` below `/assets/` and
-  `no-cache` for `/` and each root file (`/theme.js`, the icons); a path with
-  a `..` element, a directory, or a miss gets 404 with no `Cache-Control`.
+  `no-cache` for `/` and each root file (`/theme.js`, the icons); a directory
+  or a miss gets 404 with no `Cache-Control`. `http.ServeFileFS` selects the
+  status itself, so `successCacheControlWriter` sets the file's
+  `Cache-Control` at the first status write and only for 200, 206 or 304: a
+  412, a 416 and the 301 from `/index.html` to `/` carry none.
   Below `/api/v1/cluster/` the mounted `BearerAuth` answers before the route
   match, so an unknown path there gets 401 without a token and the JSON 404
   with one. API responses carry no `Cache-Control`.
@@ -286,8 +291,13 @@ Key points a reader can't derive from a single file:
   `data:` URL, which the CSP refuses. `npm run build` ends with
   `ui/scripts/check-dist.mjs`, which fails on an asset name with no content
   hash, a build config that sets `entryFileNames`, `chunkFileNames` or
-  `assetFileNames`, a `url(data:` in built CSS, an inline script or style in
-  the built `index.html`, and a missing `theme.js`. The Vite dev server
+  `assetFileNames` or an `assetsInlineLimit` other than 0 (top-level and
+  each `environments.*.build`), a `url(data:` in built CSS, an inline script
+  or style in the built `index.html`, a missing `theme.js`, and a built
+  `index.html` that loads no classic `/theme.js` before the module entry.
+  Both that check and `npm test` read script tags through
+  `ui/scripts/html-script-tags.mjs`, which ignores HTML comments, so a
+  commented-out tag does not count. The Vite dev server
   (`make ui-dev`) sends no CSP, so a CSP check runs only through the Go
   server. `cd ui && npm test` runs the UI tests.
   `TestEmbeddedDistCarriesTheIconsIndexReferences` skips on an empty dist

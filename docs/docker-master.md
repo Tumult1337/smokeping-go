@@ -415,10 +415,17 @@ the API, the cluster endpoints, and each 404 and 405.
 - `/`, `/theme.js`, `/favicon.svg`, `/icon.svg`, and each other root
   file get `Cache-Control: no-cache`. A browser revalidates them on
   each use.
+- A file response carries `Cache-Control` only with status 200, 206,
+  or 304. Each other status of a file request, for example a 412, a
+  416, or the 301 from `/index.html` to `/`, carries no
+  `Cache-Control`, so no cache stores it as the file.
 - API responses carry no `Cache-Control`.
 - Each unknown path gets status 404. Below `/api/`, the body is JSON:
   `{"error":"not found"}`. Below `/api/v1/cluster/`, the bearer check
   answers first, so a request without a valid token gets 401.
+- A file is served only at its clean path. A path with a `..` or `.`
+  element, a double slash, or a trailing slash, such as
+  `/favicon.svg/` or `//assets/<file>`, gets 404.
 
 ---
 
