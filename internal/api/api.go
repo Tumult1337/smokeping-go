@@ -196,7 +196,7 @@ func (s *Server) serveFileOrNotFound(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	if s.uiFS == nil || r.URL.Path != cleanPath {
+	if s.uiFS == nil || r.URL.RawPath != "" || r.URL.Path != cleanPath {
 		http.NotFound(w, r)
 		return
 	}

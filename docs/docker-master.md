@@ -425,7 +425,9 @@ the API, the cluster endpoints, and each 404 and 405.
   answers first, so a request without a valid token gets 401.
 - A file is served only at its clean path. A path with a `..` or `.`
   element, a double slash, or a trailing slash, such as
-  `/favicon.svg/` or `//assets/<file>`, gets 404.
+  `/favicon.svg/` or `//assets/<file>`, gets 404. A path with a
+  percent-encoding that the default form does not need, such as
+  `/theme%2Ejs` or `/assets%2F<file>`, also gets 404.
 
 ---
 

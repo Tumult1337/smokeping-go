@@ -271,14 +271,18 @@ Key points a reader can't derive from a single file:
   below `/api/` (by the cleaned path) the body is `writeErr` JSON, and
   elsewhere it is the text 404 of `net/http`, never the index page. Outside
   `/api/`, a request path that differs from its clean form gets 404 before
-  any lookup: a `..` or `.` element, a double slash, or a trailing slash. An
+  any lookup: a `..` or `.` element, a double slash, or a trailing slash. So
+  does a path with a percent-encoding that the default form does not need,
+  such as `/theme%2Ejs` (a non-empty `URL.RawPath`): chi routes on the raw
+  path, so such a request misses the GET-only `/assets/*` route. An
   existing regular file of the embedded UI is served under the exact name it
   stat'ed, with `public, max-age=31536000, immutable` below `/assets/` and
   `no-cache` for `/` and each root file (`/theme.js`, the icons); a directory
   or a miss gets 404 with no `Cache-Control`. `http.ServeFileFS` selects the
   status itself, so `successCacheControlWriter` sets the file's
-  `Cache-Control` at the first status write and only for 200, 206 or 304: a
-  412, a 416 and the 301 from `/index.html` to `/` carry none.
+  `Cache-Control` at the first final status write (a 1xx other than 101 does
+  not count) and only for 200, 206 or 304: a 412, a 416 and the 301 from
+  `/index.html` to `/` carry none.
   Below `/api/v1/cluster/` the mounted `BearerAuth` answers before the route
   match, so an unknown path there gets 401 without a token and the JSON 404
   with one. API responses carry no `Cache-Control`.

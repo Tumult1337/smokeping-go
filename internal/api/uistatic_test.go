@@ -20,7 +20,12 @@ const indexMarker = "<!doctype html"
 
 func get(t *testing.T, h http.Handler, target string, header http.Header) *http.Response {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	return send(t, h, http.MethodGet, target, header)
+}
+
+func send(t *testing.T, h http.Handler, method, target string, header http.Header) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest(method, target, nil)
 	for name, values := range header {
 		req.Header[name] = values
 	}
@@ -121,6 +126,7 @@ func TestUnknownPathsGet404WithJSONBelowAPI(t *testing.T) {
 		"/api/v2/health",
 		"//api/v1/does-not-exist",
 		"/foo/../api/x",
+		"/api%2Fv1%2Fdoes-not-exist",
 	}
 	otherPaths := []string{"/does-not-exist", "/some/app/route", "/apix", "/favicon.ico", "/api/../favicon.svg"}
 
@@ -159,6 +165,36 @@ func TestUnknownClusterPathAnswersAfterTheBearerCheck(t *testing.T) {
 	res = get(t, h, target, http.Header{"Authorization": {"Bearer " + token}})
 	assertJSONNotFound(t, target, res, readBody(t, res))
 	assertSecurityHeaders(t, res.Header)
+}
+
+func TestStaticHandlerRefusesPercentEncodedAliases(t *testing.T) {
+	h := newTestServer(t, withUIFS(testUIFS()))
+	assetFile := strings.TrimPrefix(fixtureAssetJS, "/assets/")
+	aliases := []struct {
+		method string
+		target string
+	}{
+		{method: http.MethodGet, target: "/assets%2F" + assetFile},
+		{method: http.MethodPost, target: "/assets%2F" + assetFile},
+		{method: http.MethodGet, target: "/%61ssets/" + assetFile},
+		{method: http.MethodGet, target: "/theme%2Ejs"},
+	}
+	for _, alias := range aliases {
+		row := alias.method + " " + alias.target
+		if req := httptest.NewRequest(alias.method, alias.target, nil); req.URL.RawPath == "" {
+			t.Fatalf("precondition: %s parses with an empty RawPath, so the row cannot reach the rule", row)
+		}
+		res := send(t, h, alias.method, alias.target, nil)
+		assertTextNotFound(t, row, res, readBody(t, res))
+		if got := res.Header.Values("Cache-Control"); len(got) != 0 {
+			t.Errorf("%s: Cache-Control = %q, want none", row, got)
+		}
+	}
+	for _, target := range []string{fixtureAssetJS, "/theme.js", "/favicon.svg"} {
+		if res := get(t, h, target, nil); res.StatusCode != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200 at the default encoding", target, res.StatusCode)
+		}
+	}
 }
 
 func TestStaticHandlerRefusesNonCanonicalPathsDirectoriesAndFilesOutsideTheUI(t *testing.T) {

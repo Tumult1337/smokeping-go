@@ -26,7 +26,7 @@ func setSecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// successCacheControlWriter decides at the first status write, because
+// successCacheControlWriter decides at the first final status write, because
 // http.ServeFileFS selects the status itself and a 412 or a 301 must not be
 // cached as the file.
 type successCacheControlWriter struct {
@@ -36,7 +36,7 @@ type successCacheControlWriter struct {
 }
 
 func (w *successCacheControlWriter) WriteHeader(status int) {
-	if !w.wroteHeader {
+	if !w.wroteHeader && !informationalStatus(status) {
 		w.wroteHeader = true
 		if cacheableStatus(status) {
 			w.Header().Set("Cache-Control", w.cacheControl)
@@ -54,6 +54,10 @@ func (w *successCacheControlWriter) Write(body []byte) (int, error) {
 
 func (w *successCacheControlWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+func informationalStatus(status int) bool {
+	return status >= 100 && status < 200 && status != http.StatusSwitchingProtocols
 }
 
 func cacheableStatus(status int) bool {

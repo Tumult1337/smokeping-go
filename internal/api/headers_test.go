@@ -107,6 +107,30 @@ func TestCacheControlWriterDecidesOnTheFirstStatusOnly(t *testing.T) {
 	}
 }
 
+func TestCacheControlWriterDecidesAtTheFinalStatusAfterAnInformationalOne(t *testing.T) {
+	cases := []struct {
+		first     int
+		wantCache []string
+	}{
+		{first: http.StatusContinue, wantCache: []string{"no-cache"}},
+		{first: http.StatusEarlyHints, wantCache: []string{"no-cache"}},
+		{first: 199, wantCache: []string{"no-cache"}},
+		{first: http.StatusSwitchingProtocols},
+	}
+	for _, tc := range cases {
+		inner := &statusLog{header: http.Header{}}
+		w := &successCacheControlWriter{ResponseWriter: inner, cacheControl: "no-cache"}
+		w.WriteHeader(tc.first)
+		w.WriteHeader(http.StatusOK)
+		if want := []int{tc.first, http.StatusOK}; !slices.Equal(inner.statuses, want) {
+			t.Errorf("first %d: statuses forwarded = %v, want %v", tc.first, inner.statuses, want)
+		}
+		if got := inner.header.Values("Cache-Control"); !slices.Equal(got, tc.wantCache) {
+			t.Errorf("first %d, then 200: Cache-Control = %q, want %q", tc.first, got, tc.wantCache)
+		}
+	}
+}
+
 func TestCacheControlWriterUnwrapsForTheResponseController(t *testing.T) {
 	rec := httptest.NewRecorder()
 	w := &successCacheControlWriter{ResponseWriter: rec, cacheControl: "no-cache"}
