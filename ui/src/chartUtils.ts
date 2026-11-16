@@ -1,5 +1,6 @@
 import type uPlot from "uplot";
 import type { CyclePoint } from "./api";
+import type { LatencySummary } from "./chartA11y";
 
 // Window loss is packets lost over packets sent: averaging per-cycle
 // percentages weights a 1-ping cycle the same as a 100-ping one.
@@ -11,6 +12,38 @@ export function windowLoss(points: CyclePoint[]): number | null {
     lost += p.LossCount;
   }
   return sent > 0 ? (100 * lost) / sent : null;
+}
+
+export interface CycleWindowStats {
+  median: number | null;
+  p95: number | null;
+  min: number | null;
+  max: number | null;
+  loss: number | null;
+  maxLoss: number;
+}
+
+export function cycleWindowStats(points: CyclePoint[]): CycleWindowStats | null {
+  if (points.length === 0) return null;
+  const valid = points.filter((p) => p.LossPct < 100);
+  const loss = windowLoss(points);
+  const maxLoss = points.reduce((m, p) => (p.LossPct > m ? p.LossPct : m), 0);
+  if (valid.length === 0) return { median: null, p95: null, min: null, max: null, loss, maxLoss };
+  const median = valid.reduce((s, p) => s + p.Median, 0) / valid.length;
+  const p95 = valid.reduce((s, p) => s + p.P95, 0) / valid.length;
+  const min = valid.reduce((m, p) => {
+    const floor = effectiveMin(p);
+    return floor > 0 && floor < m ? floor : m;
+  }, Infinity);
+  const max = valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity);
+  return { median, p95, min: isFinite(min) ? min : null, max: isFinite(max) ? max : null, loss, maxLoss };
+}
+
+export function latencySummary(points: CyclePoint[]): LatencySummary | null {
+  const stats = cycleWindowStats(points);
+  if (!stats) return null;
+  const sources = new Set(points.map((p) => p.Source ?? ""));
+  return { cycles: points.length, sources: sources.size, median: stats.median, p95: stats.p95, loss: stats.loss };
 }
 
 // A bucketed column spans [t, t+step), so the column under a click is the last
@@ -62,12 +95,13 @@ export function unixSec(iso: string): number {
 // context and uPlot's axis options can't reference CSS variables, so callers
 // read them here and re-read on a theme change (the effective theme is in the
 // effect deps). Fallbacks are the dark-theme values.
-export function chartChrome(): { axis: string; grid: string; stripe: string } {
+export function chartChrome(): { axis: string; grid: string; stripe: string; accent: string } {
   const s = getComputedStyle(document.documentElement);
   return {
     axis: s.getPropertyValue("--chart-axis").trim() || "#8a93a6",
     grid: s.getPropertyValue("--chart-grid").trim() || "#1f2430",
     stripe: s.getPropertyValue("--chart-stripe").trim() || "rgba(255, 255, 255, 0.04)",
+    accent: s.getPropertyValue("--accent").trim() || "#4f93f5",
   };
 }
 

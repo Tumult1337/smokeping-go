@@ -12,7 +12,7 @@ import { SmokeBarChart } from "./SmokeBarChart";
 import { HttpChart } from "./HttpChart";
 import { MtrSection } from "./MtrSection";
 import { paletteForSorted, lossTextColor } from "./palette";
-import { effectiveMin, windowLoss } from "./chartUtils";
+import { cycleWindowStats } from "./chartUtils";
 import { OverviewView, type SortKey, type SortDir } from "./OverviewView";
 import type { OverviewWindow } from "./api";
 import { ThemeContext, useThemeController } from "./theme";
@@ -112,6 +112,16 @@ const RANGES: { label: string; value: Range }[] = [
   { label: "180d", value: "-180d" },
   { label: "1y", value: "-365d" },
 ];
+
+const RANGE_SPAN_SEC: Record<Range, number> = {
+  "-1h": 3600,
+  "-6h": 6 * 3600,
+  "-24h": 24 * 3600,
+  "-7d": 7 * 24 * 3600,
+  "-30d": 30 * 24 * 3600,
+  "-180d": 180 * 24 * 3600,
+  "-365d": 365 * 24 * 3600,
+};
 
 // JSON encodes every field the sidebar, the search index and the toolbar read,
 // and no separator can appear unescaped inside one of them.
@@ -557,19 +567,7 @@ export default function App() {
     const filtered = chartSoloSource != null
       ? points.filter((p) => (p.Source ?? "") === chartSoloSource)
       : points;
-    if (filtered.length === 0) return null;
-    const valid = filtered.filter((p) => p.LossPct < 100);
-    const loss = windowLoss(filtered);
-    const maxLoss = filtered.reduce((m, p) => (p.LossPct > m ? p.LossPct : m), 0);
-    if (valid.length === 0) return { median: null, p95: null, min: null, max: null, loss, maxLoss };
-    const median = valid.reduce((s, p) => s + p.Median, 0) / valid.length;
-    const p95 = valid.reduce((s, p) => s + p.P95, 0) / valid.length;
-    const min = valid.reduce((m, p) => {
-      const floor = effectiveMin(p);
-      return floor > 0 && floor < m ? floor : m;
-    }, Infinity);
-    const max = valid.reduce((m, p) => (p.Max > m ? p.Max : m), -Infinity);
-    return { median, p95, min: isFinite(min) ? min : null, max: isFinite(max) ? max : null, loss, maxLoss };
+    return cycleWindowStats(filtered);
   }, [points, chartSoloSource]);
   // Pin the chart x-axis to the server's echoed window so clicking 1y vs
   // 30d visibly changes the span even when only a slice has data. Falls back
@@ -891,6 +889,7 @@ export default function App() {
                 <HttpChart
                   targetId={selected.id}
                   range={range}
+                  rangeSpanSec={RANGE_SPAN_SEC[range]}
                   refreshTick={refreshTick}
                   fromSec={fromSec}
                   toSec={toSec}
@@ -905,6 +904,8 @@ export default function App() {
                 <div className="chart-title">Latency</div>
                 {chartStyle === "band" ? (
                   <SmokeChart
+                    targetId={selected.id}
+                    rangeSpanSec={RANGE_SPAN_SEC[range]}
                     points={points}
                     fromSec={fromSec}
                     toSec={toSec}
@@ -916,6 +917,8 @@ export default function App() {
                   />
                 ) : (
                   <SmokeBarChart
+                    targetId={selected.id}
+                    rangeSpanSec={RANGE_SPAN_SEC[range]}
                     points={points}
                     fromSec={fromSec}
                     toSec={toSec}

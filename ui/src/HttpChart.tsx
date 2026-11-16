@@ -5,11 +5,14 @@ import { paletteForSorted, lossTextColor } from "./palette";
 import { colorFor, statusLabel, statusClass, isSuccess, type StatusClass } from "./httpStatus";
 import { StatusStrip } from "./StatusStrip";
 import { chartChrome } from "./chartUtils";
+import { chartName, formatInstant, httpReadoutText, httpSummaryText } from "./chartA11y";
+import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme } from "./theme";
 
 interface Props {
   targetId: string;
   range: string;
+  rangeSpanSec?: number;
   refreshTick: number;
   height?: number;
   fromSec?: number;
@@ -28,6 +31,7 @@ interface Props {
 export function HttpChart({
   targetId,
   range,
+  rangeSpanSec,
   refreshTick,
   height = 260,
   fromSec,
@@ -300,6 +304,55 @@ export function HttpChart({
     // empty until the next data change.
   }, [points, fromSec, toSec, theme]);
 
+  const times = useMemo(() => points.map((p) => Math.floor(new Date(p.Time).getTime() / 1000)), [points]);
+  const keyboard = useChartKeyboard({
+    kind: "http",
+    name: chartName({
+      subject: "HTTP response time chart",
+      target: targetId,
+      fromSec,
+      toSec,
+      summary: httpSummaryText(
+        summary && { samples: summary.total, uptime: summary.uptime, p50: summary.p50, p95: summary.p95 },
+        loading && points.length === 0,
+      ),
+    }),
+    times,
+    fromSec,
+    toSec,
+    rangeSpanSec,
+    readout: (cursor) => {
+      const p = pointsRef.current[cursor.idx];
+      if (!p) return "";
+      return httpReadoutText({
+        timeText: formatInstant(cursor.sec),
+        status: p.Status,
+        rtt: p.RTT,
+        source: p.Source ?? "",
+        error: p.Err,
+      });
+    },
+    onZoomChange: (window) => onZoomChangeRef.current?.(window),
+  });
+  const keyboardCursor = keyboard.cursor;
+  const cursorShown = useRef(false);
+  useEffect(() => {
+    if (!keyboardCursor) {
+      if (cursorShown.current) setHover(null);
+      cursorShown.current = false;
+      return;
+    }
+    const u = plotRef.current;
+    const p = points[keyboardCursor.idx];
+    if (!u || !p) return;
+    cursorShown.current = true;
+    setHover({
+      idx: keyboardCursor.idx,
+      left: u.valToPos(keyboardCursor.sec, "x"),
+      top: u.valToPos(p.Status === 0 ? 0 : p.RTT, "y"),
+    });
+  }, [keyboardCursor, points, fromSec, toSec, theme]);
+
   const hovered = hover && hover.idx < points.length ? points[hover.idx] : null;
 
   return (
@@ -310,7 +363,13 @@ export function HttpChart({
           blank for the life of the mount after any transient fetch error. */}
       {error && <div className="error">{error}</div>}
       <div className="chart-host" style={{ minHeight: height, position: "relative" }}>
-        <div ref={divRef} style={{ width: "100%" }} />
+        <div
+          ref={divRef}
+          style={{ width: "100%" }}
+          {...keyboard.focusProps}
+          className={`${keyboard.focusClassName} chart-focus-overlay`}
+        />
+        {keyboard.announcer}
         {points.length === 0 &&
           (loading ? (
             <div className="chart-skeleton" role="status" aria-label="Loading…" />
@@ -348,6 +407,7 @@ export function HttpChart({
       </div>
 
       <StatusStrip
+        targetId={targetId}
         points={points}
         fromSec={fromSec}
         toSec={toSec}

@@ -3,12 +3,16 @@ import uPlot, { type Options, type AlignedData, type Series } from "uplot";
 import type { CyclePoint } from "./api";
 import { paletteForSorted, lossColor, type PaletteEntry } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss, decadeSplits, LOG_Y_FLOOR, chartChrome } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss, decadeSplits, LOG_Y_FLOOR, chartChrome, latencySummary } from "./chartUtils";
+import { chartName, formatInstant, latencyReadoutText, latencySummaryText, type LatencyReadoutEntry } from "./chartA11y";
+import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme, type Theme } from "./theme";
 
 const BAR_PCT_LABELS = ["min", "p5", "p25", "median", "p75", "p95", "max", "loss"] as const;
 
 interface Props {
+  targetId: string;
+  rangeSpanSec?: number;
   points: CyclePoint[];
   height?: number;
   // Requested window (unix seconds). When set, the x-axis is pinned to
@@ -55,7 +59,7 @@ type SourceStack = {
 // smooth smoke gradient that darkens around the median. The median tick on
 // top is colour-coded by per-cycle loss percentage. In multi-source "all"
 // view, each source gets its own palette entry and is drawn independently.
-export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "lin", onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
+export function SmokeBarChart({ targetId, rangeSpanSec, points, height = 320, fromSec, toSec, yScale = "lin", onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   // Keep onCyclePick in a ref so swapping the callback doesn't force a full
@@ -369,9 +373,49 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
     }
   }, [built, fromSec, toSec, yScale]);
 
+  const times = useMemo(() => (points.length === 0 ? [] : (built.data[0] as number[])), [points, built]);
+  const keyboard = useChartKeyboard({
+    kind: "bars",
+    name: chartName({
+      subject: "Latency bar chart",
+      target: targetId,
+      fromSec,
+      toSec,
+      summary: latencySummaryText(latencySummary(points), loading === true && points.length === 0),
+    }),
+    times,
+    fromSec,
+    toSec,
+    rangeSpanSec,
+    readout: (cursor) => latencyReadoutText(formatInstant(cursor.sec), barReadoutEntries(built, cursor.idx, soloSource)),
+    onPick: (cursor) => onCyclePickRef.current?.(cursor.sec),
+    onZoomChange: (window) => onZoomChangeRef.current?.(window),
+  });
+  const keyboardCursor = keyboard.cursor;
+  const cursorShown = useRef(false);
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u) return;
+    if (!keyboardCursor) {
+      if (cursorShown.current) u.setCursor({ left: -10, top: -10 });
+      cursorShown.current = false;
+      return;
+    }
+    const sec = u.data[0][keyboardCursor.idx];
+    if (sec == null) return;
+    cursorShown.current = true;
+    u.setCursor({ left: u.valToPos(sec, "x"), top: u.over.clientHeight / 2 });
+  }, [keyboardCursor, built, sourcesKey, yScale, theme, fromSec, toSec]);
+
   return (
     <div className="chart-host" style={{ minHeight: height }}>
-      <div ref={divRef} style={{ width: "100%" }} />
+      <div
+        ref={divRef}
+        style={{ width: "100%" }}
+        {...keyboard.focusProps}
+        className={`${keyboard.focusClassName} chart-focus-overlay`}
+      />
+      {keyboard.announcer}
       {points.length === 0 &&
         (loading ? (
           <div className="chart-skeleton" role="status" aria-label="Loading…" />
@@ -380,6 +424,7 @@ export function SmokeBarChart({ points, height = 320, fromSec, toSec, yScale = "
         ))}
       {points.length > 0 && built.anyLoss && (
         <LossStripCanvas
+          targetId={targetId}
           lossSeries={soloSource != null
             ? built.lossSeries.filter((_, i) => built.sources[i] === soloSource)
             : built.lossSeries}
@@ -509,6 +554,18 @@ function BarChartLegend({
       })}
     </div>
   );
+}
+
+function barReadoutEntries(built: Built, idx: number, soloSource: string | null): LatencyReadoutEntry[] {
+  const entries: LatencyReadoutEntry[] = [];
+  built.sources.forEach((source, srcIdx) => {
+    if (soloSource != null && source !== soloSource) return;
+    const base = 1 + srcIdx * BAR_PCT_LABELS.length;
+    const column = (label: (typeof BAR_PCT_LABELS)[number]) =>
+      (built.data[base + BAR_PCT_LABELS.indexOf(label)] as (number | null)[])[idx];
+    entries.push({ source, median: column("median"), p95: column("p95"), loss: column("loss") });
+  });
+  return entries;
 }
 
 type SourceAgg = {

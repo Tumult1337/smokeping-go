@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { colorFor, isSuccess } from "./httpStatus";
 import { paletteForSorted } from "./palette";
 import { unixSec, chartChrome } from "./chartUtils";
+import { chartName, statusSummaryText, type StatusDistribution } from "./chartA11y";
+import { statusClass } from "./httpStatus";
 import { useEffectiveTheme } from "./theme";
 import type { HttpPoint } from "./api";
 
@@ -19,12 +21,14 @@ type Row = { source: string; ts: number[]; statuses: number[] };
 // X-mapping, cell-width (neighbour-midpoint) and gutter-alignment all follow
 // LossStrip's conventions so the strip lines up pixel-for-pixel under the chart.
 export function StatusStrip({
+  targetId,
   points,
   fromSec,
   toSec,
   plotLeft,
   plotRight,
 }: {
+  targetId: string;
   points: HttpPoint[];
   fromSec: number | undefined;
   toSec: number | undefined;
@@ -147,6 +151,12 @@ export function StatusStrip({
     return () => ro.disconnect();
   }, [draw]);
 
+  const distribution = useMemo((): StatusDistribution => {
+    const dist: StatusDistribution = { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0, err: 0 };
+    for (const p of points) dist[statusClass(p.Status)]++;
+    return dist;
+  }, [points]);
+
   if (rows.length === 0 || fromSec == null || toSec == null) return null;
 
   const GAP = 6;
@@ -210,6 +220,14 @@ export function StatusStrip({
       </div>
       <canvas
         ref={canvasRef}
+        role="img"
+        aria-label={chartName({
+          subject: "HTTP status strip",
+          target: targetId,
+          fromSec,
+          toSec,
+          summary: statusSummaryText(distribution, false),
+        })}
         style={{
           flex: 1,
           minWidth: 0,

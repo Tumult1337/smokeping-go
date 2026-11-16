@@ -360,6 +360,16 @@ Key points a reader can't derive from a single file:
   copies three strokes and says so in a comment, which is a claim nothing else
   would catch going false.
 
+- **Chart keys:** `ui/src/chartA11y.ts` (pure, loaded by `node --test`) owns the
+  key map, the cursor math, the zoom bounds and the text of each chart name and
+  readout; `ui/src/useChartKeyboard.tsx` owns the cursor state, the key
+  handlers and the live region. Only the key handler writes the live region, so
+  a mouse move or a data refresh never announces. A keyboard zoom stays inside
+  the bounds of the mouse path: whole seconds, a 1 s floor, a ceiling at the
+  selected range, one `onZoomChange` call for each physical press and none when
+  the window does not change. The focus element is the uPlot host `div`, not
+  `u.over`, because `SmokeChart` rebuilds uPlot when its source set changes.
+
 - **A config the evaluator cannot apply never becomes current.** Alert
   conditions are parsed in `internal/alert`, which imports `config`, so
   `Config.Validate` cannot reach them — `config.Store.SetValidator` is the seam,

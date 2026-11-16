@@ -3,10 +3,14 @@ import uPlot, { type Options, type AlignedData, type Series, type Band } from "u
 import type { CyclePoint } from "./api";
 import { paletteForSorted, type PaletteEntry } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
-import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, decadeSplits, LOG_Y_FLOOR, chartChrome } from "./chartUtils";
+import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, decadeSplits, LOG_Y_FLOOR, chartChrome, latencySummary } from "./chartUtils";
+import { chartName, formatInstant, latencyReadoutText, latencySummaryText, type LatencyReadoutEntry } from "./chartA11y";
+import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme, type Theme } from "./theme";
 
 interface Props {
+  targetId: string;
+  rangeSpanSec?: number;
   points: CyclePoint[];
   height?: number;
   fromSec?: number;
@@ -33,7 +37,7 @@ interface Props {
 // sharing a single x-axis. Each source gets its own colour from the palette
 // and its own set of 7 series; nulls at timestamps where that source didn't
 // probe are bridged with spanGaps so fills don't break across the interleave.
-export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin", onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
+export function SmokeChart({ targetId, rangeSpanSec, points, height = 320, fromSec, toSec, yScale = "lin", onCyclePick, onZoomChange, onSoloChange, loading }: Props) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const onCyclePickRef = useRef(onCyclePick);
@@ -283,9 +287,49 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
     }
   }, [hidden, soloSource, sourcesKey, built.sourceYRanges, built.globalYRange, yScale]);
 
+  const times = useMemo(() => (points.length === 0 ? [] : (built.data[0] as number[])), [points, built]);
+  const keyboard = useChartKeyboard({
+    kind: "band",
+    name: chartName({
+      subject: "Latency band chart",
+      target: targetId,
+      fromSec,
+      toSec,
+      summary: latencySummaryText(latencySummary(points), loading === true && points.length === 0),
+    }),
+    times,
+    fromSec,
+    toSec,
+    rangeSpanSec,
+    readout: (cursor) => latencyReadoutText(formatInstant(cursor.sec), bandReadoutEntries(built, cursor.idx, soloSource)),
+    onPick: (cursor) => onCyclePickRef.current?.(cursor.sec),
+    onZoomChange: (window) => onZoomChangeRef.current?.(window),
+  });
+  const keyboardCursor = keyboard.cursor;
+  const cursorShown = useRef(false);
+  useEffect(() => {
+    const u = plotRef.current;
+    if (!u) return;
+    if (!keyboardCursor) {
+      if (cursorShown.current) u.setCursor({ left: -10, top: -10 });
+      cursorShown.current = false;
+      return;
+    }
+    const sec = u.data[0][keyboardCursor.idx];
+    if (sec == null) return;
+    cursorShown.current = true;
+    u.setCursor({ left: u.valToPos(sec, "x"), top: u.over.clientHeight / 2 });
+  }, [keyboardCursor, built, sourcesKey, yScale, theme, fromSec, toSec]);
+
   return (
     <div className="chart-host" style={{ minHeight: height }}>
-      <div ref={divRef} style={{ width: "100%" }} />
+      <div
+        ref={divRef}
+        style={{ width: "100%" }}
+        {...keyboard.focusProps}
+        className={`${keyboard.focusClassName} chart-focus-overlay`}
+      />
+      {keyboard.announcer}
       {points.length === 0 &&
         (loading ? (
           <div className="chart-skeleton" role="status" aria-label="Loading…" />
@@ -294,6 +338,7 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
         ))}
       {points.length > 0 && built.anyLoss && (
         <LossStripCanvas
+          targetId={targetId}
           lossSeries={soloSource != null
             ? built.lossSeries.filter((_, i) => built.sources[i] === soloSource)
             : built.lossSeries}
@@ -392,6 +437,26 @@ export function SmokeChart({ points, height = 320, fromSec, toSec, yScale = "lin
   );
 }
 
+
+function bandReadoutEntries(built: Built, idx: number, soloSource: string | null): LatencyReadoutEntry[] {
+  const entries: LatencyReadoutEntry[] = [];
+  built.sources.forEach((source, srcIdx) => {
+    if (soloSource != null && source !== soloSource) return;
+    const base = 1 + srcIdx * PCT_LABELS.length;
+    const medianCol = built.data[base + PCT_LABELS.indexOf("median")] as (number | null)[];
+    const p95Col = built.data[base + PCT_LABELS.indexOf("p95")] as (number | null)[];
+    const lossSeries = built.lossSeries[srcIdx];
+    const sec = built.data[0][idx] as number;
+    const lossIdx = lossSeries ? lossSeries.ts.indexOf(sec) : -1;
+    entries.push({
+      source,
+      median: medianCol[idx],
+      p95: p95Col[idx],
+      loss: lossIdx >= 0 ? lossSeries.losses[lossIdx] : null,
+    });
+  });
+  return entries;
+}
 
 type SourceAgg = {
   min: number | null;

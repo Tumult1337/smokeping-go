@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { lossColor, paletteForSorted } from "./palette";
 import { chartChrome } from "./chartUtils";
+import { chartName, formatInstant, lossReadoutText, lossSummaryText, type LossSummary } from "./chartA11y";
+import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme } from "./theme";
 
 export const LOSS_STRIP_H = 6;
@@ -19,6 +21,7 @@ export type LossSeries = {
 // so the strip's x-axis aligns pixel-for-pixel with the chart above.
 // One lane per lossy source, keyed to the chart palette by a gutter swatch.
 export function LossStripCanvas({
+  targetId,
   lossSeries,
   fromSec,
   toSec,
@@ -26,6 +29,7 @@ export function LossStripCanvas({
   plotLeft,
   plotRight,
 }: {
+  targetId: string;
   lossSeries: LossSeries[];
   fromSec: number | undefined;
   toSec: number | undefined;
@@ -49,6 +53,52 @@ export function LossStripCanvas({
     () => paletteForSorted(lossSeries.map((s) => s.source), theme),
     [lossSeries, theme],
   );
+
+  const onCyclePickRef = useRef(onCyclePick);
+  onCyclePickRef.current = onCyclePick;
+
+  const times = useMemo(() => {
+    const all = new Set<number>();
+    for (const series of effectiveSeries) for (const t of series.ts) all.add(t);
+    return [...all].sort((a, b) => a - b);
+  }, [effectiveSeries]);
+
+  const summary = useMemo((): LossSummary | null => {
+    let cycles = 0;
+    let lossy = 0;
+    let worstLoss: number | null = null;
+    let worstSec: number | null = null;
+    for (const series of lossSeries) {
+      series.ts.forEach((t, i) => {
+        cycles++;
+        const loss = series.losses[i];
+        if (loss <= 0) return;
+        lossy++;
+        if (worstLoss == null || loss > worstLoss) {
+          worstLoss = loss;
+          worstSec = t;
+        }
+      });
+    }
+    return cycles === 0 ? null : { lossy, cycles, worstLoss, worstSec };
+  }, [lossSeries]);
+
+  const keyboard = useChartKeyboard({
+    kind: "loss",
+    name: chartName({
+      subject: "Packet loss strip",
+      target: targetId,
+      fromSec,
+      toSec,
+      summary: lossSummaryText(summary, false),
+    }),
+    times,
+    readout: (cursor) =>
+      lossReadoutText(formatInstant(cursor.sec), lossAt(effectiveSeries, cursor.sec)),
+    onPick: (cursor) => onCyclePickRef.current?.(cursor.sec),
+  });
+  const cursorSecRef = useRef<number | null>(null);
+  cursorSecRef.current = keyboard.cursor?.sec ?? null;
 
   const effectiveSeriesRef = useRef(effectiveSeries);
   const fromSecRef = useRef(fromSec);
@@ -97,9 +147,14 @@ export function LossStripCanvas({
         ctx.fillRect(x, rowTop, cw, LOSS_STRIP_H);
       }
     });
+    const cursorSec = cursorSecRef.current;
+    if (cursorSec != null) {
+      ctx.fillStyle = chartChrome().accent;
+      ctx.fillRect(Math.round(valToX(cursorSec) - 1), 0, 2, stripH);
+    }
   }, []);
 
-  useEffect(() => { draw(); }, [effectiveSeries, fromSec, toSec, draw, plotLeft, theme]);
+  useEffect(() => { draw(); }, [effectiveSeries, fromSec, toSec, draw, plotLeft, theme, keyboard.cursor]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -108,9 +163,6 @@ export function LossStripCanvas({
     ro.observe(wrap);
     return () => ro.disconnect();
   }, [draw]);
-
-  const onCyclePickRef = useRef(onCyclePick);
-  onCyclePickRef.current = onCyclePick;
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const from = fromSecRef.current;
@@ -137,7 +189,12 @@ export function LossStripCanvas({
   const GAP = 6;
   const labelWidth = plotLeft != null ? Math.max(0, plotLeft - GAP) : 28;
 
+  const cursorReadout = keyboard.cursor
+    ? lossReadoutText(formatInstant(keyboard.cursor.sec), lossAt(effectiveSeries, keyboard.cursor.sec))
+    : null;
+
   return (
+    <>
     <div
       ref={wrapRef}
       style={{
@@ -190,6 +247,8 @@ export function LossStripCanvas({
       </div>
       <canvas
         ref={canvasRef}
+        {...keyboard.focusProps}
+        className={keyboard.focusClassName}
         style={{
           flex: 1,
           minWidth: 0,
@@ -201,5 +260,17 @@ export function LossStripCanvas({
         onClick={handleClick}
       />
     </div>
+    {keyboard.announcer}
+    {cursorReadout && <div className="chart-cursor-readout">{cursorReadout}</div>}
+    </>
   );
+}
+
+function lossAt(series: LossSeries[], sec: number): { source: string; loss: number }[] {
+  const out: { source: string; loss: number }[] = [];
+  for (const entry of series) {
+    const i = entry.ts.indexOf(sec);
+    if (i >= 0) out.push({ source: entry.source, loss: entry.losses[i] });
+  }
+  return out;
 }

@@ -2,6 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { getHopsTimeline, type HopPoint, type HopTimelineLoss } from "./api";
 import { lossColor } from "./palette";
 import { cycleAtSec } from "./chartUtils";
+import {
+  chartName,
+  formatInstant,
+  heatmapNoDataText,
+  heatmapReadoutText,
+  heatmapSummaryText,
+  type HeatmapSummary,
+} from "./chartA11y";
+import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme } from "./theme";
 import { hopHostname } from "./hopNames";
 
@@ -18,6 +27,7 @@ function readHeatColors() {
     heatOk: v("--heat-ok", "#2c3647"),
     noReply: v("--heat-noreply", "#4a5570"),
     markerFill: `rgba(${accentRgb}, 0.7)`,
+    cursorStroke: `rgb(${accentRgb})`,
     bg: v("--surface-inset", "#0f141c"),
     rowBg: v("--surface-raised", "#131823"),
     axisLabel: v("--text-muted", "#8a93a6"),
@@ -151,6 +161,7 @@ export function MtrHeatmap({
   return (
     <>
       <PathHeatmap
+        targetId={targetId}
         source={source}
         hops={hops}
         targetLoss={targetLoss}
@@ -176,6 +187,7 @@ export function MtrHeatmap({
 const MIN_COL_PX = 3;
 
 function PathHeatmap({
+  targetId,
   source,
   hops,
   targetLoss,
@@ -188,6 +200,7 @@ function PathHeatmap({
   onPick,
   stale,
 }: {
+  targetId: string;
   source: string;
   hops: HopPoint[];
   targetLoss: HopTimelineLoss[];
@@ -277,6 +290,61 @@ function PathHeatmap({
     return byCycle;
   }, [targetLoss]);
 
+  const heatmapSummary = useMemo((): HeatmapSummary => {
+    let worstLoss: number | null = null;
+    let worstHop: number | null = null;
+    for (const [hop, row] of rows) {
+      for (const p of row.values()) {
+        const loss = p.MaxLossPct ?? p.LossPct;
+        if (worstLoss == null || loss > worstLoss) {
+          worstLoss = loss;
+          worstHop = hop;
+        }
+      }
+    }
+    return { hops: visibleHops.length, columns: cycles.length, worstLoss, worstHop };
+  }, [rows, cycles, visibleHops]);
+
+  const keyboard = useChartKeyboard({
+    kind: "heatmap",
+    name: chartName({
+      subject: "MTR per-hop loss heatmap",
+      target: targetId,
+      qualifier: `source ${source || "default"}`,
+      fromSec,
+      toSec,
+      summary: heatmapSummaryText(heatmapSummary, false),
+    }),
+    times: cycles,
+    rowCount: visibleHops.length,
+    readout: (cursor) => {
+      const hop = cursor.row == null ? undefined : visibleHops[cursor.row];
+      if (hop == null) return "";
+      const timeText = formatInstant(cursor.sec);
+      const p = rows.get(hop)?.get(cursor.sec);
+      if (!p) return heatmapNoDataText(hop, timeText);
+      const target = probeType === "mtr" ? targetLossByCycle.get(cursor.sec) : undefined;
+      return heatmapReadoutText({
+        hop,
+        timeText,
+        hostname: hopHostname(hostnames, p.IP),
+        ip: p.IP,
+        lossPct: p.MaxLossPct ?? p.LossPct,
+        worstOfBucket: p.MaxLossPct != null,
+        replies: p.ReplyCount ?? Math.max(0, p.Sent - p.LossCount),
+        sent: p.Sent,
+        targetLoss: target?.LossPct,
+        unreach: p.Unreach,
+      });
+    },
+    onPick: (cursor) => {
+      if (!onPick) return;
+      pinScrollAcrossReflow();
+      onPick(worstCycleSec(cursor.sec), source || undefined);
+    },
+  });
+  const keyboardCursor = keyboard.cursor;
+
   // Adaptive height: at least 14px per hop row, plus a fixed bottom axis
   // strip. Clamped so a 30-hop path doesn't push the page to 500+px.
   const rowH = 14;
@@ -299,7 +367,7 @@ function PathHeatmap({
     canvas.style.height = cssH + "px";
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const { heatOk, noReply, markerFill, bg, rowBg, axisLabel, tickLabel, tickLine } = readHeatColors();
+    const { heatOk, noReply, markerFill, cursorStroke, bg, rowBg, axisLabel, tickLabel, tickLine } = readHeatColors();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
     ctx.fillStyle = bg;
@@ -445,7 +513,42 @@ function PathHeatmap({
       ctx.fillStyle = markerFill;
       ctx.fillRect(Math.round(x - 1), 2, 2, plotH - 4);
     }
-  }, [rows, cycles, visibleHops, targetLossByCycle, height, fromSec, toSec, selectedSec, stepSec, repaintCount, theme]);
+
+    if (keyboardCursor && keyboardCursor.row != null && keyboardCursor.row < visibleHops.length) {
+      const x = stepSec > 0 ? xForSec(keyboardCursor.sec) : xForSec(keyboardCursor.sec) - colW / 2;
+      ctx.strokeStyle = cursorStroke;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x - 1, 2 + keyboardCursor.row * actualRowH, Math.max(1, colW) + 2, actualRowH - 1);
+    }
+  }, [rows, cycles, visibleHops, targetLossByCycle, height, fromSec, toSec, selectedSec, stepSec, repaintCount, theme, keyboardCursor]);
+
+  const keyboardTooltipShown = useRef(false);
+  useEffect(() => {
+    if (!keyboardCursor || keyboardCursor.row == null) {
+      if (keyboardTooltipShown.current) setHover(null);
+      keyboardTooltipShown.current = false;
+      return;
+    }
+    const wrap = wrapRef.current;
+    const hop = visibleHops[keyboardCursor.row];
+    const p = hop == null ? undefined : rows.get(hop)?.get(keyboardCursor.sec);
+    if (!wrap || hop == null || !p) {
+      setHover(null);
+      return;
+    }
+    const plotW = wrap.clientWidth - 28 - 4;
+    const plotH = height - axisH - 2;
+    const actualRowH = Math.max(6, (plotH - 4) / visibleHops.length);
+    keyboardTooltipShown.current = true;
+    setHover({
+      x: 28 + ((keyboardCursor.sec - fromSec) / Math.max(1, toSec - fromSec)) * plotW,
+      y: 2 + keyboardCursor.row * actualRowH + actualRowH / 2,
+      hop,
+      sec: keyboardCursor.sec,
+      p,
+      target: targetLossByCycle.get(keyboardCursor.sec),
+    });
+  }, [keyboardCursor, hops, rows, visibleHops, targetLossByCycle, fromSec, toSec, height]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -603,9 +706,11 @@ function PathHeatmap({
   }
 
   return (
+    <>
     <div
       ref={wrapRef}
-      className="mtr-heatmap"
+      {...keyboard.focusProps}
+      className={`mtr-heatmap ${keyboard.focusClassName}`}
       style={{
         width: "100%",
         height,
@@ -680,6 +785,8 @@ function PathHeatmap({
         </div>
       )}
     </div>
+    {keyboard.announcer}
+    </>
   );
 }
 
