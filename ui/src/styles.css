@@ -446,6 +446,7 @@ th.overview-th { padding: 0; }
 }
 
 .main {
+  position: relative;
   padding: 24px;
   overflow-y: auto;
   height: 100vh;

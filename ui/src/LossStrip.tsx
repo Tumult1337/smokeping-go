@@ -85,6 +85,7 @@ export function LossStripCanvas({
 
   const keyboard = useChartKeyboard({
     kind: "loss",
+    loading: false,
     name: chartName({
       subject: "Packet loss strip",
       target: targetId,

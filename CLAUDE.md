@@ -401,8 +401,11 @@ Key points a reader can't derive from a single file:
   chart focused by a mouse click and holding no cursor handles only Left and
   Right, so every other key, Up and Down included, keeps scrolling the page;
   `isKeyboardMode` decides both that rule and the visibility of the key help.
-  The `aria-label` of a focused chart keeps its focus-time text (`stableName`),
-  so a refresh never changes what a screen reader reads. A keyboard zoom
+  The `aria-label` of a focused chart keeps the first name of loaded data
+  (`nextHeldName`; the `loading` option of each chart marks a name that states a
+  load, which is never held), so a refresh never changes what a screen reader
+  reads. `.main` is positioned so the absolutely placed `.sr-only` live region
+  and key help add no scroll range to the document. A keyboard zoom
   leaves that text unchanged until blur, and the live region states the
   zoomed window. Every time in a live text, a name,
   a summary and a tooltip comes from `formatLocalTime`, and `clampBoxStart`

@@ -9,6 +9,7 @@ import {
   moveRow,
   nearestIndex,
   nextAnnouncement,
+  nextHeldName,
   pickAnnouncement,
   resolveZoomNow,
   shouldAnnounce,
@@ -34,6 +35,7 @@ export interface ChartCursor {
 interface Options {
   kind: ChartKind;
   name: string;
+  loading: boolean;
   times: readonly number[];
   rowCount?: number;
   fromSec?: number;
@@ -95,7 +97,8 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
   const focusVisibleRef = useRef(false);
   const [announcement, setAnnouncement] = useState<Announcement>({ text: "", seq: 0 });
   const [focusVisible, setFocusVisible] = useState(false);
-  const [nameAtFocus, setNameAtFocus] = useState<string | null>(null);
+  const [hasFocus, setHasFocus] = useState(false);
+  const [heldName, setHeldName] = useState<string | null>(null);
 
   const announce = useCallback((text: string) => {
     setAnnouncement((previous) => nextAnnouncement(previous, text));
@@ -202,14 +205,14 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
   const onFocus = useCallback((e: FocusEvent<HTMLElement>) => {
     focusVisibleRef.current = matchesFocusVisible(e.currentTarget);
     setFocusVisible(focusVisibleRef.current);
-    setNameAtFocus(optionsRef.current.name);
+    setHasFocus(true);
   }, []);
 
   const onBlur = useCallback(() => {
     repeatedRef.current = false;
     focusVisibleRef.current = false;
     setFocusVisible(false);
-    setNameAtFocus(null);
+    setHasFocus(false);
     commitCursor(null);
     announce("");
   }, [announce, commitCursor]);
@@ -219,7 +222,11 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     if (current) setCursor({ ...current });
   }, []);
 
-  const { times, rowCount, fromSec, toSec } = options;
+  const { name, loading, times, rowCount, fromSec, toSec } = options;
+  useEffect(() => {
+    setHeldName((held) => nextHeldName(held, hasFocus, name, loading));
+  }, [hasFocus, name, loading]);
+
   useEffect(() => {
     const current = cursorRef.current;
     if (!current || times.length === 0) return;
@@ -250,7 +257,7 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     focusProps: {
       role: "application",
       "aria-roledescription": "interactive chart",
-      "aria-label": stableName(nameAtFocus, options.name),
+      "aria-label": stableName(heldName, options.name),
       "aria-describedby": helpId,
       tabIndex: 0,
       onKeyDown,

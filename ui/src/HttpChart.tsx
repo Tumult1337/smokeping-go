@@ -322,6 +322,7 @@ export function HttpChart({
   const keyboard = useChartKeyboard({
     kind: "http",
     name: chartLabel,
+    loading: loading && points.length === 0,
     times,
     fromSec,
     toSec,

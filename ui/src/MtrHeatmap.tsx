@@ -326,6 +326,7 @@ function PathHeatmap({
 
   const keyboard = useChartKeyboard({
     kind: "heatmap",
+    loading: false,
     name: chartName({
       subject: "MTR per-hop loss heatmap",
       target: targetId,

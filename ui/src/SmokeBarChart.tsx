@@ -393,6 +393,7 @@ export function SmokeBarChart({ targetId, rangeSpanSec, points, height = 320, fr
   const keyboard = useChartKeyboard({
     kind: "bars",
     name: chartLabel,
+    loading: loading === true && points.length === 0,
     times,
     fromSec,
     toSec,

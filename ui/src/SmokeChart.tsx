@@ -307,6 +307,7 @@ export function SmokeChart({ targetId, rangeSpanSec, points, height = 320, fromS
   const keyboard = useChartKeyboard({
     kind: "band",
     name: chartLabel,
+    loading: loading === true && points.length === 0,
     times,
     fromSec,
     toSec,

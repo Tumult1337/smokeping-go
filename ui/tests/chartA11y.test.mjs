@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -19,6 +20,7 @@ import {
   hopAddressText,
   replyCountOf,
   cellReplied,
+  nextHeldName,
   stableName,
   summarizeHeatmap,
   httpReadoutText,
@@ -784,4 +786,37 @@ test("the keyboard cursor placement hides the horizontal line", () => {
   const placement = keyboardCursorPlacement(123);
   assert.equal(placement.left, 123);
   assert.ok(placement.top < 0);
+});
+
+test("a chart focused with loaded data holds the name at focus", () => {
+  assert.equal(nextHeldName(null, true, "A", false), "A");
+});
+
+test("a chart focused during a load holds no name until the data arrives", () => {
+  assert.equal(nextHeldName(null, true, "window not loaded: loading", true), null);
+  assert.equal(nextHeldName(null, true, "loaded name", false), "loaded name");
+});
+
+test("a refresh under focus keeps the held name, also when the load state returns", () => {
+  assert.equal(nextHeldName("held", true, "other", false), "held");
+  assert.equal(nextHeldName("held", true, "loading", true), "held");
+});
+
+test("blur releases the held name", () => {
+  assert.equal(nextHeldName("held", false, "other", false), null);
+  assert.equal(nextHeldName(null, false, "other", true), null);
+});
+
+test("a chart with no data in range holds its name at focus", () => {
+  assert.equal(nextHeldName(null, true, "no data in range", false), "no data in range");
+});
+
+test("the main scroller is the containing block of the hidden chart text", () => {
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const block = css.match(/^\.main\s*\{([^}]*)\}/m);
+  assert.ok(block, ".main rule exists");
+  assert.match(block[1], /position:\s*relative/);
+  const hidden = css.match(/^\.sr-only\s*\{([^}]*)\}/m);
+  assert.ok(hidden, ".sr-only rule exists");
+  assert.match(hidden[1], /position:\s*absolute/);
 });

@@ -189,6 +189,12 @@ export function isKeyboardMode(cursorExists: boolean, keyboardFocus: boolean): b
   return cursorExists || keyboardFocus;
 }
 
+export function nextHeldName(held: string | null, hasFocus: boolean, currentName: string, loading: boolean): string | null {
+  if (!hasFocus) return null;
+  if (held != null) return held;
+  return loading ? null : currentName;
+}
+
 export function stableName(nameAtFocus: string | null, currentName: string): string {
   return nameAtFocus ?? currentName;
 }
