@@ -1,16 +1,17 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveConfig } from "vite";
 
-import { scriptTags } from "./html-script-tags.mjs";
+import { scriptTags, startTags } from "./html-script-tags.mjs";
 
-const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const distDir = path.resolve(uiDir, "../internal/ui/dist");
-const assetsDir = path.join(distDir, "assets");
+export const uiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const builtDistDir = path.resolve(uiDir, "../internal/ui/dist");
 
 // Rolldown's default [hash] is 8 base64url characters, so a hash can hold "-" and "_".
 const CONTENT_HASHED_NAME = /-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
+const DATA_URL = /(?<![A-Za-z0-9+.-])data:(?:(?:application|audio|example|font|haptics|image|message|model|multipart|text|video)\/[A-Za-z0-9!#$&^_.+-]+)?(?:;[^\s,;"'`()]*)*,/i;
+const BROWSER_CODE_FILE = /\.(?:css|html|js|mjs)$/i;
 const OUTPUT_NAME_OPTIONS = ["entryFileNames", "chunkFileNames", "assetFileNames"];
 const BUILD_OPTION_KEYS = ["rolldownOptions", "rollupOptions"];
 
@@ -20,7 +21,8 @@ function builtFiles(dir) {
     .map((entry) => path.join(entry.parentPath, entry.name));
 }
 
-function checkAssetNamesCarryAContentHash() {
+export function checkAssetNamesCarryAContentHash(distDir) {
+  const assetsDir = path.join(distDir, "assets");
   if (!existsSync(assetsDir)) return [`${assetsDir} is missing`];
   const files = builtFiles(assetsDir);
   if (files.length === 0) return [`${assetsDir} holds no file`];
@@ -29,36 +31,46 @@ function checkAssetNamesCarryAContentHash() {
     .map((file) => `${path.relative(distDir, file)} has no content hash in its name, so the immutable cache rule would serve it stale`);
 }
 
-function checkCSSInlinesNoDataURL() {
-  if (!existsSync(assetsDir)) return [];
-  return builtFiles(assetsDir)
-    .filter((file) => file.endsWith(".css"))
-    .filter((file) => /url\(\s*["']?\s*data:/i.test(readFileSync(file, "utf8")))
-    .map((file) => `${path.relative(distDir, file)} holds url(data:...), which the CSP font-src 'self' and img-src 'self' refuse`);
+export function checkPublicDirHoldsNoAssetsFolder(publicDir) {
+  if (!publicDir) return [];
+  const publicAssets = path.join(publicDir, "assets");
+  if (lstatSync(publicAssets, { throwIfNoEntry: false }) === undefined) return [];
+  return [`${publicAssets} exists: Vite copies it to dist/assets with no content hash in the names, and the server sends each file there as immutable for one year`];
 }
 
-function checkIndexHasNoInlineScriptOrStyle() {
+export function checkCodeHoldsNoDataURL(distDir) {
+  if (!existsSync(distDir)) return [`${distDir} is missing`];
+  return builtFiles(distDir)
+    .filter((file) => BROWSER_CODE_FILE.test(file))
+    .flatMap((file) => {
+      const dataURL = readFileSync(file, "utf8").match(DATA_URL);
+      if (dataURL === null) return [];
+      return [`${path.relative(distDir, file)} holds the data: URL ${dataURL[0]}..., which the CSP refuses, because no directive allows data:`];
+    });
+}
+
+export function checkIndexHasNoInlineCode(distDir) {
   const indexPath = path.join(distDir, "index.html");
   if (!existsSync(indexPath)) return [`${indexPath} is missing`];
-  const html = readFileSync(indexPath, "utf8");
   const failures = [];
-  for (const match of html.matchAll(/<script\b([^>]*)>/gi)) {
-    if (!/\ssrc\s*=/i.test(` ${match[1]}`)) failures.push(`index.html holds an inline script, which the CSP script-src 'self' refuses: ${match[0]}`);
+  for (const tag of startTags(readFileSync(indexPath, "utf8"))) {
+    if (tag.name === "script" && !tag.attributes.has("src")) failures.push("index.html holds an inline script, which the CSP script-src 'self' refuses");
+    if (tag.name === "style") failures.push("index.html holds a <style> element, which the CSP style-src 'self' refuses");
+    if (tag.attributes.has("style")) failures.push(`index.html holds a style attribute on <${tag.name}>, which the CSP style-src 'self' refuses`);
+    for (const name of tag.attributes.keys()) {
+      if (name.startsWith("on")) failures.push(`index.html holds the event handler attribute ${name} on <${tag.name}>, which the CSP script-src 'self' refuses`);
+    }
   }
-  for (const match of html.matchAll(/<[a-z][^>]*\sstyle\s*=[^>]*>/gi)) {
-    failures.push(`index.html holds a style attribute, which the CSP style-src 'self' refuses: ${match[0]}`);
-  }
-  if (/<style\b/i.test(html)) failures.push("index.html holds a <style> element, which the CSP style-src 'self' refuses");
   return failures;
 }
 
-function checkThemeScriptIsBuilt() {
+export function checkThemeScriptIsBuilt(distDir) {
   const themePath = path.join(distDir, "theme.js");
   if (existsSync(themePath) && statSync(themePath).isFile()) return [];
   return [`${themePath} is missing, so the page paints before the stored theme applies`];
 }
 
-function checkIndexLoadsThemeScriptBeforeTheModuleEntry() {
+export function checkIndexLoadsThemeScriptBeforeTheModuleEntry(distDir) {
   const indexPath = path.join(distDir, "index.html");
   if (!existsSync(indexPath)) return [`${indexPath} is missing`];
   const tags = scriptTags(readFileSync(indexPath, "utf8"));
@@ -74,8 +86,7 @@ function checkIndexLoadsThemeScriptBeforeTheModuleEntry() {
   return failures;
 }
 
-async function checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset() {
-  const config = await resolveConfig({ configFile: path.join(uiDir, "vite.config.ts"), logLevel: "silent" }, "build", "production");
+export function checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset(config) {
   const builds = [["build", config.build], ...Object.entries(config.environments ?? {}).map(([name, env]) => [`environments.${name}.build`, env.build])];
   const failures = [];
   for (const [buildPath, build] of builds) {
@@ -99,23 +110,35 @@ async function checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset() {
   return failures;
 }
 
-const rules = [
-  ["asset names carry a content hash", checkAssetNamesCarryAContentHash],
-  ["built CSS inlines no data: URL", checkCSSInlinesNoDataURL],
-  ["built index.html has no inline script or style", checkIndexHasNoInlineScriptOrStyle],
-  ["theme.js is built", checkThemeScriptIsBuilt],
-  ["built index.html loads /theme.js before the module entry", checkIndexLoadsThemeScriptBeforeTheModuleEntry],
-  ["build config keeps the hashed default names and inlines no asset", checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset],
-];
-
-let failed = false;
-for (const [rule, check] of rules) {
-  const failures = await check();
-  if (failures.length === 0) {
-    console.log(`check-dist: pass: ${rule}`);
-    continue;
-  }
-  failed = true;
-  for (const failure of failures) console.error(`check-dist: FAIL: ${rule}: ${failure}`);
+export function resolveBuildConfig() {
+  return resolveConfig({ configFile: path.join(uiDir, "vite.config.ts"), logLevel: "silent" }, "build", "production");
 }
-if (failed) process.exit(1);
+
+export function distRules(distDir, config) {
+  return [
+    ["asset names carry a content hash", () => checkAssetNamesCarryAContentHash(distDir)],
+    ["the public dir holds no assets folder", () => checkPublicDirHoldsNoAssetsFolder(config.publicDir)],
+    ["built code holds no data: URL", () => checkCodeHoldsNoDataURL(distDir)],
+    ["built index.html has no inline script, style, or event handler", () => checkIndexHasNoInlineCode(distDir)],
+    ["theme.js is built", () => checkThemeScriptIsBuilt(distDir)],
+    ["built index.html loads /theme.js before the module entry", () => checkIndexLoadsThemeScriptBeforeTheModuleEntry(distDir)],
+    ["build config keeps the hashed default names and inlines no asset", () => checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset(config)],
+  ];
+}
+
+async function main() {
+  const config = await resolveBuildConfig();
+  let failed = false;
+  for (const [rule, check] of distRules(builtDistDir, config)) {
+    const failures = check();
+    if (failures.length === 0) {
+      console.log(`check-dist: pass: ${rule}`);
+      continue;
+    }
+    failed = true;
+    for (const failure of failures) console.error(`check-dist: FAIL: ${rule}: ${failure}`);
+  }
+  if (failed) process.exit(1);
+}
+
+if (process.argv[1] !== undefined && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

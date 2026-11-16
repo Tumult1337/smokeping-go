@@ -161,6 +161,11 @@ func (s *Server) Router() http.Handler {
 	// returns trivially small responses — gzip on the response path is
 	// effectively a no-op for it.
 	r.Use(middleware.Compress(5, "application/json"))
+	// `npm run icon` and Vite's public/ copy decide the build files, and chi
+	// answers a method outside its table with a 405 that has no Allow before it
+	// routes, so no route lists a static file and each path outside /api is
+	// answered here.
+	r.Use(s.serveStaticOutsideAPI)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", s.health)
@@ -179,39 +184,62 @@ func (s *Server) Router() http.Handler {
 		}
 	})
 
-	if s.uiFS != nil {
-		r.Get("/", s.serveIndex)
-		r.Get("/assets/*", s.serveFileOrNotFound)
-		r.Get("/favicon.ico", s.serveFileOrNotFound)
-	}
-	// `npm run icon` and Vite's public/ copy decide the root build files, so
-	// no route lists them and the fallback consults the embedded FS instead.
-	r.NotFound(s.serveFileOrNotFound)
+	r.NotFound(serveAPINotFound)
 	return r
 }
 
-func (s *Server) serveFileOrNotFound(w http.ResponseWriter, r *http.Request) {
-	cleanPath := path.Clean("/" + r.URL.Path)
-	if isAPIPath(cleanPath) {
-		writeErr(w, http.StatusNotFound, "not found")
-		return
-	}
-	if s.uiFS == nil || r.URL.RawPath != "" || r.URL.Path != cleanPath {
+func (s *Server) serveStaticOutsideAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cleanPath := path.Clean("/" + r.URL.Path)
+		if isAPIPath(cleanPath) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.serveFileOrNotFound(w, r, cleanPath)
+	})
+}
+
+func serveAPINotFound(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", noStoreCacheControl)
+	writeErr(w, http.StatusNotFound, "not found")
+}
+
+func (s *Server) serveFileOrNotFound(w http.ResponseWriter, r *http.Request, cleanPath string) {
+	name, found := s.staticFileName(r, cleanPath)
+	if !found {
+		w.Header().Set("Cache-Control", noStoreCacheControl)
 		http.NotFound(w, r)
 		return
 	}
-	name := strings.TrimPrefix(cleanPath, "/")
-	if !fs.ValidPath(name) {
-		http.NotFound(w, r)
-		return
-	}
-	info, err := fs.Stat(s.uiFS, name)
-	if err != nil || !info.Mode().IsRegular() {
-		http.NotFound(w, r)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", staticFileMethods)
+		w.Header().Set("Cache-Control", noStoreCacheControl)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 	cacheWriter := &successCacheControlWriter{ResponseWriter: w, cacheControl: cacheControlFor(name)}
 	http.ServeFileFS(cacheWriter, r, s.uiFS, name)
+}
+
+func (s *Server) staticFileName(r *http.Request, cleanPath string) (string, bool) {
+	if s.uiFS == nil || r.URL.RawPath != "" || r.URL.Path != cleanPath {
+		return "", false
+	}
+	name := strings.TrimPrefix(cleanPath, "/")
+	if name == "" {
+		name = "index.html"
+	}
+	if strings.HasPrefix(path.Base(name), ".") {
+		return "", false
+	}
+	if !fs.ValidPath(name) {
+		return "", false
+	}
+	info, err := fs.Stat(s.uiFS, name)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	return name, true
 }
 
 func isAPIPath(cleanPath string) bool {
@@ -991,21 +1019,6 @@ func keepRecentSources(points []storage.CyclePoint, n int) ([]storage.CyclePoint
 // nobody is waiting for the result, so work continuing beyond is work no
 // caller can observe.
 const ServerWriteTimeout = 120 * time.Second
-
-func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
-	if s.uiFS == nil {
-		http.NotFound(w, r)
-		return
-	}
-	data, err := fs.ReadFile(s.uiFS, "index.html")
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", rootFileCacheControl)
-	_, _ = w.Write(data)
-}
 
 func (s *Server) resolveTarget(w http.ResponseWriter, r *http.Request) (config.TargetRef, bool) {
 	group := chi.URLParam(r, "group")

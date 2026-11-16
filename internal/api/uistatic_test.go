@@ -5,15 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
+	"unicode/utf8"
 
 	"github.com/tumult/gosmokeping/internal/cluster/master"
 	"github.com/tumult/gosmokeping/internal/config"
 	"github.com/tumult/gosmokeping/internal/scheduler"
+	embeddedui "github.com/tumult/gosmokeping/internal/ui"
 )
 
 const indexMarker = "<!doctype html"
@@ -44,7 +52,7 @@ func readBody(t *testing.T, res *http.Response) string {
 }
 
 // `npm run icon` and Vite's public/ copy decide the root build files, so a
-// listed route per name drifts and the fallback consults the embedded FS.
+// listed route per name drifts and serveStaticOutsideAPI consults the embedded FS.
 func TestRootBuildFilesAreServedAndUnknownPathsGet404(t *testing.T) {
 	ui := testUIFS()
 	h := newTestServer(t, withUIFS(ui))
@@ -78,6 +86,13 @@ func TestRootBuildFilesAreServedAndUnknownPathsGet404(t *testing.T) {
 	assertTextNotFound(t, "/some/app/route", res, readBody(t, res))
 }
 
+func assertNoStore(t *testing.T, target string, res *http.Response) {
+	t.Helper()
+	if got := res.Header.Values("Cache-Control"); len(got) != 1 || got[0] != "no-store" {
+		t.Errorf("%s: Cache-Control = %q on status %d, want exactly no-store, so no shared cache keeps it under the key of a real file", target, got, res.StatusCode)
+	}
+}
+
 func assertTextNotFound(t *testing.T, target string, res *http.Response, body string) {
 	t.Helper()
 	if res.StatusCode != http.StatusNotFound {
@@ -89,6 +104,7 @@ func assertTextNotFound(t *testing.T, target string, res *http.Response, body st
 	if strings.Contains(body, indexMarker) {
 		t.Errorf("%s: served the index page: %q", target, body)
 	}
+	assertNoStore(t, target, res)
 }
 
 func assertJSONNotFound(t *testing.T, target string, res *http.Response, body string) {
@@ -99,6 +115,7 @@ func assertJSONNotFound(t *testing.T, target string, res *http.Response, body st
 	if ct := res.Header.Get("Content-Type"); ct != "application/json" {
 		t.Errorf("%s: Content-Type = %q, want application/json", target, ct)
 	}
+	assertNoStore(t, target, res)
 	var payload map[string]string
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
 		t.Errorf("%s: body %q is not the API error JSON: %v", target, body, err)
@@ -127,6 +144,7 @@ func TestUnknownPathsGet404WithJSONBelowAPI(t *testing.T) {
 		"//api/v1/does-not-exist",
 		"/foo/../api/x",
 		"/api%2Fv1%2Fdoes-not-exist",
+		"/api/v1/%74argets",
 	}
 	otherPaths := []string{"/does-not-exist", "/some/app/route", "/apix", "/favicon.ico", "/api/../favicon.svg"}
 
@@ -186,9 +204,6 @@ func TestStaticHandlerRefusesPercentEncodedAliases(t *testing.T) {
 		}
 		res := send(t, h, alias.method, alias.target, nil)
 		assertTextNotFound(t, row, res, readBody(t, res))
-		if got := res.Header.Values("Cache-Control"); len(got) != 0 {
-			t.Errorf("%s: Cache-Control = %q, want none", row, got)
-		}
 	}
 	for _, target := range []string{fixtureAssetJS, "/theme.js", "/favicon.svg"} {
 		if res := get(t, h, target, nil); res.StatusCode != http.StatusOK {
@@ -232,6 +247,7 @@ func TestCacheControlFollowsTheFileKind(t *testing.T) {
 	const (
 		immutable = "public, max-age=31536000, immutable"
 		noCache   = "no-cache"
+		noStore   = "no-store"
 	)
 	h := newTestServer(t, withUIFS(testUIFS()))
 	staleETag := http.Header{"If-Match": {`"stale"`}}
@@ -248,17 +264,17 @@ func TestCacheControlFollowsTheFileKind(t *testing.T) {
 		{target: "/icon.svg", wantStatus: http.StatusOK, wantCache: noCache},
 		{target: fixtureAssetJS, wantStatus: http.StatusOK, wantCache: immutable},
 		{target: fixtureAssetCSS, wantStatus: http.StatusOK, wantCache: immutable},
-		{target: fixtureAssetJS, header: staleETag, wantStatus: http.StatusPreconditionFailed},
-		{target: "/theme.js", header: staleETag, wantStatus: http.StatusPreconditionFailed},
+		{target: fixtureAssetJS, header: staleETag, wantStatus: http.StatusPreconditionFailed, wantCache: noStore},
+		{target: "/theme.js", header: staleETag, wantStatus: http.StatusPreconditionFailed, wantCache: noStore},
 		{target: fixtureAssetJS, header: anyETag, wantStatus: http.StatusNotModified, wantCache: immutable},
 		{target: "/theme.js", header: anyETag, wantStatus: http.StatusNotModified, wantCache: noCache},
 		{target: fixtureAssetJS, header: http.Header{"Range": {"bytes=0-3"}}, wantStatus: http.StatusPartialContent, wantCache: immutable},
-		{target: fixtureAssetJS, header: http.Header{"Range": {"bytes=9999-"}}, wantStatus: http.StatusRequestedRangeNotSatisfiable},
-		{target: "/index.html", wantStatus: http.StatusMovedPermanently},
-		{target: "/assets/does-not-exist.js", wantStatus: http.StatusNotFound},
-		{target: "/does-not-exist.js", wantStatus: http.StatusNotFound},
+		{target: fixtureAssetJS, header: http.Header{"Range": {"bytes=9999-"}}, wantStatus: http.StatusRequestedRangeNotSatisfiable, wantCache: noStore},
+		{target: "/index.html", wantStatus: http.StatusMovedPermanently, wantCache: noStore},
+		{target: "/assets/does-not-exist.js", wantStatus: http.StatusNotFound, wantCache: noStore},
+		{target: "/does-not-exist.js", wantStatus: http.StatusNotFound, wantCache: noStore},
 		{target: "/api/v1/health", wantStatus: http.StatusOK},
-		{target: "/api/v1/does-not-exist", wantStatus: http.StatusNotFound},
+		{target: "/api/v1/does-not-exist", wantStatus: http.StatusNotFound, wantCache: noStore},
 	}
 	for _, tc := range cases {
 		res := get(t, h, tc.target, tc.header)
@@ -276,5 +292,234 @@ func TestCacheControlFollowsTheFileKind(t *testing.T) {
 		if len(got) != 1 || got[0] != tc.wantCache {
 			t.Errorf("%s: Cache-Control = %q, want exactly %q", row, got, tc.wantCache)
 		}
+	}
+}
+
+var staticFileTargets = []struct {
+	target string
+	fsName string
+}{
+	{target: "/", fsName: "index.html"},
+	{target: fixtureAssetJS, fsName: strings.TrimPrefix(fixtureAssetJS, "/")},
+	{target: fixtureAssetCSS, fsName: strings.TrimPrefix(fixtureAssetCSS, "/")},
+	{target: "/theme.js", fsName: "theme.js"},
+	{target: "/favicon.svg", fsName: "favicon.svg"},
+	{target: "/icon.svg", fsName: "icon.svg"},
+}
+
+func assertHeadMatchesGet(t *testing.T, h http.Handler, target string) {
+	t.Helper()
+	getRes := get(t, h, target, nil)
+	readBody(t, getRes)
+	headRes := send(t, h, http.MethodHead, target, nil)
+	headBody := readBody(t, headRes)
+	if headRes.StatusCode != getRes.StatusCode {
+		t.Errorf("HEAD %s: status = %d, want %d as for GET", target, headRes.StatusCode, getRes.StatusCode)
+	}
+	if !maps.EqualFunc(headRes.Header, getRes.Header, slices.Equal) {
+		t.Errorf("HEAD %s: headers = %v, want the headers of GET %v", target, headRes.Header, getRes.Header)
+	}
+	if headBody != "" {
+		t.Errorf("HEAD %s: body = %q, want none", target, headBody)
+	}
+	assertSecurityHeaders(t, headRes.Header)
+}
+
+func TestStaticFilesAnswerHeadWithTheStatusAndHeadersOfGet(t *testing.T) {
+	uiFiles := testUIFS()
+	h := newTestServer(t, withUIFS(uiFiles))
+	for _, file := range staticFileTargets {
+		t.Run(file.target, func(t *testing.T) {
+			res := get(t, h, file.target, nil)
+			if body := readBody(t, res); res.StatusCode != http.StatusOK || body != string(uiFiles[file.fsName].Data) {
+				t.Fatalf("precondition: GET %s = %d %q, want 200 with the embedded file", file.target, res.StatusCode, body)
+			}
+			assertHeadMatchesGet(t, h, file.target)
+		})
+	}
+}
+
+func TestOtherMethodsOnAStaticFileGet405WithAllowGetHead(t *testing.T) {
+	uiFiles := testUIFS()
+	h := newTestServer(t, withUIFS(uiFiles))
+	methods := []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodTrace, "PROPFIND"}
+	for _, file := range staticFileTargets {
+		for _, method := range methods {
+			row := method + " " + file.target
+			t.Run(row, func(t *testing.T) {
+				res := send(t, h, method, file.target, nil)
+				body := readBody(t, res)
+				if res.StatusCode != http.StatusMethodNotAllowed {
+					t.Errorf("%s: status = %d, want 405", row, res.StatusCode)
+				}
+				if got := res.Header.Values("Allow"); len(got) != 1 || got[0] != "GET, HEAD" {
+					t.Errorf("%s: Allow = %q, want exactly \"GET, HEAD\"", row, got)
+				}
+				if strings.Contains(body, string(uiFiles[file.fsName].Data)) {
+					t.Errorf("%s: body holds the file: %q", row, body)
+				}
+				assertNoStore(t, row, res)
+				assertSecurityHeaders(t, res.Header)
+			})
+		}
+	}
+}
+
+func TestEachMethodOnAnUnknownPathGets404(t *testing.T) {
+	methods := []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions}
+	textMethods := append(slices.Clone(methods), "PROPFIND")
+	routers := []struct {
+		name      string
+		router    http.Handler
+		textPaths []string
+	}{
+		{
+			name:      "with UI",
+			router:    newTestServer(t, withUIFS(testUIFS())),
+			textPaths: []string{"/does-not-exist", "/favicon.ico", "/assets/does-not-exist.js", "/assets", "/index.html/"},
+		},
+		{
+			name:      "headless",
+			router:    newTestServer(t),
+			textPaths: []string{"/", "/theme.js", fixtureAssetJS, "/favicon.ico"},
+		},
+	}
+	apiPaths := []string{"/api/v1/does-not-exist", "/api/v1/%74argets", "/api"}
+	for _, rt := range routers {
+		for _, method := range textMethods {
+			for _, target := range rt.textPaths {
+				row := rt.name + " " + method + " " + target
+				t.Run(row, func(t *testing.T) {
+					res := send(t, rt.router, method, target, nil)
+					assertTextNotFound(t, row, res, readBody(t, res))
+					if got := res.Header.Values("Allow"); len(got) != 0 {
+						t.Errorf("%s: Allow = %q, want none on a 404", row, got)
+					}
+					assertSecurityHeaders(t, res.Header)
+				})
+			}
+		}
+		for _, method := range methods {
+			for _, target := range apiPaths {
+				row := rt.name + " " + method + " " + target
+				t.Run(row, func(t *testing.T) {
+					res := send(t, rt.router, method, target, nil)
+					assertJSONNotFound(t, row, res, readBody(t, res))
+					assertSecurityHeaders(t, res.Header)
+				})
+			}
+		}
+	}
+}
+
+func TestStaticFallbackRefusesANameWhoseLastElementStartsWithADot(t *testing.T) {
+	uiFiles := testUIFS()
+	uiFiles[".gitkeep"] = &fstest.MapFile{}
+	uiFiles["assets/.cache-AbCd12_-.js"] = &fstest.MapFile{Data: []byte("hidden")}
+	uiFiles[".well-known/security.txt"] = &fstest.MapFile{Data: []byte("Contact: mailto:security@example.com\n")}
+	h := newTestServer(t, withUIFS(uiFiles))
+	for _, target := range []string{"/.gitkeep", "/assets/.cache-AbCd12_-.js"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+			row := method + " " + target
+			res := send(t, h, method, target, nil)
+			assertTextNotFound(t, row, res, readBody(t, res))
+		}
+	}
+	const wellKnown = "/.well-known/security.txt"
+	res := get(t, h, wellKnown, nil)
+	if body := readBody(t, res); res.StatusCode != http.StatusOK || body != string(uiFiles[".well-known/security.txt"].Data) {
+		t.Errorf("%s: status = %d, body = %q, want 200 with the file: only the last element is checked for a dot", wellKnown, res.StatusCode, body)
+	}
+}
+
+type anyNameFS struct {
+	opened []string
+}
+
+func (f *anyNameFS) Open(name string) (fs.File, error) {
+	f.opened = append(f.opened, name)
+	return fstest.MapFS{"file.js": {Data: []byte("served for any name")}}.Open("file.js")
+}
+
+func TestStaticFallbackHandsTheUIFSOnlyValidNames(t *testing.T) {
+	anyName := &anyNameFS{}
+	h := newTestServer(t, withUIFS(anyName))
+	if res := get(t, h, "/valid.js", nil); res.StatusCode != http.StatusOK {
+		t.Fatalf("precondition: the fixture answers /valid.js with status %d, want 200 for each name", res.StatusCode)
+	}
+	for _, target := range []string{"/%FF", "/assets/%FF.js"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		if req.URL.RawPath != "" || req.URL.Path != path.Clean(req.URL.Path) || utf8.ValidString(req.URL.Path) {
+			t.Fatalf("precondition: %s parses to Path %q and RawPath %q, so the row does not reach the name check", target, req.URL.Path, req.URL.RawPath)
+		}
+		anyName.opened = nil
+		res := get(t, h, target, nil)
+		assertTextNotFound(t, target, res, readBody(t, res))
+		if len(anyName.opened) != 0 {
+			t.Errorf("%s: the UI FS got %q, want no call for a name that fs.ValidPath refuses", target, anyName.opened)
+		}
+	}
+}
+
+func TestEmbeddedBuildFollowsTheStaticFileRules(t *testing.T) {
+	const immutable = "public, max-age=31536000, immutable"
+	requireUI := os.Getenv("GOSMOKEPING_REQUIRE_UI") == "1"
+	dist := embeddedui.FS()
+	if dist == nil {
+		if requireUI {
+			t.Fatal("dist not built and GOSMOKEPING_REQUIRE_UI=1: run `make ui`")
+		}
+		t.Skip("dist not built; run `make ui`")
+	}
+	h := newTestServer(t, withUIFS(dist))
+	var dotFiles, assetFiles, rootFiles int
+	err := fs.WalkDir(dist, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		target := "/" + name
+		if name == "index.html" {
+			target = "/"
+		}
+		if strings.HasPrefix(path.Base(name), ".") {
+			dotFiles++
+			res := get(t, h, target, nil)
+			assertTextNotFound(t, target, res, readBody(t, res))
+			return nil
+		}
+		wantCache := "no-cache"
+		if strings.HasPrefix(name, "assets/") {
+			wantCache = immutable
+			assetFiles++
+		} else {
+			rootFiles++
+		}
+		res := get(t, h, target, nil)
+		readBody(t, res)
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("GET %s: status = %d, want 200", target, res.StatusCode)
+		}
+		if got := res.Header.Values("Cache-Control"); len(got) != 1 || got[0] != wantCache {
+			t.Errorf("GET %s: Cache-Control = %q, want exactly %q", target, got, wantCache)
+		}
+		assertHeadMatchesGet(t, h, target)
+		post := send(t, h, http.MethodPost, target, nil)
+		readBody(t, post)
+		if post.StatusCode != http.StatusMethodNotAllowed || post.Header.Get("Allow") != "GET, HEAD" {
+			t.Errorf("POST %s: status = %d, Allow = %q, want 405 with GET, HEAD", target, post.StatusCode, post.Header.Get("Allow"))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the embedded build: %v", err)
+	}
+	if assetFiles == 0 || rootFiles == 0 {
+		t.Errorf("the build holds %d asset files and %d root files, want at least one of each", assetFiles, rootFiles)
+	}
+	if requireUI && dotFiles == 0 {
+		t.Error("precondition: the build holds no dot file, so the dot rule did not run on it; npm run build writes .gitkeep")
 	}
 }

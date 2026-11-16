@@ -102,8 +102,35 @@ func TestCacheControlWriterDecidesOnTheFirstStatusOnly(t *testing.T) {
 	if want := []int{http.StatusPreconditionFailed, http.StatusOK}; !slices.Equal(inner.statuses, want) {
 		t.Errorf("statuses forwarded = %v, want %v: a Write after a status adds none", inner.statuses, want)
 	}
-	if got := inner.header.Values("Cache-Control"); len(got) != 0 {
-		t.Errorf("Cache-Control = %q after a 412 and a late 200, want none", got)
+	if got := inner.header.Values("Cache-Control"); !slices.Equal(got, []string{"no-store"}) {
+		t.Errorf("Cache-Control = %q after a 412 and a late 200, want exactly no-store from the 412", got)
+	}
+}
+
+func TestCacheControlWriterSendsNoStoreOnEachStatusThatIsNotTheFile(t *testing.T) {
+	cases := []struct {
+		status    int
+		wantCache string
+	}{
+		{status: http.StatusOK, wantCache: "no-cache"},
+		{status: http.StatusPartialContent, wantCache: "no-cache"},
+		{status: http.StatusNotModified, wantCache: "no-cache"},
+		{status: http.StatusMovedPermanently, wantCache: "no-store"},
+		{status: http.StatusBadRequest, wantCache: "no-store"},
+		{status: http.StatusForbidden, wantCache: "no-store"},
+		{status: http.StatusNotFound, wantCache: "no-store"},
+		{status: http.StatusMethodNotAllowed, wantCache: "no-store"},
+		{status: http.StatusPreconditionFailed, wantCache: "no-store"},
+		{status: http.StatusRequestedRangeNotSatisfiable, wantCache: "no-store"},
+		{status: http.StatusInternalServerError, wantCache: "no-store"},
+	}
+	for _, tc := range cases {
+		inner := &statusLog{header: http.Header{"Cache-Control": {"private"}}}
+		w := &successCacheControlWriter{ResponseWriter: inner, cacheControl: "no-cache"}
+		w.WriteHeader(tc.status)
+		if got := inner.header.Values("Cache-Control"); !slices.Equal(got, []string{tc.wantCache}) {
+			t.Errorf("status %d: Cache-Control = %q, want exactly %q", tc.status, got, tc.wantCache)
+		}
 	}
 }
 
@@ -115,7 +142,7 @@ func TestCacheControlWriterDecidesAtTheFinalStatusAfterAnInformationalOne(t *tes
 		{first: http.StatusContinue, wantCache: []string{"no-cache"}},
 		{first: http.StatusEarlyHints, wantCache: []string{"no-cache"}},
 		{first: 199, wantCache: []string{"no-cache"}},
-		{first: http.StatusSwitchingProtocols},
+		{first: http.StatusSwitchingProtocols, wantCache: []string{"no-store"}},
 	}
 	for _, tc := range cases {
 		inner := &statusLog{header: http.Header{}}
@@ -161,6 +188,11 @@ func TestEveryResponseCarriesTheSecurityHeadersOnce(t *testing.T) {
 		{name: "asset", router: withUI, method: http.MethodGet, target: fixtureAssetJS, wantStatus: http.StatusOK},
 		{name: "favicon", router: withUI, method: http.MethodGet, target: "/favicon.svg", wantStatus: http.StatusOK},
 		{name: "theme script", router: withUI, method: http.MethodGet, target: "/theme.js", wantStatus: http.StatusOK},
+		{name: "head index page", router: withUI, method: http.MethodHead, target: "/", wantStatus: http.StatusOK},
+		{name: "head asset", router: withUI, method: http.MethodHead, target: fixtureAssetJS, wantStatus: http.StatusOK},
+		{name: "post asset", router: withUI, method: http.MethodPost, target: fixtureAssetJS, wantStatus: http.StatusMethodNotAllowed},
+		{name: "delete root file", router: withUI, method: http.MethodDelete, target: "/favicon.svg", wantStatus: http.StatusMethodNotAllowed},
+		{name: "post unknown root path", router: withUI, method: http.MethodPost, target: "/does-not-exist", wantStatus: http.StatusNotFound},
 		{name: "index.html redirect", router: withUI, method: http.MethodGet, target: "/index.html", wantStatus: http.StatusMovedPermanently},
 		{name: "health", router: withUI, method: http.MethodGet, target: "/api/v1/health", wantStatus: http.StatusOK},
 		{name: "gzip targets", router: withUI, method: http.MethodGet, target: "/api/v1/targets", acceptGzip: true, wantStatus: http.StatusOK},

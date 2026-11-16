@@ -415,19 +415,28 @@ the API, the cluster endpoints, and each 404 and 405.
 - `/`, `/theme.js`, `/favicon.svg`, `/icon.svg`, and each other root
   file get `Cache-Control: no-cache`. A browser revalidates them on
   each use.
-- A file response carries `Cache-Control` only with status 200, 206,
-  or 304. Each other status of a file request, for example a 412, a
-  416, or the 301 from `/index.html` to `/`, carries no
-  `Cache-Control`, so no cache stores it as the file.
-- API responses carry no `Cache-Control`.
-- Each unknown path gets status 404. Below `/api/`, the body is JSON:
-  `{"error":"not found"}`. Below `/api/v1/cluster/`, the bearer check
-  answers first, so a request without a valid token gets 401.
+- A file response carries the value of the file only with status 200,
+  206, or 304. Each other status of a static path, for example a 404, a
+  405, a 412, a 416, or the 301 from `/index.html` to `/`, carries
+  `Cache-Control: no-store`, so no cache stores it.
+- Each unknown path gets status 404 with `Cache-Control: no-store`, for
+  each method. Below `/api/`, the body is JSON: `{"error":"not found"}`.
+  Below `/api/v1/cluster/`, the bearer check answers first, so a request
+  without a valid token gets 401.
+- A 404 is cacheable by default (RFC 9111). Without `no-store`, a CDN
+  that keys its cache on the normalized URL and sends the raw URL to the
+  origin can store the 404 of `/%61ssets/<file>` under the key of the
+  real asset, and each user then gets a blank page.
+- Each other API response carries no `Cache-Control`.
+- A static file answers GET and HEAD. HEAD gets the status and the
+  headers of GET with no body. Each other method on a static file gets
+  405 with `Allow: GET, HEAD` and no file body.
 - A file is served only at its clean path. A path with a `..` or `.`
   element, a double slash, or a trailing slash, such as
   `/favicon.svg/` or `//assets/<file>`, gets 404. A path with a
   percent-encoding that the default form does not need, such as
-  `/theme%2Ejs` or `/assets%2F<file>`, also gets 404.
+  `/theme%2Ejs` or `/assets%2F<file>`, also gets 404. So does a name
+  whose last element starts with a dot, such as `/.gitkeep`.
 
 ---
 

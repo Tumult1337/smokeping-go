@@ -254,7 +254,7 @@ Key points a reader can't derive from a single file:
 
   **Response headers.** `setSecurityHeaders` (`internal/api/headers.go`) is
   the first `r.Use` of `Router()`, so it wraps every response the router
-  writes: UI, API, the mounted cluster handler, each 404, and chi's 405. It sets
+  writes: UI, API, the mounted cluster handler, each 404, and each 405. It sets
   seven constant headers before it calls `next`, because `net/http` ignores a
   header set after the response starts: a CSP of `default-src 'none'` with
   `'self'` for scripts, styles, images, fonts and connections, plus
@@ -266,26 +266,38 @@ Key points a reader can't derive from a single file:
   (`docs/docker-master.md` section 7). The values are constants, with no
   config field.
 
-  **Unknown paths and caching.** `serveFileOrNotFound` is the `NotFound`
-  handler in every mode, with or without a UI. Each unknown path gets 404:
-  below `/api/` (by the cleaned path) the body is `writeErr` JSON, and
-  elsewhere it is the text 404 of `net/http`, never the index page. Outside
-  `/api/`, a request path that differs from its clean form gets 404 before
-  any lookup: a `..` or `.` element, a double slash, or a trailing slash. So
-  does a path with a percent-encoding that the default form does not need,
-  such as `/theme%2Ejs` (a non-empty `URL.RawPath`): chi routes on the raw
-  path, so such a request misses the GET-only `/assets/*` route. An
-  existing regular file of the embedded UI is served under the exact name it
-  stat'ed, with `public, max-age=31536000, immutable` below `/assets/` and
-  `no-cache` for `/` and each root file (`/theme.js`, the icons); a directory
-  or a miss gets 404 with no `Cache-Control`. `http.ServeFileFS` selects the
-  status itself, so `successCacheControlWriter` sets the file's
-  `Cache-Control` at the first final status write (a 1xx other than 101 does
-  not count) and only for 200, 206 or 304: a 412, a 416 and the 301 from
-  `/index.html` to `/` carry none.
+  **Static paths, unknown paths and caching.** The `serveStaticOutsideAPI`
+  middleware answers each request whose cleaned path is outside `/api/`, in
+  every mode, with or without a UI, before chi routes it, so no chi route
+  serves a static path: chi answers a method outside its method table with a
+  405 that has no `Allow`. A request below `/api/` (by the cleaned path) goes
+  to chi, and an unknown path there gets the `writeErr` JSON 404 of
+  `serveAPINotFound`. Outside `/api/`, `staticFileName` decides the one name
+  that is stat'ed and served, and `/` names `index.html`. It refuses, with the
+  text 404 of `net/http` and never the index page: a request path that
+  differs from its clean form (a `..` or `.` element, a double slash, a
+  trailing slash); a non-empty `URL.RawPath`, which is a percent-encoding that
+  the default form does not need, such as `/theme%2Ejs`; a last element that
+  starts with a dot, such as `/.gitkeep` (`/.well-known/security.txt` is
+  served); a name that `fs.ValidPath` refuses, such as the invalid UTF-8 of
+  `/%FF`, so the UI FS never gets that name; and a miss or a directory. The
+  404 is the same for each method. Each 404, the JSON form and the text form,
+  carries `Cache-Control: no-store`: a 404 is cacheable by default (RFC 9111
+  section 4.2.2), and a shared cache that keys on the normalized URL and sends
+  the raw URL to the origin would otherwise store the 404 of
+  `/%61ssets/<file>` under the key of the real asset. GET and HEAD of an
+  existing file go to `http.ServeFileFS`, so HEAD gets the status and the
+  headers of GET with no body. Each other method gets 405 with
+  `Allow: GET, HEAD`, `no-store` and no file body. The file gets
+  `public, max-age=31536000, immutable` below `/assets/` and `no-cache` for
+  `/` and each root file (`/theme.js`, the icons). `http.ServeFileFS` selects
+  the status itself, so `successCacheControlWriter` decides `Cache-Control`
+  at the first final status write (a 1xx other than 101 does not count): the
+  file value for 200, 206 or 304, and `no-store` for each other status, such
+  as a 412, a 416 and the 301 from `/index.html` to `/`.
   Below `/api/v1/cluster/` the mounted `BearerAuth` answers before the route
   match, so an unknown path there gets 401 without a token and the JSON 404
-  with one. API responses carry no `Cache-Control`.
+  with one. Other API responses carry no `Cache-Control`.
 
   **CSP-driven build rules.** The pre-paint theme script is
   `ui/public/theme.js`, loaded by a classic `<script src="/theme.js">` in
@@ -294,14 +306,25 @@ Key points a reader can't derive from a single file:
   `font-src 'self'`: the default limit inlines a small font subset as a
   `data:` URL, which the CSP refuses. `npm run build` ends with
   `ui/scripts/check-dist.mjs`, which fails on an asset name with no content
-  hash, a build config that sets `entryFileNames`, `chunkFileNames` or
-  `assetFileNames` or an `assetsInlineLimit` other than 0 (top-level and
-  each `environments.*.build`), a `url(data:` in built CSS, an inline script
-  or style in the built `index.html`, a missing `theme.js`, and a built
-  `index.html` that loads no classic `/theme.js` before the module entry.
-  Both that check and `npm test` read script tags through
-  `ui/scripts/html-script-tags.mjs`, which ignores HTML comments, so a
-  commented-out tag does not count. The Vite dev server
+  hash; an `assets` entry in the public dir of the resolved Vite config,
+  because Vite copies it to `dist/assets` under its own name, which the
+  server sends as immutable, and the name rule alone accepts a name such as
+  `export-template.csv`; a build config that sets `entryFileNames`,
+  `chunkFileNames` or `assetFileNames` or an `assetsInlineLimit` other than 0
+  (top-level and each `environments.*.build`); a data URL in any built
+  `.js`, `.mjs`, `.css` or `.html` file, which the rule matches by its RFC
+  2397 form (`data:`, an optional registered media type, parameters, then
+  `,`), because the bundle holds object keys such as `data:null` that are not
+  URLs; an inline script, an `on*` event handler attribute, a style attribute
+  or a `<style>` element in the built `index.html`; a missing `theme.js`; and
+  a built `index.html` that loads no classic `/theme.js` before the module
+  entry. `ui/tests/checkDist.test.mjs` tests each rule. `check-dist` reads
+  each tag of the built `index.html`, and `npm test` reads its script tags,
+  through `ui/scripts/html-script-tags.mjs`. That scanner skips an HTML
+  comment with the closers of the HTML parser, and skips the text of a
+  raw-text or RCDATA element such as `<script>` or `<title>` to its first end
+  tag, so a commented-out tag does not count and a `<!--` inside a script
+  hides nothing. It does not model SVG or MathML content. The Vite dev server
   (`make ui-dev`) sends no CSP, so a CSP check runs only through the Go
   server. `cd ui && npm test` runs the UI tests.
   `TestEmbeddedDistCarriesTheIconsIndexReferences` skips on an empty dist

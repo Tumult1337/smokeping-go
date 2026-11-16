@@ -8,6 +8,8 @@ const (
 
 	assetCacheControl    = "public, max-age=31536000, immutable"
 	rootFileCacheControl = "no-cache"
+	noStoreCacheControl  = "no-store"
+	staticFileMethods    = "GET, HEAD"
 )
 
 // setSecurityHeaders sends no Strict-Transport-Security, because the binary
@@ -38,11 +40,16 @@ type successCacheControlWriter struct {
 func (w *successCacheControlWriter) WriteHeader(status int) {
 	if !w.wroteHeader && !informationalStatus(status) {
 		w.wroteHeader = true
-		if cacheableStatus(status) {
-			w.Header().Set("Cache-Control", w.cacheControl)
-		}
+		w.Header().Set("Cache-Control", w.cacheControlForStatus(status))
 	}
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *successCacheControlWriter) cacheControlForStatus(status int) string {
+	if cacheableStatus(status) {
+		return w.cacheControl
+	}
+	return noStoreCacheControl
 }
 
 func (w *successCacheControlWriter) Write(body []byte) (int, error) {
