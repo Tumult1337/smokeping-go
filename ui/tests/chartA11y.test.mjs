@@ -15,6 +15,12 @@ import {
   heatmapNoDataText,
   heatmapReadoutText,
   heatmapSummaryText,
+  heatmapTooltipLeft,
+  hopAddressText,
+  replyCountOf,
+  cellReplied,
+  stableName,
+  summarizeHeatmap,
   httpReadoutText,
   httpSummaryText,
   isZoomed,
@@ -131,10 +137,24 @@ test("Ctrl+0 gives no action", () => {
 });
 
 test("Shift counts only for the arrows and for plus", () => {
-  for (const name of ["Home", "End", "Enter", " ", "-", "0", "Escape", "PageUp", "PageDown"]) {
+  for (const name of ["Home", "End", "Enter", " ", "Escape", "PageUp", "PageDown"]) {
     assert.equal(decodeKey(key(name, { shiftKey: true }), "band"), null, name);
   }
   assert.equal(decodeKey(key("ArrowUp", { shiftKey: true }), "heatmap"), null);
+});
+
+test("the zoom characters act with or without Shift", () => {
+  const expected = { "+": "zoomIn", "=": "zoomIn", "-": "zoomOut", "0": "zoomReset" };
+  for (const kind of ["band", "bars", "http"]) {
+    for (const [name, type] of Object.entries(expected)) {
+      for (const shiftKey of [false, true]) {
+        assert.deepEqual(decodeKey(key(name, { shiftKey }), kind), { type }, `${name} ${shiftKey} ${kind}`);
+      }
+      for (const flag of ["ctrlKey", "altKey", "metaKey"]) {
+        assert.equal(decodeKey(key(name, { [flag]: true }), kind), null, `${name} ${flag} ${kind}`);
+      }
+    }
+  }
 });
 
 test("unhandled keys pass through", () => {
@@ -300,21 +320,45 @@ test("zoom out near now never passes now", () => {
   assert.deepEqual(result, { changed: true, window: { from: NOW - 400, to: NOW } });
 });
 
-test("zoom out near the start of the range never passes the range", () => {
-  const current = { from: NOW - HOUR, to: NOW - HOUR + 600 };
-  const result = zoomOut(current, NOW - HOUR, HOUR, NOW);
-  assert.deepEqual(result, { changed: true, window: { from: NOW - HOUR, to: NOW - HOUR + 1200 } });
+test("zoom out holds an old window that lies far before now", () => {
+  const t = NOW - 5 * HOUR;
+  const current = { from: t - 3000, to: t - 2400 };
+  const cursor = t - 2700;
+  const result = zoomOut(current, cursor, HOUR, NOW);
+  assert.deepEqual(result, { changed: true, window: { from: t - 3300, to: t - 2100 } });
 });
 
-test("zoom out keeps the window inside the range for every cursor", () => {
-  const current = { from: NOW - 2000, to: NOW - 1500 };
-  for (let cursor = current.from; cursor <= current.to; cursor += 25) {
-    const result = zoomOut(current, cursor, HOUR, NOW);
-    assert.equal(result.changed, true);
-    assert.ok(result.window.from >= NOW - HOUR);
-    assert.ok(result.window.to <= NOW);
-    assert.ok(Number.isInteger(result.window.from) && result.window.to > result.window.from);
+test("zoom out from a window that ends at now stays before now", () => {
+  const current = { from: NOW - 600, to: NOW };
+  assert.deepEqual(zoomOut(current, NOW - 300, HOUR, NOW), { changed: true, window: { from: NOW - 1200, to: NOW } });
+});
+
+test("zoom out holds the old window and the cursor for every cursor second", () => {
+  const starts = [NOW - 5 * HOUR, NOW - 2000, NOW - 700];
+  for (const start of starts) {
+    const current = { from: start, to: start + 600 };
+    for (let cursor = current.from; cursor <= current.to; cursor += 25) {
+      const result = zoomOut(current, cursor, HOUR, NOW);
+      assert.equal(result.changed, true);
+      const { from, to } = result.window;
+      assert.equal(to - from, 1200);
+      assert.ok(from <= current.from && to >= current.to, `holds ${start} ${cursor}`);
+      assert.ok(from <= cursor && cursor <= to);
+      assert.ok(to <= NOW);
+      assert.ok(Number.isInteger(from));
+    }
   }
+});
+
+test("zoom out holds the old window when the cursor lies after its end", () => {
+  const current = { from: NOW - 3000, to: NOW - 2400 };
+  assert.deepEqual(zoomOut(current, NOW - 1000, HOUR, NOW), { changed: true, window: { from: NOW - 3000, to: NOW - 1800 } });
+});
+
+test("zoom out with the cursor at the first and the last second of the old window", () => {
+  const current = { from: NOW - 3000, to: NOW - 2400 };
+  assert.deepEqual(zoomOut(current, current.from, HOUR, NOW), { changed: true, window: { from: NOW - 3600, to: NOW - 2400 } });
+  assert.deepEqual(zoomOut(current, current.to, HOUR, NOW), { changed: true, window: { from: NOW - 3000, to: NOW - 1800 } });
 });
 
 test("zoom out refuses a range span that is not positive", () => {
@@ -408,15 +452,124 @@ test("the HTTP summary holds the sample count, uptime, and TTFB", () => {
   );
 });
 
-test("the heatmap summary names the worst hop", () => {
+test("the heatmap summary names the worst replying hop", () => {
   assert.equal(
-    heatmapSummaryText({ hops: 9, columns: 48, worstLoss: 12.5, worstHop: 4 }, false),
+    heatmapSummaryText({ hops: 9, columns: 48, worstLoss: 12.5, worstHop: 4, silentHops: 0, targetLoss: null }, false),
     "9 hops, 48 columns, worst hop loss 12.5% at hop 4",
   );
   assert.equal(
-    heatmapSummaryText({ hops: 9, columns: 48, worstLoss: 0, worstHop: null }, false),
+    heatmapSummaryText({ hops: 9, columns: 48, worstLoss: 0, worstHop: null, silentHops: 0, targetLoss: null }, false),
     "9 hops, 48 columns, no hop loss",
   );
+});
+
+function cell(hop, replies, lossPct, targetLossPct) {
+  return { hop, replies, lossPct, targetLossPct };
+}
+
+function heatmapText(cells, columns) {
+  return heatmapSummaryText(summarizeHeatmap(cells, columns), false);
+}
+
+test("a path whose hops all reply with no loss has no hop loss", () => {
+  assert.equal(heatmapText([cell(1, 10, 0), cell(2, 10, 0), cell(3, 10, 0)], 10), "3 hops, 10 columns, no hop loss");
+});
+
+test("a silent hop is no reply and not loss", () => {
+  assert.equal(
+    heatmapText([cell(1, 10, 0), cell(2, 0, 100), cell(3, 10, 0)], 10),
+    "3 hops, 10 columns, no hop loss, 1 hop gave no reply",
+  );
+});
+
+test("a replying hop with loss names that hop", () => {
+  assert.equal(
+    heatmapText([cell(1, 10, 0), cell(2, 9, 12.5), cell(3, 10, 0)], 10),
+    "3 hops, 10 columns, worst hop loss 12.5% at hop 2",
+  );
+});
+
+test("a silent hop and a replying hop with loss are stated apart", () => {
+  assert.equal(
+    heatmapText([cell(1, 0, 100), cell(2, 0, 100), cell(3, 9, 12.5)], 10),
+    "3 hops, 10 columns, worst hop loss 12.5% at hop 3, 2 hops gave no reply",
+  );
+});
+
+test("a hop that replied in one column is not silent", () => {
+  assert.equal(
+    heatmapText([cell(1, 0, 100), cell(1, 10, 0)], 2),
+    "1 hop, 2 columns, no hop loss",
+  );
+});
+
+test("a target loss above zero is stated and the target cell is no hop loss", () => {
+  assert.equal(
+    heatmapText([cell(1, 10, 0), cell(2, 0, 100, 40)], 5),
+    "2 hops, 5 columns, no hop loss, worst target loss 40.0%",
+  );
+  assert.equal(
+    heatmapText([cell(1, 10, 0), cell(2, 10, 0, 0)], 5),
+    "2 hops, 5 columns, no hop loss",
+  );
+});
+
+test("a heatmap with no cell has no summary", () => {
+  assert.equal(summarizeHeatmap([], 0), null);
+  assert.equal(heatmapText([], 0), "no data in range");
+});
+
+test("a cell replied when its reply count is above zero", () => {
+  assert.equal(replyCountOf({ ReplyCount: 7, Sent: 10, LossCount: 9 }), 7);
+  assert.equal(replyCountOf({ Sent: 10, LossCount: 4 }), 6);
+  assert.equal(replyCountOf({ Sent: 3, LossCount: 5 }), 0);
+  assert.equal(cellReplied(1), true);
+  assert.equal(cellReplied(0), false);
+});
+
+test("the hop address text reads no reply for a silent cell", () => {
+  assert.equal(hopAddressText("192.0.2.1", 5), "192.0.2.1");
+  assert.equal(hopAddressText("192.0.2.1", 0), "no reply");
+  assert.equal(hopAddressText("", 5), "no reply");
+});
+
+test("the heatmap tooltip keeps its side away from an edge and stays inside the wrapper", () => {
+  assert.equal(heatmapTooltipLeft(100, 200, 1300), 112);
+  assert.equal(heatmapTooltipLeft(600, 200, 1300), 388);
+  for (const container of [343, 1300]) {
+    for (const x of [28, 100, 220, 221, 300, container - 4]) {
+      const left = heatmapTooltipLeft(x, 250, container);
+      assert.ok(left >= 0 && left + 250 <= container, `${x} ${container}`);
+    }
+  }
+  assert.equal(heatmapTooltipLeft(40, 250, 343), 52);
+  assert.equal(heatmapTooltipLeft(339, 250, 343), 77);
+});
+
+test("the chart name stays at its focus-time value while the chart has focus", () => {
+  assert.equal(stableName(null, "live"), "live");
+  assert.equal(stableName("at focus", "live"), "at focus");
+});
+
+test("an entry with no value at all reads no sample", () => {
+  assert.equal(
+    latencyReadoutText("T", [{ source: "a", median: null, p95: null, loss: null }]),
+    "T: a no sample",
+  );
+  assert.equal(
+    latencyReadoutText("T", [{ source: "", median: null, p95: null, loss: null }]),
+    "T: no sample",
+  );
+  assert.equal(
+    latencyReadoutText("T", [{ source: "a", median: null, p95: null, loss: 100 }]),
+    "T: a median none, p95 none, loss 100.0%",
+  );
+});
+
+test("the HTTP error text is cut at 80 characters", () => {
+  const text = httpReadoutText({ timeText: "T", status: 502, rtt: 1, source: "", error: "x".repeat(100) });
+  assert.ok(text.endsWith(`error ${"x".repeat(80)}`));
+  assert.ok(!text.includes("x".repeat(81)));
 });
 
 test("the loss summary names the worst cycle", () => {
@@ -536,9 +689,10 @@ test("with mouse focus only the cursor arrows act", () => {
       assert.equal(decodeKeyInMode(key(name), kind, false), null, `${name} ${kind}`);
     }
   }
-  assert.deepEqual(decodeKeyInMode(key("ArrowUp"), "heatmap", false), { type: "row", direction: -1 });
-  assert.deepEqual(decodeKeyInMode(key("ArrowDown"), "heatmap", false), { type: "row", direction: 1 });
-  assert.equal(decodeKeyInMode(key("ArrowUp"), "band", false), null);
+  for (const kind of ALL_KINDS) {
+    assert.equal(decodeKeyInMode(key("ArrowUp"), kind, false), null, `ArrowUp ${kind}`);
+    assert.equal(decodeKeyInMode(key("ArrowDown"), kind, false), null, `ArrowDown ${kind}`);
+  }
 });
 
 test("with keyboard mode every key of the map acts as before", () => {

@@ -4,7 +4,6 @@ import {
   edgeIndex,
   formatLocalTime,
   isKeyboardMode,
-  isZoomed,
   keyHelpText,
   moveIndex,
   moveRow,
@@ -13,6 +12,7 @@ import {
   pickAnnouncement,
   resolveZoomNow,
   shouldAnnounce,
+  stableName,
   type Announcement,
   zoomAnnouncement,
   zoomIn,
@@ -60,7 +60,6 @@ export interface ChartKeyboard {
   focusProps: FocusProps;
   focusClassName: string;
   cursor: ChartCursor | null;
-  keyboardMode: boolean;
   onPointerLeave: () => void;
   liveRegion: ReactNode;
   keyHelp: ReactNode;
@@ -96,6 +95,7 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
   const focusVisibleRef = useRef(false);
   const [announcement, setAnnouncement] = useState<Announcement>({ text: "", seq: 0 });
   const [focusVisible, setFocusVisible] = useState(false);
+  const [nameAtFocus, setNameAtFocus] = useState<string | null>(null);
 
   const announce = useCallback((text: string) => {
     setAnnouncement((previous) => nextAnnouncement(previous, text));
@@ -136,7 +136,7 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     let result: ZoomResult = { changed: false };
     if (action.type === "zoomIn") result = zoomIn(window, current.sec);
     else if (action.type === "zoomOut") result = zoomOut(window, current.sec, rangeSpanSec, resolveZoomNow(Date.now() / 1000, toSec));
-    else if (action.type === "zoomReset" && isZoomed(window, rangeSpanSec)) result = zoomReset(window, rangeSpanSec);
+    else if (action.type === "zoomReset") result = zoomReset(window, rangeSpanSec);
     if (!result.changed) return;
     onZoomChange(result.window);
     announce(zoomAnnouncement(result.window));
@@ -202,12 +202,14 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
   const onFocus = useCallback((e: FocusEvent<HTMLElement>) => {
     focusVisibleRef.current = matchesFocusVisible(e.currentTarget);
     setFocusVisible(focusVisibleRef.current);
+    setNameAtFocus(optionsRef.current.name);
   }, []);
 
   const onBlur = useCallback(() => {
     repeatedRef.current = false;
     focusVisibleRef.current = false;
     setFocusVisible(false);
+    setNameAtFocus(null);
     commitCursor(null);
     announce("");
   }, [announce, commitCursor]);
@@ -248,7 +250,7 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     focusProps: {
       role: "application",
       "aria-roledescription": "interactive chart",
-      "aria-label": options.name,
+      "aria-label": stableName(nameAtFocus, options.name),
       "aria-describedby": helpId,
       tabIndex: 0,
       onKeyDown,
@@ -258,7 +260,6 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     },
     focusClassName: "chart-focus",
     cursor,
-    keyboardMode,
     onPointerLeave,
     liveRegion,
     keyHelp,

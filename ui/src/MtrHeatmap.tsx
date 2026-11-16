@@ -4,11 +4,17 @@ import { lossColor } from "./palette";
 import { cycleAtSec } from "./chartUtils";
 import {
   chartName,
+  cellReplied,
   clampBoxStart,
   formatLocalTime,
   heatmapNoDataText,
   heatmapReadoutText,
   heatmapSummaryText,
+  heatmapTooltipLeft,
+  hopAddressText,
+  replyCountOf,
+  summarizeHeatmap,
+  type HeatmapCellInput,
   type HeatmapSummary,
 } from "./chartA11y";
 import { useChartKeyboard } from "./useChartKeyboard";
@@ -291,20 +297,32 @@ function PathHeatmap({
     return byCycle;
   }, [targetLoss]);
 
-  const heatmapSummary = useMemo((): HeatmapSummary => {
-    let worstLoss: number | null = null;
-    let worstHop: number | null = null;
-    for (const [hop, row] of rows) {
-      for (const p of row.values()) {
-        const loss = p.MaxLossPct ?? p.LossPct;
-        if (worstLoss == null || loss > worstLoss) {
-          worstLoss = loss;
-          worstHop = hop;
+  const heatmapSummary = useMemo((): HeatmapSummary | null => {
+    const targetRows = new Map<number, number>();
+    if (probeType === "mtr") {
+      for (const t of cycles) {
+        if (!targetLossByCycle.has(t)) continue;
+        for (let r = visibleHops.length - 1; r >= 0; r--) {
+          if (rows.get(visibleHops[r])?.has(t)) {
+            targetRows.set(t, visibleHops[r]);
+            break;
+          }
         }
       }
     }
-    return { hops: visibleHops.length, columns: cycles.length, worstLoss, worstHop };
-  }, [rows, cycles, visibleHops]);
+    const cells: HeatmapCellInput[] = [];
+    for (const [hop, row] of rows) {
+      for (const [t, p] of row) {
+        cells.push({
+          hop,
+          replies: replyCountOf(p),
+          lossPct: p.MaxLossPct ?? p.LossPct,
+          targetLossPct: targetRows.get(t) === hop ? targetLossByCycle.get(t)?.LossPct : undefined,
+        });
+      }
+    }
+    return summarizeHeatmap(cells, cycles.length);
+  }, [rows, cycles, visibleHops, targetLossByCycle, probeType]);
 
   const keyboard = useChartKeyboard({
     kind: "heatmap",
@@ -332,7 +350,7 @@ function PathHeatmap({
         ip: p.IP,
         lossPct: p.MaxLossPct ?? p.LossPct,
         worstOfBucket: p.MaxLossPct != null,
-        replies: p.ReplyCount ?? Math.max(0, p.Sent - p.LossCount),
+        replies: replyCountOf(p),
         sent: p.Sent,
         targetLoss: target?.LossPct,
         unreach: p.Unreach,
@@ -431,8 +449,7 @@ function PathHeatmap({
           // muted "no reply" neutral instead of the loss ramp so transit noise
           // doesn't read as a genuine outage; only hops that actually replied
           // get the red ramp.
-          const replyCount = p.ReplyCount ?? Math.max(0, p.Sent - p.LossCount);
-          ctx.fillStyle = replyCount > 0 ? lossColor(worst, heatOk, theme) : noReply;
+          ctx.fillStyle = cellReplied(replyCountOf(p)) ? lossColor(worst, heatOk, theme) : noReply;
           ctx.fillRect(x, y, Math.max(1, colW), actualRowH - 1);
         }
       }
@@ -562,15 +579,18 @@ function PathHeatmap({
   }, []);
 
   const tipRef = useRef<HTMLDivElement | null>(null);
-  const [tipTop, setTipTop] = useState<number | null>(null);
+  const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null);
   useLayoutEffect(() => {
     const tip = tipRef.current;
     const wrap = wrapRef.current;
     if (!tip || !wrap || !hover) {
-      setTipTop(null);
+      setTipPos(null);
       return;
     }
-    setTipTop(clampBoxStart(Math.max(0, hover.y - 10), tip.offsetHeight, wrap.clientHeight, "end"));
+    setTipPos({
+      left: heatmapTooltipLeft(hover.x, tip.offsetWidth, wrap.clientWidth),
+      top: clampBoxStart(Math.max(0, hover.y - 10), tip.offsetHeight, wrap.clientHeight, "end"),
+    });
   }, [hover]);
 
   function pickAtX(clientX: number): number | null {
@@ -750,11 +770,7 @@ function PathHeatmap({
         <div
           ref={tipRef}
           className="mtr-heatmap-tip"
-          style={
-            hover.x > 220
-              ? { right: `calc(100% - ${hover.x}px + 12px)`, top: tipTop ?? Math.max(0, hover.y - 10) }
-              : { left: hover.x + 12, top: tipTop ?? Math.max(0, hover.y - 10) }
-          }
+          style={tipPos ?? { left: hover.x + 12, top: Math.max(0, hover.y - 10) }}
         >
           <div className="mtr-heatmap-tip-head">
             hop {hover.hop} · {formatLocalTime(hover.sec)}
@@ -762,13 +778,13 @@ function PathHeatmap({
           {hoverHostname && (
             <div className="mtr-heatmap-tip-hostname">{hoverHostname}</div>
           )}
-          <div>{hover.p.IP || "no reply"}</div>
+          <div>{hopAddressText(hover.p.IP, replyCountOf(hover.p))}</div>
           <div>
             loss {(hover.p.MaxLossPct ?? hover.p.LossPct).toFixed(1)}%
             {hover.p.MaxLossPct != null ? " (worst cycle)" : ""}
           </div>
           <div>
-            replies {hover.p.ReplyCount ?? Math.max(0, hover.p.Sent - hover.p.LossCount)}/{hover.p.Sent}
+            replies {replyCountOf(hover.p)}/{hover.p.Sent}
           </div>
           {probeType === "mtr" && hover.target && hover.target.LossPct > 0 && (
             <div>

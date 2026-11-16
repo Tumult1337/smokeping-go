@@ -68,11 +68,11 @@ export function decodeKey(input: KeyInput, kind: ChartKind): KeyAction | null {
     case "+":
       return repeat || !supportsZoom(kind) ? null : { type: "zoomIn" };
     case "=":
-      return shiftKey || repeat || !supportsZoom(kind) ? null : { type: "zoomIn" };
+      return repeat || !supportsZoom(kind) ? null : { type: "zoomIn" };
     case "-":
-      return shiftKey || repeat || !supportsZoom(kind) ? null : { type: "zoomOut" };
+      return repeat || !supportsZoom(kind) ? null : { type: "zoomOut" };
     case "0":
-      return shiftKey || repeat || !supportsZoom(kind) ? null : { type: "zoomReset" };
+      return repeat || !supportsZoom(kind) ? null : { type: "zoomReset" };
     case "Escape":
       return shiftKey || repeat ? null : { type: "escape" };
     default:
@@ -83,8 +83,7 @@ export function decodeKey(input: KeyInput, kind: ChartKind): KeyAction | null {
 export function decodeKeyInMode(input: KeyInput, kind: ChartKind, keyboardMode: boolean): KeyAction | null {
   const action = decodeKey(input, kind);
   if (keyboardMode || !action) return action;
-  const movesCursor =
-    (action.type === "step" && (input.key === "ArrowLeft" || input.key === "ArrowRight")) || action.type === "row";
+  const movesCursor = action.type === "step" && (input.key === "ArrowLeft" || input.key === "ArrowRight");
   return movesCursor ? action : null;
 }
 
@@ -152,7 +151,7 @@ export function zoomIn(current: ZoomWindow, cursorSec: number): ZoomResult {
   if (!whole || !Number.isFinite(cursorSec)) return { changed: false };
   const span = whole.to - whole.from;
   if (!(span > MIN_ZOOM_SPAN_SEC)) return { changed: false };
-  const newSpan = Math.max(MIN_ZOOM_SPAN_SEC, Math.floor(span / ZOOM_FACTOR));
+  const newSpan = Math.floor(span / ZOOM_FACTOR);
   const from = Math.max(whole.from, Math.min(Math.round(cursorSec - newSpan / 2), whole.to - newSpan));
   return { changed: true, window: { from, to: from + newSpan } };
 }
@@ -166,8 +165,9 @@ export function zoomOut(current: ZoomWindow, cursorSec: number, rangeSpanSec: nu
   const newSpan = span * ZOOM_FACTOR;
   if (newSpan >= rangeSpanSec) return { changed: true, window: null };
   const now = Math.floor(nowSec);
-  const earliest = now - Math.floor(rangeSpanSec);
-  const from = Math.max(earliest, Math.min(Math.round(cursorSec - newSpan / 2), now - newSpan));
+  const lowest = whole.to - newSpan;
+  const highest = Math.min(whole.from, now - newSpan);
+  const from = Math.max(lowest, Math.min(Math.round(cursorSec - newSpan / 2), highest));
   return { changed: true, window: { from, to: from + newSpan } };
 }
 
@@ -187,6 +187,68 @@ export function formatLocalTime(sec: number, format?: TimeFormat): string {
 
 export function isKeyboardMode(cursorExists: boolean, keyboardFocus: boolean): boolean {
   return cursorExists || keyboardFocus;
+}
+
+export function stableName(nameAtFocus: string | null, currentName: string): string {
+  return nameAtFocus ?? currentName;
+}
+
+const HEATMAP_TIP_FLIP_X = 220;
+const HEATMAP_TIP_GAP = 12;
+
+export function heatmapTooltipLeft(anchorX: number, boxWidth: number, containerWidth: number): number {
+  const desired = anchorX > HEATMAP_TIP_FLIP_X ? anchorX - HEATMAP_TIP_GAP - boxWidth : anchorX + HEATMAP_TIP_GAP;
+  return clampBoxStart(desired, boxWidth, containerWidth, "start");
+}
+
+export function replyCountOf(cell: { ReplyCount?: number; Sent: number; LossCount: number }): number {
+  return cell.ReplyCount ?? Math.max(0, cell.Sent - cell.LossCount);
+}
+
+export function cellReplied(replyCount: number): boolean {
+  return replyCount > 0;
+}
+
+export function hopAddressText(ip: string, replyCount: number): string {
+  return cellReplied(replyCount) && ip ? ip : "no reply";
+}
+
+export interface HeatmapCellInput {
+  hop: number;
+  replies: number;
+  lossPct: number;
+  targetLossPct?: number;
+}
+
+export function summarizeHeatmap(cells: readonly HeatmapCellInput[], columns: number): HeatmapSummary | null {
+  if (cells.length === 0) return null;
+  const hops = new Set<number>();
+  const repliedHops = new Set<number>();
+  let worstLoss: number | null = null;
+  let worstHop: number | null = null;
+  let targetLoss: number | null = null;
+  for (const cell of cells) {
+    hops.add(cell.hop);
+    if (cell.targetLossPct != null) {
+      repliedHops.add(cell.hop);
+      if (targetLoss == null || cell.targetLossPct > targetLoss) targetLoss = cell.targetLossPct;
+      continue;
+    }
+    if (!cellReplied(cell.replies)) continue;
+    repliedHops.add(cell.hop);
+    if (worstLoss == null || cell.lossPct > worstLoss) {
+      worstLoss = cell.lossPct;
+      worstHop = cell.hop;
+    }
+  }
+  return {
+    hops: hops.size,
+    columns,
+    worstLoss,
+    worstHop,
+    silentHops: hops.size - repliedHops.size,
+    targetLoss: targetLoss != null && targetLoss > 0 ? targetLoss : null,
+  };
 }
 
 export function clampBoxStart(desiredStart: number, boxSize: number, containerSize: number, oversize: "start" | "end"): number {
@@ -266,6 +328,8 @@ export interface HeatmapSummary {
   columns: number;
   worstLoss: number | null;
   worstHop: number | null;
+  silentHops: number;
+  targetLoss: number | null;
 }
 
 export function heatmapSummaryText(summary: HeatmapSummary | null, loading: boolean): string {
@@ -274,7 +338,9 @@ export function heatmapSummaryText(summary: HeatmapSummary | null, loading: bool
       s.worstLoss != null && s.worstLoss > 0 && s.worstHop != null
         ? `worst hop loss ${number1(s.worstLoss, "%")} at hop ${s.worstHop}`
         : "no hop loss";
-    return `${plural(s.hops, "hop")}, ${plural(s.columns, "column")}, ${worst}`;
+    const silent = s.silentHops > 0 ? `, ${plural(s.silentHops, "hop")} gave no reply` : "";
+    const target = s.targetLoss != null && s.targetLoss > 0 ? `, worst target loss ${number1(s.targetLoss, "%")}` : "";
+    return `${plural(s.hops, "hop")}, ${plural(s.columns, "column")}, ${worst}${silent}${target}`;
   });
 }
 
@@ -317,7 +383,10 @@ export interface LatencyReadoutEntry {
 export function latencyReadoutText(timeText: string, entries: readonly LatencyReadoutEntry[]): string {
   const parts = entries.map((entry) => {
     const label = entry.source !== "" ? entry.source : entries.length > 1 ? "default source" : "";
-    const values = `median ${number1(entry.median, " ms")}, p95 ${number1(entry.p95, " ms")}, loss ${number1(entry.loss, "%")}`;
+    const empty = entry.median == null && entry.p95 == null && entry.loss == null;
+    const values = empty
+      ? "no sample"
+      : `median ${number1(entry.median, " ms")}, p95 ${number1(entry.p95, " ms")}, loss ${number1(entry.loss, "%")}`;
     return label ? `${label} ${values}` : values;
   });
   return `${timeText}: ${parts.join("; ")}`;
@@ -367,7 +436,7 @@ export interface HeatmapReadoutInput {
 export function heatmapReadoutText(input: HeatmapReadoutInput): string {
   const parts: string[] = [];
   if (input.hostname) parts.push(input.hostname);
-  parts.push(input.ip || "no reply");
+  parts.push(hopAddressText(input.ip, input.replies));
   parts.push(`loss ${input.lossPct.toFixed(1)}%${input.worstOfBucket ? " worst cycle" : ""}`);
   parts.push(`replies ${input.replies} of ${input.sent}`);
   if (input.targetLoss != null && input.targetLoss > 0) parts.push(`target loss ${input.targetLoss.toFixed(1)}%`);

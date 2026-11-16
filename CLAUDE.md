@@ -366,16 +366,22 @@ Key points a reader can't derive from a single file:
   handlers and the live region. Only the key handler writes the live region, so
   a mouse move or a data refresh never announces, and each announcement
   replaces a keyed child of the region so equal text is announced again. A
-  chart focused by a mouse click and holding no cursor handles only the cursor
-  arrows, so the page keys keep scrolling; `isKeyboardMode` decides both that
-  rule and the visibility of the key help. Every time in a live text, a name,
+  chart focused by a mouse click and holding no cursor handles only Left and
+  Right, so every other key, Up and Down included, keeps scrolling the page;
+  `isKeyboardMode` decides both that rule and the visibility of the key help.
+  The `aria-label` of a focused chart keeps its focus-time text (`stableName`),
+  so a refresh never changes what a screen reader reads. Every time in a live text, a name,
   a summary and a tooltip comes from `formatLocalTime`, and `clampBoxStart`
   keeps a chart tooltip inside its host. A keyboard zoom stays inside
   the bounds of the mouse path: whole seconds, a 1 s floor, a ceiling at the
-  selected range (zoom out reads the larger of the client clock and the echoed
+  selected range (zoom out doubles the span, holds the old window and the
+  cursor, and ends at or before the larger of the client clock and the echoed
   `to`), one `onZoomChange` call for each physical press and none when
   the window does not change. The focus element is the uPlot host `div`, not
   `u.over`, because `SmokeChart` rebuilds uPlot when its source set changes.
+  The heatmap name counts loss only for a cell that replied (`cellReplied`,
+  the rule of the canvas) and states silent hops and the end-to-end target
+  loss apart.
 
 - **A config the evaluator cannot apply never becomes current.** Alert
   conditions are parsed in `internal/alert`, which imports `config`, so
