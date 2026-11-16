@@ -147,6 +147,7 @@ func (s *Server) healthTargets() []config.TargetRef {
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
+	r.Use(setSecurityHeaders)
 	r.Use(logRequests(s.log))
 	// gzip JSON responses. A 24h all-sources hops/timeline is ~28 MB raw
 	// JSON; gzip cuts that to ~3 MB. A reverse proxy (Cloudflare, nginx)
@@ -179,27 +180,58 @@ func (s *Server) Router() http.Handler {
 	})
 
 	if s.uiFS != nil {
-		fileServer := http.FileServer(http.FS(s.uiFS))
 		r.Get("/", s.serveIndex)
-		r.Get("/assets/*", fileServer.ServeHTTP)
-		r.Get("/favicon.ico", fileServer.ServeHTTP)
-		// Root-level build output is not enumerable when routes are registered
-		// — `npm run icon` regenerates favicon.svg and icon.svg, and Vite copies
-		// whatever else public/ holds — so try the embedded FS before falling
-		// back to the SPA. Listed routes alone answered /favicon.svg with
-		// index.html at text/html, which a browser rejects as an icon.
-		r.NotFound(func(w http.ResponseWriter, req *http.Request) {
-			name := strings.TrimPrefix(path.Clean(req.URL.Path), "/")
-			if name != "." && fs.ValidPath(name) {
-				if st, err := fs.Stat(s.uiFS, name); err == nil && !st.IsDir() {
-					fileServer.ServeHTTP(w, req)
-					return
-				}
-			}
-			s.serveIndex(w, req)
-		})
+		r.Get("/assets/*", s.serveFileOrNotFound)
+		r.Get("/favicon.ico", s.serveFileOrNotFound)
 	}
+	// `npm run icon` and Vite's public/ copy decide the root build files, so
+	// no route lists them and the fallback consults the embedded FS instead.
+	r.NotFound(s.serveFileOrNotFound)
 	return r
+}
+
+func (s *Server) serveFileOrNotFound(w http.ResponseWriter, r *http.Request) {
+	cleanPath := path.Clean("/" + r.URL.Path)
+	if isAPIPath(cleanPath) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if s.uiFS == nil || hasDotDotElement(r.URL.Path) {
+		http.NotFound(w, r)
+		return
+	}
+	name := strings.TrimPrefix(cleanPath, "/")
+	if !fs.ValidPath(name) {
+		http.NotFound(w, r)
+		return
+	}
+	info, err := fs.Stat(s.uiFS, name)
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", cacheControlFor(name))
+	http.ServeFileFS(w, r, s.uiFS, name)
+}
+
+func isAPIPath(cleanPath string) bool {
+	return cleanPath == "/api" || strings.HasPrefix(cleanPath, "/api/")
+}
+
+func hasDotDotElement(urlPath string) bool {
+	for element := range strings.SplitSeq(urlPath, "/") {
+		if element == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func cacheControlFor(name string) string {
+	if strings.HasPrefix(name, "assets/") {
+		return assetCacheControl
+	}
+	return rootFileCacheControl
 }
 
 // Serve runs the HTTP server and blocks until ctx is cancelled, then gives the
@@ -980,6 +1012,7 @@ func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", rootFileCacheControl)
 	_, _ = w.Write(data)
 }
 

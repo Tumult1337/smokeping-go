@@ -362,12 +362,13 @@ The binary has zero auth on the UI or read API. The `/api/v1/cluster/*`
 endpoints are bearer-token gated, but **everything else is open**.
 Don't expose `:8080` to the public internet without a proxy.
 
-Sketch with Caddy in front, terminating TLS and basic-auth-ing the UI
-while passing the cluster paths through unchanged so slaves can hit
-them with their bearer token:
+Sketch with Caddy in front, terminating TLS, setting HSTS, and
+basic-auth-ing the UI while passing the cluster paths through unchanged
+so slaves can hit them with their bearer token:
 
 ```caddy
 smokeping.example.com {
+    header Strict-Transport-Security "max-age=31536000"
     @cluster path /api/v1/cluster/*
     handle @cluster {
         reverse_proxy gosmokeping:8080
@@ -380,6 +381,44 @@ smokeping.example.com {
     }
 }
 ```
+
+### Response headers
+
+The binary sets these headers on each response that it writes: the UI,
+the API, the cluster endpoints, and each 404 and 405.
+
+| Header | Value |
+|---|---|
+| `Content-Security-Policy` | `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | `accelerometer=(), browsing-topics=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()` |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
+| `Cross-Origin-Resource-Policy` | `same-origin` |
+
+- No page can frame the UI. `frame-ancestors 'none'` and
+  `X-Frame-Options: DENY` deny all framing.
+- The binary serves plain HTTP, so it sends no
+  `Strict-Transport-Security`. The TLS proxy sets HSTS, as the Caddy
+  sample does.
+- Do not add the headers of the table again in the proxy. A second
+  copy gives duplicate headers, and a browser applies each
+  `Content-Security-Policy` that it receives.
+- `net/http` writes some error responses itself, for example a 400 for
+  a malformed request line. These responses carry none of the headers.
+
+### Caching and unknown paths
+
+- Each file below `/assets/` has a content hash in its name, so it gets
+  `Cache-Control: public, max-age=31536000, immutable` (one year).
+- `/`, `/theme.js`, `/favicon.svg`, `/icon.svg`, and each other root
+  file get `Cache-Control: no-cache`. A browser revalidates them on
+  each use.
+- API responses carry no `Cache-Control`.
+- Each unknown path gets status 404. Below `/api/`, the body is JSON:
+  `{"error":"not found"}`. Below `/api/v1/cluster/`, the bearer check
+  answers first, so a request without a valid token gets 401.
 
 ---
 

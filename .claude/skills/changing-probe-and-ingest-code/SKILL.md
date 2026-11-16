@@ -116,7 +116,7 @@ rewrite it to match.
   cannot detect `Bootstrap` skipping `addColumnStatements`. The production
   instance is always the upgrade case; test it by dropping the columns and
   re-bootstrapping.
-- `ui/` has no test runner. Verification there is the compiler, reasoning, or a
+- `cd ui && npm test` runs the UI tests. Other verification there is the compiler, reasoning, or a
   manual reproduction against a real server — say which, and never claim more.
 - `docs/superpowers/` is gitignored, so specs and plans never ride the commits
   that implement them.

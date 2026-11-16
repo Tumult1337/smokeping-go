@@ -9,6 +9,7 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, "../internal/ui/dist"),
     emptyOutDir: true,
+    assetsInlineLimit: 0,
   },
   server: {
     proxy: {

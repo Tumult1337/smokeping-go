@@ -2,26 +2,34 @@ package ui
 
 import (
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
 )
 
-// index.html references /favicon.svg and /icon.svg, and the API resolves them
-// against this FS — so if `npm run icon` output ever stops reaching dist, the
-// SPA fallback answers them with index.html and the tab icon silently
-// disappears. Skips when dist is empty, which is the headless build.
+const requireUIEnv = "GOSMOKEPING_REQUIRE_UI"
+
+// index.html references these root files and the API serves each one only if
+// it is embedded, so a build that stops copying one answers it with a 404.
 func TestEmbeddedDistCarriesTheIconsIndexReferences(t *testing.T) {
+	requireUI := os.Getenv(requireUIEnv) == "1"
 	f := FS()
 	if f == nil {
+		if requireUI {
+			t.Fatalf("dist not built and %s=1: run `make ui`", requireUIEnv)
+		}
 		t.Skip("dist not built; run `make ui`")
 	}
 	index, err := fs.ReadFile(f, "index.html")
 	if err != nil {
 		t.Fatalf("index.html: %v", err)
 	}
-	for _, name := range []string{"favicon.svg", "icon.svg"} {
+	for _, name := range []string{"favicon.svg", "icon.svg", "theme.js"} {
 		if !strings.Contains(string(index), "/"+name) {
-			continue // not referenced by this build
+			if requireUI {
+				t.Errorf("index.html does not reference /%s and %s=1 requires it", name, requireUIEnv)
+			}
+			continue
 		}
 		if _, err := fs.Stat(f, name); err != nil {
 			t.Errorf("index.html references /%s but it is not embedded: %v", name, err)

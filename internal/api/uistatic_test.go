@@ -1,67 +1,233 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"testing/fstest"
 
+	"github.com/tumult/gosmokeping/internal/cluster/master"
 	"github.com/tumult/gosmokeping/internal/config"
+	"github.com/tumult/gosmokeping/internal/scheduler"
 )
 
-// The build emits favicon.svg and icon.svg at the root of dist and index.html
-// references both, but only /assets/* and /favicon.ico were routed — so each
-// matched NotFound and was answered with index.html at text/html, which a
-// browser rejects as an icon. `npm run icon` regenerates those files, so a
-// listed route per name drifts; the fallback consults the embedded FS instead.
-func TestRootBuildAssetsAreServedNotSwallowedBySPAFallback(t *testing.T) {
-	ui := fstest.MapFS{
-		"index.html":  {Data: []byte("<!doctype html><title>gosmokeping</title>")},
-		"favicon.svg": {Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`)},
-		"icon.svg":    {Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`)},
-	}
-	cfg := &config.Config{
-		Listen: ":8080", Interval: 30 * 1e9, Pings: 5,
-		Storage: config.Storage{ClickHouse: config.ClickHouse{Addr: "ch:9000"}},
-		Probes:  map[string]config.Probe{"icmp": {Type: "icmp", Timeout: 1e9}},
-		Targets: []config.Group{{Group: "core", Targets: []config.Target{
-			{Name: "gw", Host: "1.1.1.1", Probe: "icmp"},
-		}}},
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("invalid test config: %v", err)
-	}
-	h := New(Options{
-		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Store: config.NewStore("/dev/null", cfg),
-		UIFS:  ui,
-	}).Router()
+const indexMarker = "<!doctype html"
 
-	for _, name := range []string{"/favicon.svg", "/icon.svg"} {
-		req := httptest.NewRequest(http.MethodGet, name, nil)
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
-
-		if rr.Code != http.StatusOK {
-			t.Errorf("%s: status = %d, want 200", name, rr.Code)
-		}
-		if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "svg") {
-			t.Errorf("%s: Content-Type = %q, want an svg type — text/html is the SPA fallback, which browsers reject as an icon", name, ct)
-		}
-		if strings.Contains(rr.Body.String(), "<!doctype html") {
-			t.Errorf("%s: served index.html instead of the asset", name)
-		}
+func get(t *testing.T, h http.Handler, target string, header http.Header) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	for name, values := range header {
+		req.Header[name] = values
 	}
-
-	// The fallback must still answer an app route with the SPA, or deep links
-	// stop working.
-	req := httptest.NewRequest(http.MethodGet, "/some/app/route", nil)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if !strings.Contains(rr.Body.String(), "<!doctype html") {
-		t.Errorf("app route did not fall back to index.html: %q", rr.Body.String())
+	return rr.Result()
+}
+
+func readBody(t *testing.T, res *http.Response) string {
+	t.Helper()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(body)
+}
+
+// `npm run icon` and Vite's public/ copy decide the root build files, so a
+// listed route per name drifts and the fallback consults the embedded FS.
+func TestRootBuildFilesAreServedAndUnknownPathsGet404(t *testing.T) {
+	ui := testUIFS()
+	h := newTestServer(t, withUIFS(ui))
+
+	served := []struct {
+		target   string
+		fsName   string
+		wantType string
+	}{
+		{target: "/favicon.svg", fsName: "favicon.svg", wantType: "svg"},
+		{target: "/icon.svg", fsName: "icon.svg", wantType: "svg"},
+		{target: "/theme.js", fsName: "theme.js", wantType: "javascript"},
+		{target: fixtureAssetJS, fsName: strings.TrimPrefix(fixtureAssetJS, "/"), wantType: "javascript"},
+		{target: fixtureAssetCSS, fsName: strings.TrimPrefix(fixtureAssetCSS, "/"), wantType: "text/css"},
+	}
+	for _, tc := range served {
+		res := get(t, h, tc.target, nil)
+		body := readBody(t, res)
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", tc.target, res.StatusCode)
+		}
+		if ct := res.Header.Get("Content-Type"); !strings.Contains(ct, tc.wantType) {
+			t.Errorf("%s: Content-Type = %q, want a %s type", tc.target, ct, tc.wantType)
+		}
+		if want := string(ui[tc.fsName].Data); body != want {
+			t.Errorf("%s: body = %q, want the embedded file %q", tc.target, body, want)
+		}
+	}
+
+	res := get(t, h, "/some/app/route", nil)
+	body := readBody(t, res)
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("/some/app/route: status = %d, want 404", res.StatusCode)
+	}
+	assertNotIndexPage(t, "/some/app/route", res, body)
+}
+
+func assertNotIndexPage(t *testing.T, target string, res *http.Response, body string) {
+	t.Helper()
+	if ct := res.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
+		t.Errorf("%s: Content-Type = %q, want no text/html", target, ct)
+	}
+	if strings.Contains(body, indexMarker) {
+		t.Errorf("%s: served the index page: %q", target, body)
+	}
+}
+
+func assertJSONNotFound(t *testing.T, target string, res *http.Response, body string) {
+	t.Helper()
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("%s: status = %d, want 404", target, res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("%s: Content-Type = %q, want application/json", target, ct)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Errorf("%s: body %q is not the API error JSON: %v", target, body, err)
+		return
+	}
+	if payload["error"] == "" || len(payload) != 1 {
+		t.Errorf("%s: body = %q, want one non-empty \"error\" field", target, body)
+	}
+}
+
+func TestUnknownPathsGet404WithJSONBelowAPI(t *testing.T) {
+	routers := []struct {
+		name   string
+		router http.Handler
+	}{
+		{name: "with UI", router: newTestServer(t, withUIFS(testUIFS()))},
+		{name: "headless", router: newTestServer(t)},
+	}
+	apiPaths := []string{
+		"/api",
+		"/api/",
+		"/api/does-not-exist",
+		"/api/v1/does-not-exist",
+		"/api/v1/targets/core/gw/does-not-exist",
+		"/api/v2/health",
+	}
+	otherPaths := []string{"/does-not-exist", "/some/app/route", "/apix", "/favicon.ico"}
+
+	for _, rt := range routers {
+		t.Run(rt.name, func(t *testing.T) {
+			for _, target := range apiPaths {
+				res := get(t, rt.router, target, nil)
+				assertJSONNotFound(t, target, res, readBody(t, res))
+			}
+			for _, target := range otherPaths {
+				res := get(t, rt.router, target, nil)
+				body := readBody(t, res)
+				if res.StatusCode != http.StatusNotFound {
+					t.Errorf("%s: status = %d, want 404", target, res.StatusCode)
+				}
+				assertNotIndexPage(t, target, res, body)
+			}
+		})
+	}
+}
+
+type discardSink struct{}
+
+func (discardSink) OnCycle(context.Context, scheduler.Cycle) {}
+
+func TestUnknownClusterPathAnswersAfterTheBearerCheck(t *testing.T) {
+	const token = "cluster-test-token"
+	log := slog.New(slog.DiscardHandler)
+	masterStore := config.NewStore("", &config.Config{Cluster: &config.Cluster{Token: token}})
+	clusterHandler := master.NewServer(log, masterStore, master.NewRegistry(log), discardSink{}, nil).Handler()
+	h := newTestServer(t, withUIFS(testUIFS()), withClusterHandler(clusterHandler))
+	const target = "/api/v1/cluster/does-not-exist"
+
+	res := get(t, h, target, nil)
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("%s without a token: status = %d, want 401 from the bearer check", target, res.StatusCode)
+	}
+	assertSecurityHeaders(t, res.Header)
+
+	res = get(t, h, target, http.Header{"Authorization": {"Bearer " + token}})
+	assertJSONNotFound(t, target, res, readBody(t, res))
+	assertSecurityHeaders(t, res.Header)
+}
+
+func TestStaticHandlerRefusesTraversalDirectoriesAndFilesOutsideTheUI(t *testing.T) {
+	h := newTestServer(t, withUIFS(testUIFS()))
+	assetName := strings.TrimPrefix(fixtureAssetJS, "/assets/")
+	for _, target := range []string{
+		"/assets/../favicon.svg",
+		"/api/../favicon.svg",
+		"/assets/../index.html",
+		"/%2e%2e/api.go",
+		"/assets/%2e%2e/favicon.svg",
+		"/api.go",
+		"/uistatic_test.go",
+		"/assets",
+		"/assets/",
+	} {
+		res := get(t, h, target, nil)
+		body := readBody(t, res)
+		if res.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", target, res.StatusCode)
+		}
+		if strings.Contains(body, assetName) {
+			t.Errorf("%s: body lists the directory: %q", target, body)
+		}
+		if strings.Contains(body, "package api") {
+			t.Errorf("%s: body is a source file outside the UI", target)
+		}
+		assertNotIndexPage(t, target, res, body)
+	}
+}
+
+func TestCacheControlFollowsTheFileKind(t *testing.T) {
+	const (
+		immutable = "public, max-age=31536000, immutable"
+		noCache   = "no-cache"
+	)
+	h := newTestServer(t, withUIFS(testUIFS()))
+	cases := []struct {
+		target     string
+		wantStatus int
+		wantCache  string
+	}{
+		{target: "/", wantStatus: http.StatusOK, wantCache: noCache},
+		{target: "/theme.js", wantStatus: http.StatusOK, wantCache: noCache},
+		{target: "/favicon.svg", wantStatus: http.StatusOK, wantCache: noCache},
+		{target: "/icon.svg", wantStatus: http.StatusOK, wantCache: noCache},
+		{target: fixtureAssetJS, wantStatus: http.StatusOK, wantCache: immutable},
+		{target: fixtureAssetCSS, wantStatus: http.StatusOK, wantCache: immutable},
+		{target: "/assets/does-not-exist.js", wantStatus: http.StatusNotFound},
+		{target: "/does-not-exist.js", wantStatus: http.StatusNotFound},
+		{target: "/api/v1/health", wantStatus: http.StatusOK},
+		{target: "/api/v1/does-not-exist", wantStatus: http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		res := get(t, h, tc.target, nil)
+		if res.StatusCode != tc.wantStatus {
+			t.Errorf("%s: status = %d, want %d", tc.target, res.StatusCode, tc.wantStatus)
+		}
+		got := res.Header.Values("Cache-Control")
+		if tc.wantCache == "" {
+			if len(got) != 0 {
+				t.Errorf("%s: Cache-Control = %q, want none", tc.target, got)
+			}
+			continue
+		}
+		if len(got) != 1 || got[0] != tc.wantCache {
+			t.Errorf("%s: Cache-Control = %q, want exactly %q", tc.target, got, tc.wantCache)
+		}
 	}
 }

@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useState } from "rea
 
 // Theme preference persisted across reloads. "system" follows the browser's
 // prefers-color-scheme; "light"/"dark" are explicit overrides. The same key
-// is read by the pre-paint inline script in index.html, so keep it in sync.
+// is read by the pre-paint script public/theme.js, so keep it in sync.
 export type ThemePref = "system" | "light" | "dark";
 export type Theme = "light" | "dark";
 

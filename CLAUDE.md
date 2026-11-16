@@ -11,7 +11,9 @@ UI plus a JSON API, and can fire threshold alerts.
 ## Commands
 
 ```bash
-make ui                 # vite build → internal/ui/dist/ (required before `make build`)
+make ui                 # vite build → internal/ui/dist/, then the dist check (required before `make build`)
+cd ui && npm test       # UI tests (node --test tests/*.test.mjs)
+GOSMOKEPING_REQUIRE_UI=1 go test ./internal/ui/ ./internal/api/  # embed test fails, not skips, on an empty dist
 make build              # builds UI first, then `go build`
 make build-nui          # Go-only build (UI must already be built or dist empty)
 make dev                # go run with -log-level debug
@@ -249,6 +251,48 @@ Key points a reader can't derive from a single file:
   repo keeps a `.gitkeep` in it. `FS()` returns nil when dist is empty,
   letting the API run headless (useful for dev / container builds that
   don't need the UI).
+
+  **Response headers.** `setSecurityHeaders` (`internal/api/headers.go`) is
+  the first `r.Use` of `Router()`, so it wraps every response the router
+  writes: UI, API, the mounted cluster handler, each 404, and chi's 405. It sets
+  seven constant headers before it calls `next`, because `net/http` ignores a
+  header set after the response starts: a CSP of `default-src 'none'` with
+  `'self'` for scripts, styles, images, fonts and connections, plus
+  `base-uri 'none'`, `form-action 'none'` and `frame-ancestors 'none'`;
+  `X-Frame-Options: DENY`; `nosniff`; `strict-origin-when-cross-origin`; a
+  permissions policy that denies the device APIs; and same-origin COOP and
+  CORP. Framing is denied. It sends no HSTS: the binary serves plain HTTP, so
+  the TLS proxy sets HSTS and adds none of the other headers again
+  (`docs/docker-master.md` section 7). The values are constants, with no
+  config field.
+
+  **Unknown paths and caching.** `serveFileOrNotFound` is the `NotFound`
+  handler in every mode, with or without a UI. Each unknown path gets 404:
+  below `/api/` (by the cleaned path) the body is `writeErr` JSON, and
+  elsewhere it is the text 404 of `net/http`, never the index page. An
+  existing regular file of the embedded UI is served under the exact name it
+  stat'ed, with `public, max-age=31536000, immutable` below `/assets/` and
+  `no-cache` for `/` and each root file (`/theme.js`, the icons); a path with
+  a `..` element, a directory, or a miss gets 404 with no `Cache-Control`.
+  Below `/api/v1/cluster/` the mounted `BearerAuth` answers before the route
+  match, so an unknown path there gets 401 without a token and the JSON 404
+  with one. API responses carry no `Cache-Control`.
+
+  **CSP-driven build rules.** The pre-paint theme script is
+  `ui/public/theme.js`, loaded by a classic `<script src="/theme.js">` in
+  `<head>` before the module entry, because `script-src 'self'` refuses an
+  inline script. `vite.config.ts` sets `assetsInlineLimit: 0` for
+  `font-src 'self'`: the default limit inlines a small font subset as a
+  `data:` URL, which the CSP refuses. `npm run build` ends with
+  `ui/scripts/check-dist.mjs`, which fails on an asset name with no content
+  hash, a build config that sets `entryFileNames`, `chunkFileNames` or
+  `assetFileNames`, a `url(data:` in built CSS, an inline script or style in
+  the built `index.html`, and a missing `theme.js`. The Vite dev server
+  (`make ui-dev`) sends no CSP, so a CSP check runs only through the Go
+  server. `cd ui && npm test` runs the UI tests.
+  `TestEmbeddedDistCarriesTheIconsIndexReferences` skips on an empty dist
+  unless `GOSMOKEPING_REQUIRE_UI=1`, which makes it fail instead and require
+  `/theme.js` and both icons in `index.html` and in the embed.
 
 - **Icon:** `npm run icon` in `ui/` regenerates `ui/public/favicon.svg`
   (16 bars, for a tab) and `ui/public/icon.svg` (64 bars, for anywhere it
