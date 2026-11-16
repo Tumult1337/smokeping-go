@@ -4,7 +4,7 @@ import type { CyclePoint } from "./api";
 import { paletteForSorted, lossColor, type PaletteEntry } from "./palette";
 import { LossStripCanvas, type LossSeries } from "./LossStrip";
 import { effectiveMin, sourcesKey as sourcesKeyOf, unixSec, windowLoss, decadeSplits, LOG_Y_FLOOR, chartChrome, latencySummary } from "./chartUtils";
-import { chartName, formatLocalTime, latencyReadoutText, latencySummaryText, type LatencyReadoutEntry } from "./chartA11y";
+import { chartName, formatLocalTime, keyboardCursorPlacement, latencyReadoutText, latencySummaryText, type LatencyReadoutEntry } from "./chartA11y";
 import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme, type Theme } from "./theme";
 
@@ -419,7 +419,7 @@ export function SmokeBarChart({ targetId, rangeSpanSec, points, height = 320, fr
     const sec = u.data[0][keyboardCursor.idx];
     if (sec == null) return;
     cursorShown.current = true;
-    u.setCursor({ left: u.valToPos(sec, "x"), top: u.over.clientHeight / 2 });
+    u.setCursor(keyboardCursorPlacement(u.valToPos(sec, "x")));
   }, [keyboardCursor, built, sourcesKey, yScale, theme, fromSec, toSec]);
 
   return (

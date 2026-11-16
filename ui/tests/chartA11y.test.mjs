@@ -5,7 +5,10 @@ import {
   chartName,
   decodeKey,
   decodeKeyInMode,
+  clampBoxStart,
   formatLocalTime,
+  isKeyboardMode,
+  keyboardCursorPlacement,
   nextAnnouncement,
   resolveZoomNow,
   edgeIndex,
@@ -36,6 +39,10 @@ import {
 } from "../src/chartA11y.ts";
 
 const FORMAT = { locale: "en-US", timeZone: "UTC" };
+
+function localeString(sec) {
+  return new Date(sec * 1000).toLocaleString("en-US", { timeZone: "UTC" });
+}
 
 function key(name, overrides = {}) {
   return {
@@ -336,11 +343,10 @@ test("a keyup announces the final value only after repeats", () => {
 });
 
 test("the window text holds both ends in the given zone", () => {
-  const text = windowText(1_700_000_000, 1_700_003_600, FORMAT);
-  assert.match(text, /Nov 14, 2023/);
-  assert.match(text, /10:13:20 PM/);
-  assert.match(text, /11:13:20 PM/);
-  assert.match(text, / to /);
+  assert.equal(
+    windowText(1_700_000_000, 1_700_003_600, FORMAT),
+    `${localeString(1_700_000_000)} to ${localeString(1_700_003_600)}`,
+  );
 });
 
 test("the window text names an unknown window", () => {
@@ -375,7 +381,7 @@ test("the name builder puts the qualifier before the window", () => {
     summary: "x",
     format: FORMAT,
   });
-  assert.match(name, /^MTR per-hop loss heatmap for core\/frankfurt, source slave-1, Nov 14, 2023/);
+  assert.ok(name.startsWith(`MTR per-hop loss heatmap for core/frankfurt, source slave-1, ${localeString(1_700_000_000)} to `));
 });
 
 test("the summaries read loading and no data", () => {
@@ -416,7 +422,7 @@ test("the heatmap summary names the worst hop", () => {
 test("the loss summary names the worst cycle", () => {
   assert.equal(
     lossSummaryText({ lossy: 3, cycles: 60, worstLoss: 40, worstSec: 1_700_000_000 }, false, FORMAT),
-    "3 of 60 cycles lost packets, worst 40.0% at Nov 14, 2023, 10:13:20 PM",
+    `3 of 60 cycles lost packets, worst 40.0% at ${localeString(1_700_000_000)}`,
   );
 });
 
@@ -576,4 +582,52 @@ test("zoom out with a client clock behind the server keeps the cursor in the win
 
 test("the local time text is the locale string of the instant", () => {
   assert.equal(formatLocalTime(1_700_000_000), new Date(1_700_000_000_000).toLocaleString());
+  assert.equal(formatLocalTime(1_700_000_000, FORMAT), localeString(1_700_000_000));
+});
+
+test("every time text in a summary, a name, and an announcement comes from one formatter", () => {
+  const sec = 1_700_000_000;
+  const expected = formatLocalTime(sec, FORMAT);
+  assert.ok(windowText(sec, sec + 60, FORMAT).startsWith(`${expected} to `));
+  assert.ok(lossSummaryText({ lossy: 1, cycles: 1, worstLoss: 5, worstSec: sec }, false, FORMAT).endsWith(` at ${expected}`));
+  assert.ok(zoomAnnouncement({ from: sec, to: sec + 60 }, FORMAT).startsWith(`Zoom ${expected} to `));
+});
+
+test("keyboard mode needs a cursor or keyboard focus", () => {
+  assert.equal(isKeyboardMode(false, false), false);
+  assert.equal(isKeyboardMode(true, false), true);
+  assert.equal(isKeyboardMode(false, true), true);
+  assert.equal(isKeyboardMode(true, true), true);
+});
+
+test("a box stays inside the container at the first, the middle, and the last sample", () => {
+  for (const host of [343, 1300]) {
+    const box = 200;
+    const first = clampBoxStart(0 - box / 2, box, host, "start");
+    const middle = clampBoxStart(host / 2 - box / 2, box, host, "start");
+    const last = clampBoxStart(host - box / 2, box, host, "start");
+    assert.equal(first, 0);
+    assert.equal(middle, host / 2 - box / 2);
+    assert.equal(last, host - box);
+    for (const start of [first, middle, last]) {
+      assert.ok(start >= 0 && start + box <= host);
+    }
+  }
+});
+
+test("a box that is not near an edge keeps its position", () => {
+  assert.equal(clampBoxStart(120, 100, 1000, "start"), 120);
+  assert.equal(clampBoxStart(120, 100, 1000, "end"), 120);
+});
+
+test("a box wider than the container starts at the start or ends at the end", () => {
+  assert.equal(clampBoxStart(30, 400, 343, "start"), 0);
+  assert.equal(clampBoxStart(30, 120, 80, "end"), -40);
+  assert.equal(clampBoxStart(-500, 120, 80, "end"), -40);
+});
+
+test("the keyboard cursor placement hides the horizontal line", () => {
+  const placement = keyboardCursorPlacement(123);
+  assert.equal(placement.left, 123);
+  assert.ok(placement.top < 0);
 });

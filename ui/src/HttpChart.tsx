@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import uPlot, { type Options, type AlignedData } from "uplot";
 import { getHttpSamples, type HttpPoint } from "./api";
 import { paletteForSorted, lossTextColor } from "./palette";
 import { colorFor, statusLabel, statusClass, isSuccess, type StatusClass } from "./httpStatus";
 import { StatusStrip } from "./StatusStrip";
 import { chartChrome } from "./chartUtils";
-import { chartName, formatLocalTime, httpReadoutText, httpSummaryText } from "./chartA11y";
+import { chartName, clampBoxStart, formatLocalTime, httpReadoutText, httpSummaryText } from "./chartA11y";
 import { useChartKeyboard } from "./useChartKeyboard";
 import { useEffectiveTheme } from "./theme";
 
@@ -359,6 +359,18 @@ export function HttpChart({
   }, [keyboardCursor, points, fromSec, toSec, theme]);
 
   const hovered = hover && hover.idx < points.length ? points[hover.idx] : null;
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  const [tipLeft, setTipLeft] = useState<number | null>(null);
+  const tipAnchor = hover ? plotOffsets.left + hover.left : null;
+  useLayoutEffect(() => {
+    const tip = tipRef.current;
+    const host = tip?.parentElement;
+    if (!tip || !host || tipAnchor == null) {
+      setTipLeft(null);
+      return;
+    }
+    setTipLeft(clampBoxStart(tipAnchor - tip.offsetWidth / 2, tip.offsetWidth, host.clientWidth, "start"));
+  }, [tipAnchor, hovered]);
 
   return (
     <div>
@@ -384,11 +396,12 @@ export function HttpChart({
           ))}
         {hovered && (
           <div
+            ref={tipRef}
             style={{
               position: "absolute",
-              left: plotOffsets.left + hover!.left,
+              left: tipLeft ?? tipAnchor ?? 0,
               top: hover!.top,
-              transform: "translate(-50%, -100%)",
+              transform: tipLeft == null ? "translate(-50%, -100%)" : "translateY(-100%)",
               marginTop: -8,
               pointerEvents: "none",
               background: "var(--surface-inset)",

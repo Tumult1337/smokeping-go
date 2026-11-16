@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getHopsTimeline, type HopPoint, type HopTimelineLoss } from "./api";
 import { lossColor } from "./palette";
 import { cycleAtSec } from "./chartUtils";
 import {
   chartName,
+  clampBoxStart,
   formatLocalTime,
   heatmapNoDataText,
   heatmapReadoutText,
@@ -560,6 +561,18 @@ function PathHeatmap({
     return () => ro.disconnect();
   }, []);
 
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  const [tipTop, setTipTop] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const tip = tipRef.current;
+    const wrap = wrapRef.current;
+    if (!tip || !wrap || !hover) {
+      setTipTop(null);
+      return;
+    }
+    setTipTop(clampBoxStart(Math.max(0, hover.y - 10), tip.offsetHeight, wrap.clientHeight, "end"));
+  }, [hover]);
+
   function pickAtX(clientX: number): number | null {
     const canvas = canvasRef.current;
     if (!canvas || cycles.length === 0) return null;
@@ -735,11 +748,12 @@ function PathHeatmap({
       <canvas ref={canvasRef} style={{ display: "block" }} />
       {hover && (
         <div
+          ref={tipRef}
           className="mtr-heatmap-tip"
           style={
             hover.x > 220
-              ? { right: `calc(100% - ${hover.x}px + 12px)`, top: Math.max(0, hover.y - 10) }
-              : { left: hover.x + 12, top: Math.max(0, hover.y - 10) }
+              ? { right: `calc(100% - ${hover.x}px + 12px)`, top: tipTop ?? Math.max(0, hover.y - 10) }
+              : { left: hover.x + 12, top: tipTop ?? Math.max(0, hover.y - 10) }
           }
         >
           <div className="mtr-heatmap-tip-head">

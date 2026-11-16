@@ -180,33 +180,29 @@ export function shouldAnnounce(phase: "down" | "up", repeat: boolean, repeatedSi
   return phase === "down" ? !repeat : repeatedSinceDown;
 }
 
-const formatters = new Map<string, Intl.DateTimeFormat>();
-
-function instantFormatter(format?: TimeFormat): Intl.DateTimeFormat {
-  const cacheKey = `${format?.locale ?? ""}|${format?.timeZone ?? ""}`;
-  let formatter = formatters.get(cacheKey);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat(format?.locale, {
-      dateStyle: "medium",
-      timeStyle: "medium",
-      timeZone: format?.timeZone,
-    });
-    formatters.set(cacheKey, formatter);
-  }
-  return formatter;
+export function formatLocalTime(sec: number, format?: TimeFormat): string {
+  const options = format?.timeZone ? { timeZone: format.timeZone } : undefined;
+  return new Date(sec * 1000).toLocaleString(format?.locale, options);
 }
 
-export function formatInstant(sec: number, format?: TimeFormat): string {
-  return instantFormatter(format).format(new Date(sec * 1000)).replace(/\u202f/g, " ");
+export function isKeyboardMode(cursorExists: boolean, keyboardFocus: boolean): boolean {
+  return cursorExists || keyboardFocus;
 }
 
-export function formatLocalTime(sec: number): string {
-  return new Date(sec * 1000).toLocaleString();
+export function clampBoxStart(desiredStart: number, boxSize: number, containerSize: number, oversize: "start" | "end"): number {
+  if (boxSize > containerSize) return oversize === "start" ? 0 : containerSize - boxSize;
+  return Math.max(0, Math.min(desiredStart, containerSize - boxSize));
+}
+
+const HIDDEN_CURSOR_COORD = -10;
+
+export function keyboardCursorPlacement(left: number): { left: number; top: number } {
+  return { left, top: HIDDEN_CURSOR_COORD };
 }
 
 export function windowText(fromSec: number | undefined, toSec: number | undefined, format?: TimeFormat): string {
   if (fromSec == null || toSec == null) return "window not loaded";
-  return `${formatInstant(fromSec, format)} to ${formatInstant(toSec, format)}`;
+  return `${formatLocalTime(fromSec, format)} to ${formatLocalTime(toSec, format)}`;
 }
 
 export interface ChartNameInput {
@@ -293,7 +289,7 @@ export function lossSummaryText(summary: LossSummary | null, loading: boolean, f
   return summaryState(summary, loading, (s) => {
     const head = `${s.lossy} of ${plural(s.cycles, "cycle")} lost packets`;
     if (s.worstLoss == null || s.worstSec == null) return head;
-    return `${head}, worst ${number1(s.worstLoss, "%")} at ${formatInstant(s.worstSec, format)}`;
+    return `${head}, worst ${number1(s.worstLoss, "%")} at ${formatLocalTime(s.worstSec, format)}`;
   });
 }
 

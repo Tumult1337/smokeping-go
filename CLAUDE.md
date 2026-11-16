@@ -367,7 +367,10 @@ Key points a reader can't derive from a single file:
   a mouse move or a data refresh never announces, and each announcement
   replaces a keyed child of the region so equal text is announced again. A
   chart focused by a mouse click and holding no cursor handles only the cursor
-  arrows, so the page keys keep scrolling. A keyboard zoom stays inside
+  arrows, so the page keys keep scrolling; `isKeyboardMode` decides both that
+  rule and the visibility of the key help. Every time in a live text, a name,
+  a summary and a tooltip comes from `formatLocalTime`, and `clampBoxStart`
+  keeps a chart tooltip inside its host. A keyboard zoom stays inside
   the bounds of the mouse path: whole seconds, a 1 s floor, a ceiling at the
   selected range (zoom out reads the larger of the client clock and the echoed
   `to`), one `onZoomChange` call for each physical press and none when

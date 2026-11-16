@@ -3,6 +3,7 @@ import {
   decodeKeyInMode,
   edgeIndex,
   formatLocalTime,
+  isKeyboardMode,
   isZoomed,
   keyHelpText,
   moveIndex,
@@ -59,7 +60,7 @@ export interface ChartKeyboard {
   focusProps: FocusProps;
   focusClassName: string;
   cursor: ChartCursor | null;
-  focused: boolean;
+  keyboardMode: boolean;
   onPointerLeave: () => void;
   liveRegion: ReactNode;
   keyHelp: ReactNode;
@@ -94,7 +95,7 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
   const [cursor, setCursor] = useState<ChartCursor | null>(null);
   const focusVisibleRef = useRef(false);
   const [announcement, setAnnouncement] = useState<Announcement>({ text: "", seq: 0 });
-  const [focused, setFocused] = useState(false);
+  const [focusVisible, setFocusVisible] = useState(false);
 
   const announce = useCallback((text: string) => {
     setAnnouncement((previous) => nextAnnouncement(previous, text));
@@ -145,14 +146,13 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     (e: KeyboardEvent<HTMLElement>) => {
       const { kind, times, rowCount = 0, readout, onPick } = optionsRef.current;
       const input = keyInput(e);
-      const keyboardMode = cursorRef.current != null || focusVisibleRef.current;
+      const keyboardMode = isKeyboardMode(cursorRef.current != null, focusVisibleRef.current);
       const action = decodeKeyInMode(input, kind, keyboardMode);
       if (!action) {
         if (input.repeat && decodeKeyInMode({ ...input, repeat: false }, kind, keyboardMode)) e.preventDefault();
         return;
       }
       e.preventDefault();
-      setFocused(true);
       if (e.repeat) repeatedRef.current = true;
       else repeatedRef.current = false;
       if (action.type === "escape") {
@@ -192,7 +192,7 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
   const onKeyUp = useCallback((e: KeyboardEvent<HTMLElement>) => {
     const { kind, readout } = optionsRef.current;
     const current = cursorRef.current;
-    const action = decodeKeyInMode({ ...keyInput(e), repeat: false }, kind, current != null);
+    const action = decodeKeyInMode({ ...keyInput(e), repeat: false }, kind, isKeyboardMode(current != null, focusVisibleRef.current));
     if (!action || (action.type !== "step" && action.type !== "row")) return;
     const repeated = repeatedRef.current;
     repeatedRef.current = false;
@@ -201,13 +201,13 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
 
   const onFocus = useCallback((e: FocusEvent<HTMLElement>) => {
     focusVisibleRef.current = matchesFocusVisible(e.currentTarget);
-    setFocused(focusVisibleRef.current);
+    setFocusVisible(focusVisibleRef.current);
   }, []);
 
   const onBlur = useCallback(() => {
     repeatedRef.current = false;
     focusVisibleRef.current = false;
-    setFocused(false);
+    setFocusVisible(false);
     commitCursor(null);
     announce("");
   }, [announce, commitCursor]);
@@ -237,8 +237,9 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
       {announcement.text && <span key={announcement.seq}>{announcement.text}</span>}
     </div>
   );
+  const keyboardMode = isKeyboardMode(cursor != null, focusVisible);
   const keyHelp = (
-    <div id={helpId} className={focused ? "chart-key-help" : "sr-only"}>
+    <div id={helpId} className={keyboardMode ? "chart-key-help" : "sr-only"}>
       {keyHelpText(options.kind)}
     </div>
   );
@@ -257,7 +258,7 @@ export function useChartKeyboard(options: Options): ChartKeyboard {
     },
     focusClassName: "chart-focus",
     cursor,
-    focused,
+    keyboardMode,
     onPointerLeave,
     liveRegion,
     keyHelp,
