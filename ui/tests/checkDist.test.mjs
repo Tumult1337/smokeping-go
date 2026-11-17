@@ -10,6 +10,7 @@ import {
   checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset,
   checkCodeHoldsNoDataURL,
   checkIndexHasNoInlineCode,
+  checkIndexHoldsOneDarkReaderLockMetaInHeadBeforeTheFirstScript,
   checkIndexLoadsThemeScriptBeforeTheModuleEntry,
   checkPublicDirHoldsNoAssetsFolder,
   checkThemeScriptIsBuilt,
@@ -21,7 +22,7 @@ import {
 const HASHED_JS = "assets/index-AbCd12_-.js";
 const HASHED_CSS = "assets/index-Xy-9zZ0a.css";
 const CLEAN_HEAD = '<script src="/theme.js"></script><script type="module" crossorigin src="/assets/index-AbCd12_-.js"></script><link rel="stylesheet" href="/assets/index-Xy-9zZ0a.css">';
-const CLEAN_INDEX = `<!doctype html><html lang="en"><head><meta charset="UTF-8"><title>gosmokeping</title>${CLEAN_HEAD}</head><body><div id="root"></div></body></html>`;
+const CLEAN_INDEX = `<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="darkreader-lock"><title>gosmokeping</title>${CLEAN_HEAD}</head><body><div id="root"></div></body></html>`;
 const DEFAULT_BUILD = { assetsInlineLimit: 0 };
 
 function tempDir(t, files = {}) {
@@ -170,6 +171,21 @@ test("index.html must load a parser-blocking /theme.js before the module entry",
   assertOneFailure(check(CLEAN_INDEX.replace(theme, '<script type="text/javascript" src="/theme.js"></script>')), /type attribute/, "type");
   assertOneFailure(check(CLEAN_INDEX.replace(entry, "")), /no module entry/, "no module entry");
   assertOneFailure(check(CLEAN_INDEX.replace(`${theme}${entry}`, `${entry}${theme}`)), /after the module entry/, "theme after entry");
+});
+
+test("index.html must hold one darkreader-lock meta tag in head before the first script", (t) => {
+  const check = (html) => checkIndexHoldsOneDarkReaderLockMetaInHeadBeforeTheFirstScript(tempDir(t, { "index.html": html }));
+  const lock = '<meta name="darkreader-lock">';
+  assert.deepEqual(check(CLEAN_INDEX), []);
+  assertOneFailure(check(CLEAN_INDEX.replace(lock, "")), /holds no darkreader-lock meta tag/, "tag missing");
+  assertOneFailure(check(CLEAN_INDEX.replace(lock, `${lock}${lock}`)), /holds 2 darkreader-lock meta tags/, "tag twice");
+  assertOneFailure(check(CLEAN_INDEX.replace(lock, `<!-- ${lock} -->`)), /holds no darkreader-lock meta tag/, "tag in a comment");
+  assertOneFailure(check(CLEAN_INDEX.replace(lock, "").replace("</head>", `${lock}</head>`)), /after the first script/, "tag after the first script");
+  assertOneFailure(check(CLEAN_INDEX.replace(lock, "").replace("<body>", `<body>${lock}`)), /not inside head/, "tag in body");
+  assertOneFailure(checkIndexHoldsOneDarkReaderLockMetaInHeadBeforeTheFirstScript(tempDir(t)), /index\.html is missing/, "no index.html");
+  const rule = distRules(tempDir(t, { "index.html": CLEAN_INDEX.replace(lock, "") }), { build: DEFAULT_BUILD }).find(([name]) => name.includes("darkreader-lock"));
+  assert.ok(rule, "distRules has no darkreader-lock rule");
+  assertOneFailure(rule[1](), /holds no darkreader-lock meta tag/, "distRules without the tag");
 });
 
 test("the build config must keep the default output names and inline no asset", async (t) => {

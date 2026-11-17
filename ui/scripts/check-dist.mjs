@@ -86,6 +86,22 @@ export function checkIndexLoadsThemeScriptBeforeTheModuleEntry(distDir) {
   return failures;
 }
 
+export function checkIndexHoldsOneDarkReaderLockMetaInHeadBeforeTheFirstScript(distDir) {
+  const indexPath = path.join(distDir, "index.html");
+  if (!existsSync(indexPath)) return [`${indexPath} is missing`];
+  const tags = startTags(readFileSync(indexPath, "utf8"));
+  const lockIndexes = tags.flatMap((tag, index) => (tag.name === "meta" && tag.attributes.get("name") === "darkreader-lock" ? [index] : []));
+  if (lockIndexes.length === 0) return ["index.html holds no darkreader-lock meta tag, so Dark Reader adds an inline script that the CSP refuses"];
+  if (lockIndexes.length > 1) return [`index.html holds ${lockIndexes.length} darkreader-lock meta tags, not 1`];
+  const [lockIndex] = lockIndexes;
+  const headIndex = tags.findIndex((tag) => tag.name === "head");
+  const bodyIndex = tags.findIndex((tag) => tag.name === "body");
+  if (headIndex === -1 || headIndex > lockIndex || (bodyIndex !== -1 && bodyIndex < lockIndex)) return ["the darkreader-lock meta tag is not inside head"];
+  const scriptIndex = tags.findIndex((tag) => tag.name === "script");
+  if (scriptIndex !== -1 && scriptIndex < lockIndex) return ["the darkreader-lock meta tag comes after the first script"];
+  return [];
+}
+
 export function checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset(config) {
   const builds = [["build", config.build], ...Object.entries(config.environments ?? {}).map(([name, env]) => [`environments.${name}.build`, env.build])];
   const failures = [];
@@ -122,6 +138,7 @@ export function distRules(distDir, config) {
     ["built index.html has no inline script, style, or event handler", () => checkIndexHasNoInlineCode(distDir)],
     ["theme.js is built", () => checkThemeScriptIsBuilt(distDir)],
     ["built index.html loads /theme.js before the module entry", () => checkIndexLoadsThemeScriptBeforeTheModuleEntry(distDir)],
+    ["built index.html holds one darkreader-lock meta tag in head before the first script", () => checkIndexHoldsOneDarkReaderLockMetaInHeadBeforeTheFirstScript(distDir)],
     ["build config keeps the hashed default names and inlines no asset", () => checkBuildConfigKeepsTheHashedDefaultNamesAndInlinesNoAsset(config)],
   ];
 }

@@ -327,7 +327,10 @@ Key points a reader can't derive from a single file:
   URLs; an inline script, an `on*` event handler attribute, a style attribute
   or a `<style>` element in the built `index.html`; a missing `theme.js`; and
   a built `index.html` that loads no classic `/theme.js` before the module
-  entry. `ui/tests/checkDist.test.mjs` tests each rule. `check-dist` reads
+  entry; and a built `index.html` that does not hold exactly one
+  `<meta name="darkreader-lock">` in `<head>` before its first script, which
+  stops Dark Reader from adding an inline script that the CSP refuses.
+  `ui/tests/checkDist.test.mjs` tests each rule. `check-dist` reads
   each tag of the built `index.html`, and `npm test` reads its script tags,
   through `ui/scripts/html-script-tags.mjs`. That scanner skips an HTML
   comment with the closers of the HTML parser, and skips the text of a
